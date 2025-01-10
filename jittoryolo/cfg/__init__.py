@@ -9,7 +9,7 @@ from typing import Dict, List, Union
 
 import cv2
 
-from ultralytics.utils import (
+from jittoryolo.utils import (
     ASSETS,
     DEFAULT_CFG,
     DEFAULT_CFG_DICT,

@@ -15,7 +15,7 @@ from pathlib import Path
 import jittor as jt
 from jittoryolo.engine.model import Model
 from jittoryolo.utils.downloads import attempt_download_asset
-from jittoryolo.utils.torch_utils import model_info
+from jittoryolo.utils.jittor_utils import model_info
 
 from .predict import NASPredictor
 from .val import NASValidator

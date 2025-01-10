@@ -171,7 +171,7 @@ def _build_sam(
             embed_dim=encoder_embed_dim,
             img_size=image_size,
             mlp_ratio=4,
-            norm_layer=partial(torch.nn.LayerNorm, eps=1e-6),
+            norm_layer=partial(jt.nn.LayerNorm, eps=1e-6),
             num_heads=encoder_num_heads,
             patch_size=vit_patch_size,
             qkv_bias=True,
@@ -207,7 +207,7 @@ def _build_sam(
     if checkpoint is not None:
         checkpoint = attempt_download_asset(checkpoint)
         with open(checkpoint, "rb") as f:
-            state_dict = torch.load(f)
+            state_dict = jt.load(f)
         sam.load_state_dict(state_dict)
     sam.eval()
     return sam
@@ -302,7 +302,7 @@ def _build_sam2(
     if checkpoint is not None:
         checkpoint = attempt_download_asset(checkpoint)
         with open(checkpoint, "rb") as f:
-            state_dict = torch.load(f)["model"]
+            state_dict = jt.load(f)["model"]
         sam2.load_state_dict(state_dict)
     sam2.eval()
     return sam2

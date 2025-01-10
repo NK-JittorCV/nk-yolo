@@ -17,7 +17,7 @@ from jittoryolo.data.augment import LetterBox
 from jittoryolo.engine.predictor import BasePredictor
 from jittoryolo.engine.results import Results
 from jittoryolo.utils import DEFAULT_CFG, ops
-from jittoryolo.utils.torch_utils import select_device, smart_inference_mode
+from jittoryolo.utils.jittor_utils import select_device, smart_inference_mode
 
 from .amg import (
     batch_iterator,
@@ -337,6 +337,7 @@ class Predictor(BasePredictor):
             >>> im = torch.rand(1, 3, 1024, 1024)  # Example input image
             >>> masks, scores, boxes = predictor.generate(im)
         """
+        #TODO:修改torchvision
         import torchvision  # scope for faster 'import jittoryolo'
 
         self.segment_all = True
@@ -471,7 +472,7 @@ class Predictor(BasePredictor):
         names = dict(enumerate(str(i) for i in range(len(pred_masks))))
 
         if not isinstance(orig_imgs, list):  # input images are a jt.Var, not a list
-            orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)
+            orig_imgs = ops.convert_jittor2numpy_batch(orig_imgs)
 
         results = []
         for masks, orig_img, img_path in zip([pred_masks], orig_imgs, self.batch[0]):

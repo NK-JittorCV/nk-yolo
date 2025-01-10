@@ -16,7 +16,7 @@ Key Features:
 from pathlib import Path
 
 from jittoryolo.engine.model import Model
-from jittoryolo.utils.torch_utils import model_info
+from jittoryolo.utils.jittor_utils import model_info
 
 from .build import build_sam
 from .predict import Predictor, SAM2Predictor
