@@ -2,8 +2,6 @@
 
 ## 1. Overview File Tree
 
-参考：https://github.com/ultralytics/ultralytics
-
 ```
 - docs: [CYM][❓]
 - examples: [CYM][❓]
@@ -22,8 +20,8 @@
         - __init__.py
     - data: [MGH][❓]
     - engine: [CYM][❓]
-    - models: [HJD][❓]
-    - nn: [HJD][❓]
+    - models: [HJD][✅]
+    - nn: [HJD][✅]
     - solutions: [MGH][❓]
     - utils:
         - callbacks [CYM][✅]
@@ -32,12 +30,12 @@
         - benchmarks.py [HJD][❓]
         - checks.py
         - dist.py
-        - downloads.py [HJD][❓]
-        - errors.py [HJD][❓]
+        - downloads.py [HJD][✅]
+        - errors.py [HJD][✅]
         - files.py
         - instance.py
-        - loss.py [HJD][❓]
-        - metrics.py [HJD][❓]
+        - loss.py [HJD][✅]
+        - metrics.py [HJD][✅]
         - ops.py
         - patches.py
         - plotting.py
