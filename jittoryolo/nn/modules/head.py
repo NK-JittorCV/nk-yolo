@@ -6,7 +6,7 @@ import math
 import jittor as jt
 from jittor import nn
 
-from jittoryolo.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
+from jittoryolo.utils.tal import dist2bbox, dist2rbox, make_anchors
 
 from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto
 from .conv import Conv, DWConv
@@ -39,18 +39,18 @@ class Detect(nn.Module):
         self.stride = jt.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+            [nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch]
         )
         self.cv3 = (
-            nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+            nn.ModuleList([nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch])
             if self.legacy
             else nn.ModuleList(
-                nn.Sequential(
+                [nn.Sequential(
                     nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
                     nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
                     nn.Conv2d(c3, self.nc, 1),
                 )
-                for x in ch
+                for x in ch]
             )
         )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
@@ -100,9 +100,9 @@ class Detect(nn.Module):
         # Inference path
         shape = x[0].shape  # BCHW
         x_cat = jt.concat([xi.view(shape[0], self.no, -1) for xi in x], 2)
-        if self.format != "imx" and (self.dynamic or self.shape != shape):
-            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
-            self.shape = shape
+        # if self.format != "imx" and (self.dynamic or self.shape != shape):
+        self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+        self.shape = shape
 
         if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
             box = x_cat[:, : self.reg_max * 4]
@@ -112,7 +112,7 @@ class Detect(nn.Module):
 
         if self.export and self.format in {"tflite", "edgetpu"}:
             # Precompute normalization factor to increase numerical stability
-            # See https://github.com/ultralytics/ultralytics/issues/7371
+            # See https://github.com/jittoryolo/jittoryolo/issues/7371
             grid_h = shape[2]
             grid_w = shape[3]
             grid_size = jt.Var([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
@@ -162,7 +162,7 @@ class Detect(nn.Module):
         """
         batch_size, anchors, _ = preds.shape  # i.e. shape(16,8400,84)
         boxes, scores = preds.split([4, nc], dim=-1)
-        index = scores.amax(dim=-1).topk(min(max_det, anchors))[1].unsqueeze(-1)
+        index = scores.max(dim=-1).topk(min(max_det, anchors))[1].unsqueeze(-1)
         boxes = boxes.gather(dim=1, index=index.repeat(1, 1, 4))
         scores = scores.gather(dim=1, index=index.repeat(1, 1, nc))
         scores, index = scores.flatten(1).topk(min(max_det, anchors))
@@ -334,7 +334,7 @@ class WorldDetect(Detect):
 
         if self.export and self.format in {"tflite", "edgetpu"}:
             # Precompute normalization factor to increase numerical stability
-            # See https://github.com/ultralytics/ultralytics/issues/7371
+            # See https://github.com/jittoryolo/jittoryolo/issues/7371
             grid_h = shape[2]
             grid_w = shape[3]
             grid_size = jt.Var([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
@@ -617,11 +617,11 @@ class v10Detect(Detect):
         c3 = max(ch[0], min(self.nc, 100))  # channels
         # Light cls head
         self.cv3 = nn.ModuleList(
-            nn.Sequential(
+            [nn.Sequential(
                 nn.Sequential(Conv(x, x, 3, g=x), Conv(x, c3, 1)),
                 nn.Sequential(Conv(c3, c3, 3, g=c3), Conv(c3, c3, 1)),
                 nn.Conv2d(c3, self.nc, 1),
             )
-            for x in ch
+            for x in ch]
         )
         self.one2one_cv3 = copy.deepcopy(self.cv3)

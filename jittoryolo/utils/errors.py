@@ -1,11 +1,11 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# jittoryolo YOLO 🚀, AGPL-3.0 license
 
 from jittoryolo.utils import emojis
 
 
 class HUBModelError(Exception):
     """
-    Custom exception class for handling errors related to model fetching in Ultralytics YOLO.
+    Custom exception class for handling errors related to model fetching in jittoryolo YOLO.
 
     This exception is raised when a requested model is not found or cannot be retrieved.
     The message is also processed to include emojis for better user experience.
@@ -14,7 +14,7 @@ class HUBModelError(Exception):
         message (str): The error message displayed when the exception is raised.
 
     Note:
-        The message is automatically processed through the 'emojis' function from the 'ultralytics.utils' package.
+        The message is automatically processed through the 'emojis' function from the 'jittoryolo.utils' package.
     """
 
     def __init__(self, message="Model not found. Please check model URL and try again."):

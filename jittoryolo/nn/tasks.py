@@ -74,7 +74,7 @@ from jittoryolo.utils.loss import (
 )
 from jittoryolo.utils.ops import make_divisible
 from jittoryolo.utils.plotting import feature_visualization
-from jittoryolo.utils.torch_utils import (
+from jittoryolo.utils.jittor_utils import (
     fuse_conv_and_bn,
     fuse_deconv_and_bn,
     initialize_weights,
@@ -91,7 +91,7 @@ except ImportError:
 
 
 class BaseModel(nn.Module):
-    """The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family."""
+    """The BaseModel class serves as a base class for all the models in the jittoryolo YOLO family."""
 
     def execute(self, x, *args, **kwargs):
         """
@@ -823,7 +823,7 @@ def jittor_safe_load(weight, safe_only=False):
                 "jittoryolo.yolo.data": "jittoryolo.data",
             },
             attributes={
-                "jittoryolo.nn.modules.block.Silence": "jt.nn.Identity",  # YOLOv9e
+                "jittoryolo.nn.modules.block.Silence": "jittor.nn.Identity",  # YOLOv9e
                 "jittoryolo.nn.tasks.YOLOv10DetectionModel": "jittoryolo.nn.tasks.DetectionModel",  # YOLOv10
                 "jittoryolo.utils.loss.v10DetectLoss": "jittoryolo.utils.loss.E2EDetectLoss",  # YOLOv10
             },
@@ -836,7 +836,7 @@ def jittor_safe_load(weight, safe_only=False):
                 with open(file, "rb") as f:
                     ckpt = jt.load(f, pickle_module=safe_pickle)
             else:
-                ckpt = jt.load(file, map_location="cpu")
+                ckpt = jt.load(file)
 
     except ModuleNotFoundError as e:  # e.name is missing module name
         if e.name == "models":
@@ -856,7 +856,7 @@ def jittor_safe_load(weight, safe_only=False):
             f"run a command with an official YOLO model, i.e. 'yolo predict model=yolov8n.pt'"
         )
         check_requirements(e.name)  # install missing module
-        ckpt = jt.load(file, map_location="cpu")
+        ckpt = jt.load(file)
 
     if not isinstance(ckpt, dict):
         # File is likely a YOLO instance saved with i.e. jt.save(model, "saved_model.pt")
@@ -872,7 +872,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     """Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a."""
     ensemble = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
-        ckpt, w = torch_safe_load(w)  # load ckpt
+        ckpt, w = jittor_safe_load(w)  # load ckpt
         args = {**DEFAULT_CFG_DICT, **ckpt["train_args"]} if "train_args" in ckpt else None  # combined args
         model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
 
@@ -908,7 +908,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
 
 def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     """Loads a single model weights."""
-    ckpt, weight = torch_safe_load(weight)  # load ckpt
+    ckpt, weight = jittor_safe_load(weight)  # load ckpt
     args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
     model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
 
@@ -1081,7 +1081,7 @@ def yaml_model_load(path):
     path = Path(path)
     if path.stem in (f"yolov{d}{x}6" for x in "nsmlx" for d in (5, 8)):
         new_stem = re.sub(r"(\d+)([nslmx])6(.+)?$", r"\1\2-p6\3", path.stem)
-        LOGGER.warning(f"WARNING ⚠️ Ultralytics YOLO P6 models now use -p6 suffix. Renaming {path.stem} to {new_stem}.")
+        LOGGER.warning(f"WARNING ⚠️ jittoryolo YOLO P6 models now use -p6 suffix. Renaming {path.stem} to {new_stem}.")
         path = path.with_name(new_stem + path.suffix)
 
     unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml

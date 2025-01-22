@@ -7,7 +7,7 @@ from jittor import nn
 from jittor.init import constant_,xavier_uniform_
 
 from .conv import Conv
-from .utils import _get_clones, inverse_sigmoid, multi_scale_deformable_attn_pytorch
+from .utils import _get_clones, inverse_sigmoid
 
 __all__ = (
     "TransformerEncoderLayer",

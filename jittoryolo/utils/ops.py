@@ -1,3 +1,5 @@
+# jittoryolo YOLO 🚀, AGPL-3.0 license
+
 import contextlib
 import math
 import re
@@ -6,7 +8,7 @@ import time
 import cv2
 import numpy as np
 import jittor as jt
-from jittor import nn
+import jittor.nn as nn
 
 from jittoryolo.utils import LOGGER
 from jittoryolo.utils.metrics import batch_probiou
@@ -27,13 +29,13 @@ class Profile(contextlib.ContextDecorator):
         ```
     """
 
-    def __init__(self, t=0.0, device: torch.device = None):
+    def __init__(self, t=0.0, device=None):
         """
         Initialize the Profile class.
 
         Args:
             t (float): Initial time. Defaults to 0.0.
-            device (torch.device): Devices used for model inference. Defaults to None (cpu).
+            device (jt.device): Devices used for model inference. Defaults to None (cpu).
         """
         self.t = t
         self.device = device
@@ -56,9 +58,7 @@ class Profile(contextlib.ContextDecorator):
     def time(self):
         """Get current time."""
         if self.cuda:
-            #TODO:没找到合适的替换
-            jt.sync()
-
+            jt.cuda.synchronize(self.device)
         return time.time()
 
 
@@ -75,10 +75,6 @@ def segment2box(segment, width=640, height=640):
         (np.ndarray): the minimum and maximum x and y values of the segment.
     """
     x, y = segment.T  # segment xy
-    # any 3 out of 4 sides are outside the image, clip coordinates first, https://github.com/jittoryolo/jittoryolo/pull/18294
-    if np.array([x.min() < 0, y.min() < 0, x.max() > width, y.max() > height]).sum() >= 3:
-        x = x.clip(0, width)
-        y = y.clip(0, height)
     inside = (x >= 0) & (y >= 0) & (x <= width) & (y <= height)
     x = x[inside]
     y = y[inside]
@@ -211,7 +207,6 @@ def non_max_suppression(
             shape (num_boxes, 6 + num_masks) containing the kept boxes, with columns
             (x1, y1, x2, y2, confidence, class, mask1, mask2, ...).
     """
-    import torchvision  # scope for faster 'import jittoryolo'
 
     # Checks
     assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
@@ -293,7 +288,7 @@ def non_max_suppression(
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-            i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+            i = jt.ops.nms(boxes, scores, iou_thres)  # NMS
         i = i[:max_det]  # limit detections
 
         # # Experimental
@@ -303,7 +298,7 @@ def non_max_suppression(
         #     from .metrics import box_iou
         #     iou = box_iou(boxes[i], boxes) > iou_thres  # IoU matrix
         #     weights = iou * scores[None]  # box weights
-        #     x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
+        #     x[i, :4] = jt.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
         #     redundant = True  # require redundant detections
         #     if redundant:
         #         i = i[iou.sum(1) > 1]  # require redundancy
@@ -321,11 +316,11 @@ def clip_boxes(boxes, shape):
     Takes a list of bounding boxes and a shape (height, width) and clips the bounding boxes to the shape.
 
     Args:
-        boxes (jt.Var): The bounding boxes to clip.
-        shape (tuple): The shape of the image.
+        boxes (jt.Var): the bounding boxes to clip
+        shape (tuple): the shape of the image
 
     Returns:
-        (jt.Var | numpy.ndarray): The clipped boxes.
+        (jt.Var | numpy.ndarray): Clipped boxes
     """
     if isinstance(boxes, jt.Var):  # faster individually (WARNING: inplace .clamp_() Apple MPS bug)
         boxes[..., 0] = boxes[..., 0].clamp(0, shape[1])  # x1
@@ -363,9 +358,9 @@ def scale_image(masks, im0_shape, ratio_pad=None):
     Takes a mask, and resizes it to the original image size.
 
     Args:
-        masks (np.ndarray): Resized and padded masks/images, [h, w, num]/[h, w, 3].
-        im0_shape (tuple): The original image shape.
-        ratio_pad (tuple): The ratio of the padding to the original image.
+        masks (np.ndarray): resized and padded masks/images, [h, w, num]/[h, w, 3].
+        im0_shape (tuple): the original image shape
+        ratio_pad (tuple): the ratio of the padding to the original image.
 
     Returns:
         masks (np.ndarray): The masks that are being returned with shape [h, w, num].
@@ -405,7 +400,7 @@ def xyxy2xywh(x):
         y (np.ndarray | jt.Var): The bounding box coordinates in (x, y, width, height) format.
     """
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
-    y = empty_like(x)  # faster than clone/copy
+    y = jt.empty_like(x) if isinstance(x, jt.Var) else np.empty_like(x)  # faster than clone/copy
     y[..., 0] = (x[..., 0] + x[..., 2]) / 2  # x center
     y[..., 1] = (x[..., 1] + x[..., 3]) / 2  # y center
     y[..., 2] = x[..., 2] - x[..., 0]  # width
@@ -425,7 +420,7 @@ def xywh2xyxy(x):
         y (np.ndarray | jt.Var): The bounding box coordinates in (x1, y1, x2, y2) format.
     """
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
-    y = empty_like(x)  # faster than clone/copy
+    y = jt.empty_like(x) if isinstance(x, jt.Var) else np.empty_like(x)  # faster than clone/copy
     xy = x[..., :2]  # centers
     wh = x[..., 2:] / 2  # half width-height
     y[..., :2] = xy - wh  # top left xy
@@ -448,7 +443,7 @@ def xywhn2xyxy(x, w=640, h=640, padw=0, padh=0):
             x1,y1 is the top-left corner, x2,y2 is the bottom-right corner of the bounding box.
     """
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
-    y = empty_like(x)  # faster than clone/copy
+    y = jt.empty_like(x) if isinstance(x, jt.Var) else np.empty_like(x)  # faster than clone/copy
     y[..., 0] = w * (x[..., 0] - x[..., 2] / 2) + padw  # top left x
     y[..., 1] = h * (x[..., 1] - x[..., 3] / 2) + padh  # top left y
     y[..., 2] = w * (x[..., 0] + x[..., 2] / 2) + padw  # bottom right x
@@ -474,7 +469,7 @@ def xyxy2xywhn(x, w=640, h=640, clip=False, eps=0.0):
     if clip:
         x = clip_boxes(x, (h - eps, w - eps))
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
-    y = empty_like(x)  # faster than clone/copy
+    y = jt.empty_like(x) if isinstance(x, jt.Var) else np.empty_like(x)  # faster than clone/copy
     y[..., 0] = ((x[..., 0] + x[..., 2]) / 2) / w  # x center
     y[..., 1] = ((x[..., 1] + x[..., 3]) / 2) / h  # y center
     y[..., 2] = (x[..., 2] - x[..., 0]) / w  # width
@@ -565,7 +560,7 @@ def xywhr2xyxyxyxy(x):
         (numpy.ndarray | jt.Var): Converted corner points of shape (n, 4, 2) or (b, n, 4, 2).
     """
     cos, sin, cat, stack = (
-        (jt.cos, jt.sin, jt.cat, jt.stack)
+        (jt.cos, jt.sin, jt.concat, jt.stack)
         if isinstance(x, jt.Var)
         else (np.cos, np.sin, np.concatenate, np.stack)
     )
@@ -629,12 +624,9 @@ def resample_segments(segments, n=1000):
         segments (list): the resampled segments.
     """
     for i, s in enumerate(segments):
-        if len(s) == n:
-            continue
         s = np.concatenate((s, s[0:1, :]), axis=0)
-        x = np.linspace(0, len(s) - 1, n - len(s) if len(s) < n else n)
+        x = np.linspace(0, len(s) - 1, n)
         xp = np.arange(len(s))
-        x = np.insert(x, np.searchsorted(x, xp), xp) if len(s) < n else x
         segments[i] = (
             np.concatenate([np.interp(x, xp, s[:, i]) for i in range(2)], dtype=np.float32).reshape(2, -1).T
         )  # segment xy
@@ -689,7 +681,7 @@ def process_mask(protos, masks_in, bboxes, shape, upsample=False):
 
     masks = crop_mask(masks, downsampled_bboxes)  # CHW
     if upsample:
-        masks = jt.nn.interpolate(masks[None], shape, mode="bilinear", align_corners=False)[0]  # CHW
+        masks = nn.interpolate(masks[None], shape, mode="bilinear", align_corners=False)[0]  # CHW
     return masks.gt_(0.0)
 
 
@@ -699,12 +691,12 @@ def process_mask_native(protos, masks_in, bboxes, shape):
 
     Args:
         protos (jt.Var): [mask_dim, mask_h, mask_w]
-        masks_in (jt.Var): [n, mask_dim], n is number of masks after nms.
-        bboxes (jt.Var): [n, 4], n is number of masks after nms.
-        shape (tuple): The size of the input image (h,w).
+        masks_in (jt.Var): [n, mask_dim], n is number of masks after nms
+        bboxes (jt.Var): [n, 4], n is number of masks after nms
+        shape (tuple): the size of the input image (h,w)
 
     Returns:
-        masks (jt.Var): The returned masks with dimensions [h, w, n].
+        masks (jt.Var): The returned masks with dimensions [h, w, n]
     """
     c, mh, mw = protos.shape  # CHW
     masks = (masks_in @ protos.float().view(c, -1)).view(-1, mh, mw)
@@ -733,7 +725,7 @@ def scale_masks(masks, shape, padding=True):
     bottom, right = (int(mh - pad[1]), int(mw - pad[0]))
     masks = masks[..., top:bottom, left:right]
 
-    masks = jt.nn.interpolate(masks, shape, mode="bilinear", align_corners=False)  # NCHW
+    masks = nn.interpolate(masks, shape, mode="bilinear", align_corners=False)  # NCHW
     return masks
 
 
@@ -790,29 +782,23 @@ def regularize_rboxes(rboxes):
     return jt.stack([x, y, w_, h_, t], dim=-1)  # regularized boxes
 
 
-def masks2segments(masks, strategy="all"):
+def masks2segments(masks, strategy="largest"):
     """
     It takes a list of masks(n,h,w) and returns a list of segments(n,xy).
 
     Args:
         masks (jt.Var): the output of the model, which is a tensor of shape (batch_size, 160, 160)
-        strategy (str): 'all' or 'largest'. Defaults to all
+        strategy (str): 'concat' or 'largest'. Defaults to largest
 
     Returns:
         segments (List): list of segment masks
     """
-    from jittoryolo.data.converter import merge_multi_segment
-
     segments = []
     for x in masks.int().cpu().numpy().astype("uint8"):
         c = cv2.findContours(x, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
         if c:
-            if strategy == "all":  # merge and concatenate all segments
-                c = (
-                    np.concatenate(merge_multi_segment([x.reshape(-1, 2) for x in c]))
-                    if len(c) > 1
-                    else c[0].reshape(-1, 2)
-                )
+            if strategy == "concat":  # concatenate all segments
+                c = np.concatenate([x.reshape(-1, 2) for x in c])
             elif strategy == "largest":  # select largest segment
                 c = np.array(c[np.array([len(x) for x in c]).argmax()]).reshape(-1, 2)
         else:
@@ -823,15 +809,15 @@ def masks2segments(masks, strategy="all"):
 
 def convert_torch2numpy_batch(batch: jt.Var) -> np.ndarray:
     """
-    Convert a batch of FP32 torch tensors (0.0-1.0) to a NumPy uint8 array (0-255), changing from BCHW to BHWC layout.
+    Convert a batch of FP32 jt tensors (0.0-1.0) to a NumPy uint8 array (0-255), changing from BCHW to BHWC layout.
 
     Args:
-        batch (jt.Var): Input tensor batch of shape (Batch, Channels, Height, Width) and dtype torch.float32.
+        batch (jt.Var): Input tensor batch of shape (Batch, Channels, Height, Width) and dtype jt.float32.
 
     Returns:
         (np.ndarray): Output NumPy array batch of shape (Batch, Height, Width, Channels) and dtype uint8.
     """
-    return (batch.permute(0, 2, 3, 1).contiguous() * 255).clamp(0, 255).to(torch.uint8).cpu().numpy()
+    return (batch.permute(0, 2, 3, 1).contiguous() * 255).clamp(0, 255).to(jt.uint8).cpu().numpy()
 
 
 def clean_str(s):
@@ -845,12 +831,3 @@ def clean_str(s):
         (str): a string with special characters replaced by an underscore _
     """
     return re.sub(pattern="[|@#!¡·$€%&()=?¿^*;:,¨´><+]", repl="_", string=s)
-
-
-def empty_like(x):
-    """Creates empty jt.Var or np.ndarray with same shape as input and float32 dtype."""
-    #TODO:jittor没有empty_like 用zeros_like代替
-    return (
-    jt.zeros_like(x, dtype=jt.float32) if isinstance(x, jt.Var) else np.empty_like(x, dtype=np.float32)
-   )
-

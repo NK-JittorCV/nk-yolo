@@ -10,8 +10,8 @@ class AGLU(nn.Module):
         """Initialize the Unified activation function."""
         super().__init__()
         self.act = nn.Softplus(beta=-1.0)
-        self.lambd = nn.Parameter(nn.init.uniform_(torch.empty(1, device=device, dtype=dtype)))  # lambda parameter
-        self.kappa = nn.Parameter(nn.init.uniform_(torch.empty(1, device=device, dtype=dtype)))  # kappa parameter
+        self.lambd = nn.Parameter(nn.init.uniform_(jt.empty(1, device=device, dtype=dtype)))  # lambda parameter
+        self.kappa = nn.Parameter(nn.init.uniform_(jt.empty(1, device=device, dtype=dtype)))  # kappa parameter
 
     def execute(self, x: jt.Var) -> jt.Var:
         """Compute the forward pass of the Unified activation function."""
