@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# jittoryolo YOLO 🚀, AGPL-3.0 license
 
 import shutil
 import subprocess
@@ -7,14 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Union
 
-import cv2
-
 from jittoryolo.utils import (
     ASSETS,
     DEFAULT_CFG,
     DEFAULT_CFG_DICT,
     DEFAULT_CFG_PATH,
-    DEFAULT_SOL_DICT,
     IS_VSCODE,
     LOGGER,
     RANK,
@@ -33,71 +30,42 @@ from jittoryolo.utils import (
     yaml_print,
 )
 
-# Define valid solutions
-SOLUTION_MAP = {
-    "count": ("ObjectCounter", "count"),
-    "heatmap": ("Heatmap", "generate_heatmap"),
-    "queue": ("QueueManager", "process_queue"),
-    "speed": ("SpeedEstimator", "estimate_speed"),
-    "workout": ("AIGym", "monitor"),
-    "analytics": ("Analytics", "process_data"),
-    "trackzone": ("TrackZone", "trackzone"),
-    "help": None,
-}
-
 # Define valid tasks and modes
-MODES = {"train", "val", "predict", "benchmark"}
-# [TODO] "export", "track"
-TASKS = {"detect"}
-# [TODO] "segment", "classify", "pose", "obb"
+MODES = {"train", "val", "predict", "export", "track", "benchmark"}
+TASKS = {"detect", "segment", "classify", "pose", "obb"}
 TASK2DATA = {
     "detect": "coco8.yaml",
+    "segment": "coco8-seg.yaml",
+    "classify": "imagenet10",
+    "pose": "coco8-pose.yaml",
+    "obb": "dota8.yaml",
 }
 TASK2MODEL = {
     "detect": "yolo11n.pt",
+    "segment": "yolo11n-seg.pt",
+    "classify": "yolo11n-cls.pt",
+    "pose": "yolo11n-pose.pt",
+    "obb": "yolo11n-obb.pt",
 }
 TASK2METRIC = {
     "detect": "metrics/mAP50-95(B)",
+    "segment": "metrics/mAP50-95(M)",
+    "classify": "metrics/accuracy_top1",
+    "pose": "metrics/mAP50-95(P)",
+    "obb": "metrics/mAP50-95(B)",
 }
 MODELS = {TASK2MODEL[task] for task in TASKS}
 
 ARGV = sys.argv or ["", ""]  # sometimes sys.argv = []
-SOLUTIONS_HELP_MSG = f"""
-    Arguments received: {str(['yolo'] + ARGV[1:])}. Ultralytics 'yolo solutions' usage overview:
-
-        yolo solutions SOLUTION ARGS
-
-        Where SOLUTION (optional) is one of {list(SOLUTION_MAP.keys())[:-1]}
-              ARGS (optional) are any number of custom 'arg=value' pairs like 'show_in=True' that override defaults 
-                  at https://docs.ultralytics.com/usage/cfg
-                
-    1. Call object counting solution
-        yolo solutions count source="path/to/video/file.mp4" region=[(20, 400), (1080, 400), (1080, 360), (20, 360)]
-
-    2. Call heatmaps solution
-        yolo solutions heatmap colormap=cv2.COLORMAP_PARAULA model=yolo11n.pt
-
-    3. Call queue management solution
-        yolo solutions queue region=[(20, 400), (1080, 400), (1080, 360), (20, 360)] model=yolo11n.pt
-
-    4. Call workouts monitoring solution for push-ups
-        yolo solutions workout model=yolo11n-pose.pt kpts=[6, 8, 10]
-
-    5. Generate analytical graphs
-        yolo solutions analytics analytics_type="pie"
-    
-    6. Track objects within specific zones
-        yolo solutions trackzone source="path/to/video/file.mp4" region=[(150, 150), (1130, 150), (1130, 570), (150, 570)] 
-    """
 CLI_HELP_MSG = f"""
-    Arguments received: {str(['yolo'] + ARGV[1:])}. Ultralytics 'yolo' commands use the following syntax:
+    Arguments received: {str(['yolo'] + ARGV[1:])}. jittoryolo 'yolo' commands use the following syntax:
 
         yolo TASK MODE ARGS
 
         Where   TASK (optional) is one of {TASKS}
                 MODE (required) is one of {MODES}
                 ARGS (optional) are any number of custom 'arg=value' pairs like 'imgsz=320' that override defaults.
-                    See all ARGS at https://docs.ultralytics.com/usage/cfg or with 'yolo cfg'
+                    See all ARGS at https://docs.jittoryolo.com/usage/cfg or with 'yolo cfg'
 
     1. Train a detection model for 10 epochs with an initial learning_rate of 0.01
         yolo train data=coco8.yaml model=yolo11n.pt epochs=10 lr0=0.01
@@ -110,26 +78,21 @@ CLI_HELP_MSG = f"""
 
     4. Export a YOLO11n classification model to ONNX format at image size 224 by 128 (no TASK required)
         yolo export model=yolo11n-cls.pt format=onnx imgsz=224,128
-
+    
     5. Streamlit real-time webcam inference GUI
         yolo streamlit-predict
-
-    6. Ultralytics solutions usage
-        yolo solutions count or in {list(SOLUTION_MAP.keys())[1:-1]} source="path/to/video/file.mp4"
-
-    7. Run special commands:
+        
+    6. Run special commands:
         yolo help
         yolo checks
         yolo version
         yolo settings
         yolo copy-cfg
         yolo cfg
-        yolo solutions help
 
-    Docs: https://docs.ultralytics.com
-    Solutions: https://docs.ultralytics.com/solutions/
-    Community: https://community.ultralytics.com
-    GitHub: https://github.com/ultralytics/ultralytics
+    Docs: https://docs.jittoryolo.com
+    Community: https://community.jittoryolo.com
+    GitHub: https://github.com/jittoryolo/jittoryolo
     """
 
 # Define keys for arg type checks
@@ -152,6 +115,7 @@ CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
     "weight_decay",
     "warmup_momentum",
     "warmup_bias_lr",
+    "label_smoothing",
     "hsv_h",
     "hsv_s",
     "hsv_v",
@@ -267,7 +231,7 @@ def get_cfg(cfg: Union[str, Path, Dict, SimpleNamespace] = DEFAULT_CFG_DICT, ove
         (SimpleNamespace): Namespace containing the merged configuration arguments.
 
     Examples:
-        >>> from ultralytics.cfg import get_cfg
+        >>> from jittoryolo.cfg import get_cfg
         >>> config = get_cfg()  # Load default configuration
         >>> config = get_cfg("path/to/config.yaml", overrides={"epochs": 50, "batch_size": 16})
 
@@ -304,7 +268,7 @@ def get_cfg(cfg: Union[str, Path, Dict, SimpleNamespace] = DEFAULT_CFG_DICT, ove
 
 def check_cfg(cfg, hard=True):
     """
-    Checks configuration argument types and values for the Ultralytics library.
+    Checks configuration argument types and values for the jittoryolo library.
 
     This function validates the types and values of configuration arguments, ensuring correctness and converting
     them if necessary. It checks for specific key types defined in global variables such as CFG_FLOAT_KEYS,
@@ -387,7 +351,7 @@ def get_save_dir(args, name=None):
     if getattr(args, "save_dir", None):
         save_dir = args.save_dir
     else:
-        from ultralytics.utils.files import increment_path
+        from jittoryolo.utils.files import increment_path
 
         project = args.project or (ROOT.parent / "tests/tmp/runs" if TESTS_RUNNING else RUNS_DIR) / args.task
         name = name or args.name or f"{args.mode}"
@@ -427,9 +391,6 @@ def _handle_deprecation(custom):
         if key == "line_thickness":
             deprecation_warn(key, "line_width")
             custom["line_width"] = custom.pop("line_thickness")
-        if key == "label_smoothing":
-            deprecation_warn(key)
-            custom.pop("label_smoothing")
 
     return custom
 
@@ -536,9 +497,9 @@ def merge_equals_args(args: List[str]) -> List[str]:
 
 def handle_yolo_hub(args: List[str]) -> None:
     """
-    Handles Ultralytics HUB command-line interface (CLI) commands for authentication.
+    Handles jittoryolo HUB command-line interface (CLI) commands for authentication.
 
-    This function processes Ultralytics HUB CLI commands such as login and logout. It should be called when executing a
+    This function processes jittoryolo HUB CLI commands such as login and logout. It should be called when executing a
     script with arguments related to HUB authentication.
 
     Args:
@@ -551,18 +512,18 @@ def handle_yolo_hub(args: List[str]) -> None:
         ```
 
     Notes:
-        - The function imports the 'hub' module from ultralytics to perform login and logout operations.
+        - The function imports the 'hub' module from jittoryolo to perform login and logout operations.
         - For the 'login' command, if no API key is provided, an empty string is passed to the login function.
         - The 'logout' command does not require any additional arguments.
     """
-    from ultralytics import hub
+    from jittoryolo import hub
 
     if args[0] == "login":
         key = args[1] if len(args) > 1 else ""
-        # Log in to Ultralytics HUB using the provided API key
+        # Log in to jittoryolo HUB using the provided API key
         hub.login(key)
     elif args[0] == "logout":
-        # Log out from Ultralytics HUB
+        # Log out from jittoryolo HUB
         hub.logout()
 
 
@@ -587,9 +548,9 @@ def handle_yolo_settings(args: List[str]) -> None:
         - The function will check for alignment between the provided settings and the existing ones.
         - After processing, the updated settings will be displayed.
         - For more information on handling YOLO settings, visit:
-          https://docs.ultralytics.com/quickstart/#ultralytics-settings
+          https://docs.jittoryolo.com/quickstart/#jittoryolo-settings
     """
-    url = "https://docs.ultralytics.com/quickstart/#ultralytics-settings"  # help URL
+    url = "https://docs.jittoryolo.com/quickstart/#jittoryolo-settings"  # help URL
     try:
         if any(args):
             if args[0] == "reset":
@@ -602,114 +563,17 @@ def handle_yolo_settings(args: List[str]) -> None:
                 SETTINGS.update(new)
 
         print(SETTINGS)  # print the current settings
-        LOGGER.info(f"💡 Learn more about Ultralytics Settings at {url}")
+        LOGGER.info(f"💡 Learn more about jittoryolo Settings at {url}")
     except Exception as e:
         LOGGER.warning(f"WARNING ⚠️ settings error: '{e}'. Please see {url} for help.")
 
 
-def handle_yolo_solutions(args: List[str]) -> None:
-    """
-    Processes YOLO solutions arguments and runs the specified computer vision solutions pipeline.
-
-    Args:
-        args (List[str]): Command-line arguments for configuring and running the Ultralytics YOLO
-            solutions: https://docs.ultralytics.com/solutions/, It can include solution name, source,
-            and other configuration parameters.
-
-    Returns:
-        None: The function processes video frames and saves the output but doesn't return any value.
-
-    Examples:
-        Run people counting solution with default settings:
-        >>> handle_yolo_solutions(["count"])
-
-        Run analytics with custom configuration:
-        >>> handle_yolo_solutions(["analytics", "conf=0.25", "source=path/to/video/file.mp4"])
-
-    Notes:
-        - Default configurations are merged from DEFAULT_SOL_DICT and DEFAULT_CFG_DICT
-        - Arguments can be provided in the format 'key=value' or as boolean flags
-        - Available solutions are defined in SOLUTION_MAP with their respective classes and methods
-        - If an invalid solution is provided, defaults to 'count' solution
-        - Output videos are saved in 'runs/solution/{solution_name}' directory
-        - For 'analytics' solution, frame numbers are tracked for generating analytical graphs
-        - Video processing can be interrupted by pressing 'q'
-        - Processes video frames sequentially and saves output in .avi format
-        - If no source is specified, downloads and uses a default sample video
-    """
-    full_args_dict = {**DEFAULT_SOL_DICT, **DEFAULT_CFG_DICT}  # arguments dictionary
-    overrides = {}
-
-    # check dictionary alignment
-    for arg in merge_equals_args(args):
-        arg = arg.lstrip("-").rstrip(",")
-        if "=" in arg:
-            try:
-                k, v = parse_key_value_pair(arg)
-                overrides[k] = v
-            except (NameError, SyntaxError, ValueError, AssertionError) as e:
-                check_dict_alignment(full_args_dict, {arg: ""}, e)
-        elif arg in full_args_dict and isinstance(full_args_dict.get(arg), bool):
-            overrides[arg] = True
-    check_dict_alignment(full_args_dict, overrides)  # dict alignment
-
-    # Get solution name
-    if args and args[0] in SOLUTION_MAP:
-        if args[0] != "help":
-            s_n = args.pop(0)  # Extract the solution name directly
-        else:
-            LOGGER.info(SOLUTIONS_HELP_MSG)
-    else:
-        LOGGER.warning(
-            f"⚠️ No valid solution provided. Using default 'count'. Available: {', '.join(SOLUTION_MAP.keys())}"
-        )
-        s_n = "count"  # Default solution if none provided
-
-    if args and args[0] == "help":  # Add check for return if user call `yolo solutions help`
-        return
-
-    cls, method = SOLUTION_MAP[s_n]  # solution class name, method name and default source
-
-    from ultralytics import solutions  # import ultralytics solutions
-
-    solution = getattr(solutions, cls)(IS_CLI=True, **overrides)  # get solution class i.e ObjectCounter
-    process = getattr(solution, method)  # get specific function of class for processing i.e, count from ObjectCounter
-
-    cap = cv2.VideoCapture(solution.CFG["source"])  # read the video file
-
-    # extract width, height and fps of the video file, create save directory and initialize video writer
-    import os  # for directory creation
-    from pathlib import Path
-
-    from ultralytics.utils.files import increment_path  # for output directory path update
-
-    w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
-    if s_n == "analytics":  # analytical graphs follow fixed shape for output i.e w=1920, h=1080
-        w, h = 1920, 1080
-    save_dir = increment_path(Path("runs") / "solutions" / "exp", exist_ok=False)
-    save_dir.mkdir(parents=True, exist_ok=True)  # create the output directory
-    vw = cv2.VideoWriter(os.path.join(save_dir, "solution.avi"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-
-    try:  # Process video frames
-        f_n = 0  # frame number, required for analytical graphs
-        while cap.isOpened():
-            success, frame = cap.read()
-            if not success:
-                break
-            frame = process(frame, f_n := f_n + 1) if s_n == "analytics" else process(frame)
-            vw.write(frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-    finally:
-        cap.release()
-
-
 def handle_streamlit_inference():
     """
-    Open the Ultralytics Live Inference Streamlit app for real-time object detection.
+    Open the jittoryolo Live Inference Streamlit app for real-time object detection.
 
     This function initializes and runs a Streamlit application designed for performing live object detection using
-    Ultralytics models. It checks for the required Streamlit package and launches the app.
+    jittoryolo models. It checks for the required Streamlit package and launches the app.
 
     Examples:
         >>> handle_streamlit_inference()
@@ -717,10 +581,10 @@ def handle_streamlit_inference():
     Notes:
         - Requires Streamlit version 1.29.0 or higher.
         - The app is launched using the 'streamlit run' command.
-        - The Streamlit app file is located in the Ultralytics package directory.
+        - The Streamlit app file is located in the jittoryolo package directory.
     """
     checks.check_requirements("streamlit>=1.29.0")
-    LOGGER.info("💡 Loading Ultralytics Live Inference app...")
+    LOGGER.info("💡 Loading jittoryolo Live Inference app...")
     subprocess.run(["streamlit", "run", ROOT / "solutions/streamlit_inference.py", "--server.headless", "true"])
 
 
@@ -732,8 +596,9 @@ def parse_key_value_pair(pair: str = "key=value"):
         pair (str): A string containing a key-value pair in the format "key=value".
 
     Returns:
-        key (str): The parsed key.
-        value (str): The parsed value.
+        (tuple): A tuple containing two elements:
+            - key (str): The parsed key.
+            - value (str): The parsed value.
 
     Raises:
         AssertionError: If the value is missing or empty.
@@ -805,9 +670,9 @@ def smart_value(v):
 
 def entrypoint(debug=""):
     """
-    Ultralytics entrypoint function for parsing and executing command-line arguments.
+    jittoryolo entrypoint function for parsing and executing command-line arguments.
 
-    This function serves as the main entry point for the Ultralytics CLI, parsing command-line arguments and
+    This function serves as the main entry point for the jittoryolo CLI, parsing command-line arguments and
     executing the corresponding tasks such as training, validation, prediction, exporting models, and more.
 
     Args:
@@ -826,7 +691,7 @@ def entrypoint(debug=""):
     Notes:
         - If no arguments are passed, the function will display the usage help message.
         - For a list of all available commands and their arguments, see the provided help messages and the
-          Ultralytics documentation at https://docs.ultralytics.com.
+          jittoryolo documentation at https://docs.jittoryolo.com.
     """
     args = (debug.split(" ") if debug else ARGV)[1:]
     if not args:  # no arguments passed
@@ -844,7 +709,6 @@ def entrypoint(debug=""):
         "logout": lambda: handle_yolo_hub(args),
         "copy-cfg": copy_default_cfg,
         "streamlit-predict": lambda: handle_streamlit_inference(),
-        "solutions": lambda: handle_yolo_solutions(args[1:]),
     }
     full_args_dict = {**DEFAULT_CFG_DICT, **{k: None for k in TASKS}, **{k: None for k in MODES}, **special}
 
@@ -916,19 +780,19 @@ def entrypoint(debug=""):
     overrides["model"] = model
     stem = Path(model).stem.lower()
     if "rtdetr" in stem:  # guess architecture
-        from ultralytics import RTDETR
+        from jittoryolo import RTDETR
 
         model = RTDETR(model)  # no task argument
     elif "fastsam" in stem:
-        from ultralytics import FastSAM
+        from jittoryolo import FastSAM
 
         model = FastSAM(model)
-    elif "sam_" in stem or "sam2_" in stem or "sam2.1_" in stem:
-        from ultralytics import SAM
+    elif "sam_" in stem or "sam2_" in stem:
+        from jittoryolo import SAM
 
         model = SAM(model)
     else:
-        from ultralytics import YOLO
+        from jittoryolo import YOLO
 
         model = YOLO(model, task=task)
     if isinstance(overrides.get("pretrained"), str):
@@ -945,9 +809,7 @@ def entrypoint(debug=""):
 
     # Mode
     if mode in {"predict", "track"} and "source" not in overrides:
-        overrides["source"] = (
-            "https://ultralytics.com/images/boats.jpg" if task == "obb" else DEFAULT_CFG.source or ASSETS
-        )
+        overrides["source"] = DEFAULT_CFG.source or ASSETS
         LOGGER.warning(f"WARNING ⚠️ 'source' argument is missing. Using default 'source={overrides['source']}'.")
     elif mode in {"train", "val"}:
         if "data" not in overrides and "resume" not in overrides:
@@ -962,7 +824,7 @@ def entrypoint(debug=""):
     getattr(model, mode)(**overrides)  # default args from model
 
     # Show help
-    LOGGER.info(f"💡 Learn more at https://docs.ultralytics.com/modes/{mode}")
+    LOGGER.info(f"💡 Learn more at https://docs.jittoryolo.com/modes/{mode}")
 
     # Recommend VS Code extension
     if IS_VSCODE and SETTINGS.get("vscode_msg", True):

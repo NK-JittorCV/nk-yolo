@@ -1,7 +1,7 @@
 # jittoryolo YOLO 🚀, AGPL-3.0 license
 
 import jittor as jt
-from jittor import nn
+import jittor.nn as nn
 
 from jittoryolo.utils.metrics import OKS_SIGMA
 from jittoryolo.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
@@ -29,7 +29,7 @@ class VarifocalLoss(nn.Module):
         weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score * label
         with autocast(enabled=False):
             loss = (
-                (jt.nn.binary_cross_entropy_with_logits(pred_score.float(), gt_score.float(), reduction="none") * weight)
+                (nn.binary_cross_entropy_with_logits(pred_score.float(), gt_score.float(), reduction="none") * weight)
                 .mean(1)
                 .sum()
             )
@@ -46,8 +46,8 @@ class FocalLoss(nn.Module):
     @staticmethod
     def forward(pred, label, gamma=1.5, alpha=0.25):
         """Calculates and updates confusion matrix for object detection/classification tasks."""
-        loss = jt.nn.binary_cross_entropy_with_logits(pred, label, reduction="none")
-        # p_t = jt.exp(-loss)
+        loss = nn.binary_cross_entropy_with_logits(pred, label, reduction="none")
+        # p_t = torch.exp(-loss)
         # loss *= self.alpha * (1.000001 - p_t) ** self.gamma  # non-zero power for gradient stability
 
         # TF implementation https://github.com/tensorflow/addons/blob/v0.7.1/tensorflow_addons/losses/focal_loss.py
@@ -82,8 +82,8 @@ class DFLoss(nn.Module):
         wl = tr - target  # weight left
         wr = 1 - wl  # weight right
         return (
-            jt.nn.cross_entropy_loss(pred_dist, tl.view(-1), reduction="none").view(tl.shape) * wl
-            + jt.nn.cross_entropy_loss(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
+        nn.cross_entropy(pred_dist, tl.view(-1), reduction="none").view(tl.shape) * wl
+            + nn.cross_entropy(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
         ).mean(-1, keepdim=True)
 
 
@@ -334,7 +334,7 @@ class v8SegmentationLoss(v8DetectionLoss):
             # Masks loss
             masks = batch["masks"].to(self.device).float()
             if tuple(masks.shape[-2:]) != (mask_h, mask_w):  # downsample
-                masks = jt.nn.interpolate(masks[None], (mask_h, mask_w), mode="nearest")[0]
+                masks = nn.interpolate(masks[None], (mask_h, mask_w), mode="nearest")[0]
 
             loss[1] = self.calculate_segmentation_loss(
                 fg_mask, masks, target_gt_idx, target_bboxes, batch_idx, proto, pred_masks, imgsz, self.overlap
@@ -552,15 +552,15 @@ class v8PoseLoss(v8DetectionLoss):
             pred_kpts (jt.Var): Predicted keypoints, shape (BS, N_anchors, N_kpts_per_object, kpts_dim).
 
         Returns:
-            kpts_loss (jt.Var): The keypoints loss.
-            kpts_obj_loss (jt.Var): The keypoints object loss.
+            (tuple): Returns a tuple containing:
+                - kpts_loss (jt.Var): The keypoints loss.
+                - kpts_obj_loss (jt.Var): The keypoints object loss.
         """
         batch_idx = batch_idx.flatten()
         batch_size = len(masks)
 
         # Find the maximum number of keypoints in a single image
         max_kpts = jt.unique(batch_idx, return_counts=True)[1].max()
-
 
         # Create a tensor to hold batched keypoints
         batched_keypoints = jt.zeros(
@@ -605,8 +605,7 @@ class v8ClassificationLoss:
 
     def __call__(self, preds, batch):
         """Compute the classification loss between predictions and true labels."""
-        preds = preds[1] if isinstance(preds, (list, tuple)) else preds
-        loss = jt.nn.cross_entropy_loss(preds, batch["cls"], reduction="mean")
+        loss = nn.cross_entropy(preds, batch["cls"], reduction="mean")
         loss_items = loss.detach()
         return loss, loss_items
 
@@ -623,7 +622,7 @@ class v8OBBLoss(v8DetectionLoss):
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
         if targets.shape[0] == 0:
-            out = jt.zeros((batch_size, 0, 6), dtype=jt.float32, device=self.device)
+            out = jt.zeros(batch_size, 0, 6, device=self.device)
         else:
             i = targets[:, 0]  # image index
             _, counts = i.unique(return_counts=True)

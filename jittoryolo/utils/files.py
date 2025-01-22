@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# jittoryolo YOLO 🚀, AGPL-3.0 license
 
 import contextlib
 import glob
@@ -67,7 +67,7 @@ def spaces_in_path(path):
 
     Examples:
         Use the context manager to handle paths with spaces:
-        >>> from ultralytics.utils.files import spaces_in_path
+        >>> from jittoryolo.utils.files import spaces_in_path
         >>> with spaces_in_path('/path/with spaces') as new_path:
         >>> # Your code here
     """
@@ -194,7 +194,7 @@ def update_models(model_names=("yolo11n.pt",), source_dir=Path("."), update_name
 
     Examples:
         Update specified YOLO models and save them in 'updated_models' subdirectory:
-        >>> from ultralytics.utils.files import update_models
+        >>> from jittoryolo.utils.files import update_models
         >>> model_names = ("yolo11n.pt", "yolov8s.pt")
         >>> update_models(model_names, source_dir=Path("/models"), update_names=True)
     """

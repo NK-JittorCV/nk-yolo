@@ -1,4 +1,4 @@
-# jittoryolo YOLO 🚀, AGPL-3.0 license
+# Ultralytics YOLO 🚀, AGPL-3.0 license
 
 import ast
 import json
@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import jittor as jt
-from jittor import nn
+import jittor.nn as nn
 from PIL import Image
 
 from jittoryolo.utils import ARM64, IS_JETSON, IS_RASPBERRYPI, LINUX, LOGGER, ROOT, yaml_load
@@ -53,28 +53,27 @@ def default_class_names(data=None):
 
 class AutoBackend(nn.Module):
     """
-    Handles dynamic backend selection for running inference using jittoryolo YOLO models.
+    Handles dynamic backend selection for running inference using Ultralytics YOLO models.
 
     The AutoBackend class is designed to provide an abstraction layer for various inference engines. It supports a wide
     range of formats, each with specific naming conventions as outlined below:
 
         Supported Formats and Naming Conventions:
-            | Format                | File Suffix       |
-            |-----------------------|-------------------|
-            | PyTorch               | *.pt              |
-            | TorchScript           | *.torchscript     |
-            | ONNX Runtime          | *.onnx            |
-            | ONNX OpenCV DNN       | *.onnx (dnn=True) |
-            | OpenVINO              | *openvino_model/  |
-            | CoreML                | *.mlpackage       |
-            | TensorRT              | *.engine          |
-            | TensorFlow SavedModel | *_saved_model/    |
-            | TensorFlow GraphDef   | *.pb              |
-            | TensorFlow Lite       | *.tflite          |
-            | TensorFlow Edge TPU   | *_edgetpu.tflite  |
-            | PaddlePaddle          | *_paddle_model/   |
-            | MNN                   | *.mnn             |
-            | NCNN                  | *_ncnn_model/     |
+            | Format                | File Suffix      |
+            |-----------------------|------------------|
+            | Pyjt               | *.pt             |
+            | jtScript           | *.jtscript    |
+            | ONNX Runtime          | *.onnx           |
+            | ONNX OpenCV DNN       | *.onnx (dnn=True)|
+            | OpenVINO              | *openvino_model/ |
+            | CoreML                | *.mlpackage      |
+            | TensorRT              | *.engine         |
+            | TensorFlow SavedModel | *_saved_model    |
+            | TensorFlow GraphDef   | *.pb             |
+            | TensorFlow Lite       | *.tflite         |
+            | TensorFlow Edge TPU   | *_edgetpu.tflite |
+            | PaddlePaddle          | *_paddle_model   |
+            | NCNN                  | *_ncnn_model     |
 
     This class offers dynamic backend switching capabilities based on the input model format, making it easier to deploy
     models across various platforms.
@@ -96,8 +95,8 @@ class AutoBackend(nn.Module):
         Initialize the AutoBackend for inference.
 
         Args:
-            weights (str | torch.nn.Module): Path to the model weights file or a module instance. Defaults to 'yolo11n.pt'.
-            device (torch.device): Device to run the model on. Defaults to CPU.
+            weights (str): Path to the model weights file. Defaults to 'yolov8n.pt'.
+            device (jt.device): Device to run the model on. Defaults to CPU.
             dnn (bool): Use OpenCV DNN module for ONNX inference. Defaults to False.
             data (str | Path | optional): Path to the additional data.yaml file containing class names. Optional.
             fp16 (bool): Enable half-precision inference. Supported only on specific backends. Defaults to False.
@@ -121,40 +120,37 @@ class AutoBackend(nn.Module):
             edgetpu,
             tfjs,
             paddle,
-            mnn,
             ncnn,
-            imx,
             triton,
         ) = self._model_type(w)
         fp16 &= pt or jit or onnx or xml or engine or nn_module or triton  # FP16
-        nhwc = coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
+        nhwc = coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs jt BCWH)
         stride = 32  # default stride
         model, metadata, task = None, None, None
 
         # Set device
-        cuda = jt.flags.use_cuda and device != jt.cpu  # use CUDA
-        if cuda and not any([nn_module, pt, jit, engine, onnx, paddle]):  # GPU dataloader formats
-            device = jt.cpu
-            cuda = False
+        # cuda = jt.cuda.is_available() and device.type != "cpu"  # use CUDA
+        # if cuda and not any([nn_module, pt, jit, engine, onnx]):  # GPU dataloader formats
+        #     device = jt.device("cpu")
+        #     cuda = False
 
         # Download if not local
         if not (pt or triton or nn_module):
             w = attempt_download_asset(w)
 
-        # In-memory PyTorch model
+        # In-memory Pyjt model
         if nn_module:
-            model = weights.to(device)
+            model = weights
             if fuse:
                 model = model.fuse(verbose=verbose)
             if hasattr(model, "kpt_shape"):
                 kpt_shape = model.kpt_shape  # pose-only
             stride = max(int(model.stride.max()), 32)  # model stride
             names = model.module.names if hasattr(model, "module") else model.names  # get class names
-            model.half() if fp16 else model.float()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
             pt = True
 
-        # PyTorch
+        # Pyjt
         elif pt:
             from jittoryolo.nn.tasks import attempt_load_weights
 
@@ -168,12 +164,11 @@ class AutoBackend(nn.Module):
             model.half() if fp16 else model.float()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
 
-        # TorchScript
+        # jtScript
         elif jit:
-            LOGGER.info(f"Loading {w} for TorchScript inference...")
+            LOGGER.info(f"Loading {w} for jtScript inference...")
             extra_files = {"config.txt": ""}  # model metadata
-            #TODO:_extra_files：Jittor 中没有与 PyTorch 中 _extra_files 参数完全相同的功能。如果你需要额外的文件，可以通过其他方式加载并传递它们，但在 Jittor 中没有直接对应的参数
-            model = jt.load(w, map_location=device)  
+            model = jt.jit.load(w, _extra_files=extra_files, map_location=device)
             model.half() if fp16 else model.float()
             if extra_files["config.txt"]:  # load metadata dict
                 metadata = json.loads(extra_files["config.txt"], object_hook=lambda x: dict(x.items()))
@@ -184,8 +179,8 @@ class AutoBackend(nn.Module):
             check_requirements("opencv-python>=4.5.4")
             net = cv2.dnn.readNetFromONNX(w)
 
-        # ONNX Runtime and IMX
-        elif onnx or imx:
+        # ONNX Runtime
+        elif onnx:
             LOGGER.info(f"Loading {w} for ONNX Runtime inference...")
             check_requirements(("onnx", "onnxruntime-gpu" if cuda else "onnxruntime"))
             if IS_RASPBERRYPI or IS_JETSON:
@@ -193,47 +188,10 @@ class AutoBackend(nn.Module):
                 check_requirements("numpy==1.23.5")
             import onnxruntime
 
-            providers = ["CPUExecutionProvider"]
-            if cuda and "CUDAExecutionProvider" in onnxruntime.get_available_providers():
-                providers.insert(0, "CUDAExecutionProvider")
-            elif cuda:  # Only log warning if CUDA was requested but unavailable
-                LOGGER.warning("WARNING ⚠️ Failed to start ONNX Runtime with CUDA. Using CPU...")
-                device = jt.cpu
-                cuda = False
-            LOGGER.info(f"Using ONNX Runtime {providers[0]}")
-            if onnx:
-                session = onnxruntime.InferenceSession(w, providers=providers)
-            else:
-                check_requirements(
-                    ["model-compression-toolkit==2.1.1", "sony-custom-layers[torch]==0.2.0", "onnxruntime-extensions"]
-                )
-                w = next(Path(w).glob("*.onnx"))
-                LOGGER.info(f"Loading {w} for ONNX IMX inference...")
-                import mct_quantizers as mctq
-                from sony_custom_layers.pytorch.object_detection import nms_ort  # noqa
-
-                session = onnxruntime.InferenceSession(
-                    w, mctq.get_ort_session_options(), providers=["CPUExecutionProvider"]
-                )
-                task = "detect"
-
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
+            session = onnxruntime.InferenceSession(w, providers=providers)
             output_names = [x.name for x in session.get_outputs()]
             metadata = session.get_modelmeta().custom_metadata_map
-            dynamic = isinstance(session.get_outputs()[0].shape[0], str)
-            if not dynamic:
-                io = session.io_binding()
-                bindings = []
-                for output in session.get_outputs():
-                    y_tensor = jt.empty(output.shape, dtype=jt.float16 if fp16 else jt.float32).to(device)
-                    io.bind_output(
-                        name=output.name,
-                        device_type=device.type,
-                        device_id=device.index if cuda else 0,
-                        element_type=np.float16 if fp16 else np.float32,
-                        shape=tuple(y_tensor.shape),
-                        buffer_ptr=y_tensor.data_ptr(),
-                    )
-                    bindings.append(y_tensor)
 
         # OpenVINO
         elif xml:
@@ -272,7 +230,7 @@ class AutoBackend(nn.Module):
             check_version(trt.__version__, ">=7.0.0", hard=True)
             check_version(trt.__version__, "!=10.1.0", msg="https://github.com/jittoryolo/jittoryolo/pull/14239")
             if device.type == "cpu":
-                device = jt.cuda(0)
+                device = jt.device("cuda:0")
             Binding = namedtuple("Binding", ("name", "dtype", "shape", "data", "ptr"))
             logger = trt.Logger(trt.Logger.INFO)
             # Read file
@@ -281,7 +239,7 @@ class AutoBackend(nn.Module):
                     meta_len = int.from_bytes(f.read(4), byteorder="little")  # read metadata length
                     metadata = json.loads(f.read(meta_len).decode("utf-8"))  # read metadata
                 except UnicodeDecodeError:
-                    f.seek(0)  # engine file may lack embedded jittoryolo metadata
+                    f.seek(0)  # engine file may lack embedded Ultralytics metadata
                 model = runtime.deserialize_cuda_engine(f.read())  # read engine
 
             # Model context
@@ -324,7 +282,7 @@ class AutoBackend(nn.Module):
                     else:
                         output_names.append(name)
                     shape = tuple(context.get_binding_shape(i))
-                im = jt.array(np.empty(shape, dtype=dtype), device=device)
+                im = jt.from_numpy(np.empty(shape, dtype=dtype)).to(device)
                 bindings[name] = Binding(name, dtype, shape, im, int(im.data_ptr()))
             binding_addrs = OrderedDict((n, d.ptr) for n, d in bindings.items())
             batch_size = bindings["images"].shape[0]  # if dynamic, this is instead max batch size
@@ -386,7 +344,6 @@ class AutoBackend(nn.Module):
                     model_path=w,
                     experimental_delegates=[load_delegate(delegate, options={"device": device})],
                 )
-                device = "cpu"  # Required, otherwise PyTorch will try to use the wrong device
             else:  # TFLite
                 LOGGER.info(f"Loading {w} for TensorFlow Lite inference...")
                 interpreter = Interpreter(model_path=w)  # load TFLite model
@@ -422,23 +379,6 @@ class AutoBackend(nn.Module):
             output_names = predictor.get_output_names()
             metadata = w.parents[1] / "metadata.yaml"
 
-        # MNN
-        elif mnn:
-            LOGGER.info(f"Loading {w} for MNN inference...")
-            check_requirements("MNN")  # requires MNN
-            import os
-
-            import MNN
-
-            config = {"precision": "low", "backend": "CPU", "numThread": (os.cpu_count() + 1) // 2}
-            rt = MNN.nn.create_runtime_manager((config,))
-            net = MNN.nn.load_module_from_file(w, [], [], runtime_manager=rt, rearrange=True)
-
-            def torch_to_mnn(x):
-                return MNN.expr.const(x.data_ptr(), x.shape)
-
-            metadata = json.loads(net.get_info()["bizCode"])
-
         # NCNN
         elif ncnn:
             LOGGER.info(f"Loading {w} for NCNN inference...")
@@ -460,14 +400,13 @@ class AutoBackend(nn.Module):
             from jittoryolo.utils.triton import TritonRemoteModel
 
             model = TritonRemoteModel(w)
-            metadata = model.metadata
 
         # Any other format (unsupported)
         else:
             from jittoryolo.engine.exporter import export_formats
 
             raise TypeError(
-                f"model='{w}' is not a supported model format. jittoryolo supports: {export_formats()['Format']}\n"
+                f"model='{w}' is not a supported model format. Ultralytics supports: {export_formats()['Format']}\n"
                 f"See https://docs.jittoryolo.com/modes/predict for help."
             )
 
@@ -506,7 +445,7 @@ class AutoBackend(nn.Module):
         Runs inference on the YOLOv8 MultiBackend model.
 
         Args:
-            im (torch.Tensor): The image tensor to perform inference on.
+            im (jt.Tensor): The image tensor to perform inference on.
             augment (bool): whether to perform data augmentation during inference, defaults to False
             visualize (bool): whether to visualize the output predictions, defaults to False
             embed (list, optional): A list of feature vectors/embeddings to return.
@@ -518,43 +457,26 @@ class AutoBackend(nn.Module):
         if self.fp16 and im.dtype != jt.float16:
             im = im.half()  # to FP16
         if self.nhwc:
-            im = im.permute(0, 2, 3, 1)  # torch BCHW to numpy BHWC shape(1,320,192,3)
+            im = im.permute(0, 2, 3, 1)  # jt BCHW to numpy BHWC shape(1,320,192,3)
 
-        # PyTorch
+        # Pyjt
         if self.pt or self.nn_module:
             y = self.model(im, augment=augment, visualize=visualize, embed=embed)
 
-        # TorchScript
+        # jtScript
         elif self.jit:
             y = self.model(im)
 
         # ONNX OpenCV DNN
         elif self.dnn:
-            im = im.cpu().numpy()  # torch to numpy
+            im = im.cpu().numpy()  # jt to numpy
             self.net.setInput(im)
-            y = self.net.execute()
+            y = self.net.forward()
 
         # ONNX Runtime
-        elif self.onnx or self.imx:
-            if self.dynamic:
-                im = im.cpu().numpy()  # torch to numpy
-                y = self.session.run(self.output_names, {self.session.get_inputs()[0].name: im})
-            else:
-                if not self.cuda:
-                    im = im.cpu()
-                self.io.bind_input(
-                    name="images",
-                    device_type=im.device.type,
-                    device_id=im.device.index if im.device.type == "cuda" else 0,
-                    element_type=np.float16 if self.fp16 else np.float32,
-                    shape=tuple(im.shape),
-                    buffer_ptr=im.data_ptr(),
-                )
-                self.session.run_with_iobinding(self.io)
-                y = self.bindings
-            if self.imx:
-                # boxes, conf, cls
-                y = np.concatenate([y[0], y[1][:, :, None], y[2][:, :, None]], axis=-1)
+        elif self.onnx:
+            im = im.cpu().numpy()  # jt to numpy
+            y = self.session.run(self.output_names, {self.session.get_inputs()[0].name: im})
 
         # OpenVINO
         elif self.xml:
@@ -610,7 +532,7 @@ class AutoBackend(nn.Module):
             y = self.model.predict({"image": im_pil})  # coordinates are xywh normalized
             if "confidence" in y:
                 raise TypeError(
-                    "jittoryolo only supports inference of non-pipelined CoreML models exported with "
+                    "Ultralytics only supports inference of non-pipelined CoreML models exported with "
                     f"'nms=False', but 'model={w}' has an NMS pipeline created by an 'nms=True' export."
                 )
                 # TODO: CoreML NMS inference handling
@@ -630,12 +552,6 @@ class AutoBackend(nn.Module):
             self.predictor.run()
             y = [self.predictor.get_output_handle(x).copy_to_cpu() for x in self.output_names]
 
-        # MNN
-        elif self.mnn:
-            input_var = self.torch_to_mnn(im)
-            output_var = self.net.onexecute([input_var])
-            y = [x.read() for x in output_var]
-
         # NCNN
         elif self.ncnn:
             mat_in = self.pyncnn.Mat(im[0].cpu().numpy())
@@ -646,7 +562,7 @@ class AutoBackend(nn.Module):
 
         # NVIDIA Triton Inference Server
         elif self.triton:
-            im = im.cpu().numpy()  # torch to numpy
+            im = im.cpu().numpy()  # jt to numpy
             y = self.model(im)
 
         # TensorFlow (SavedModel, GraphDef, Lite, Edge TPU)
@@ -681,9 +597,6 @@ class AutoBackend(nn.Module):
                         else:
                             x[:, [0, 2]] *= w
                             x[:, [1, 3]] *= h
-                            if self.task == "pose":
-                                x[:, 5::3] *= w
-                                x[:, 6::3] *= h
                     y.append(x)
             # TF segment fixes: export is reversed vs ONNX export and protos are transposed
             if len(y) == 2:  # segment with (det, proto) output order reversed
@@ -699,7 +612,8 @@ class AutoBackend(nn.Module):
         #     print(type(x), len(x)) if isinstance(x, (list, tuple)) else print(type(x), x.shape)  # debug shapes
         if isinstance(y, (list, tuple)):
             if len(self.names) == 999 and (self.task == "segment" or len(y) == 2):  # segments and names not defined
-                nc = y[0].shape[1] - y[1].shape[1] - 4  # y = (1, 32, 160, 160), (1, 116, 8400)
+                ip, ib = (0, 1) if len(y[0].shape) == 4 else (1, 0)  # index of protos, boxes
+                nc = y[ib].shape[1] - y[ip].shape[3] - 4  # y = (1, 160, 160, 32), (1, 116, 8400)
                 self.names = {i: f"class{i}" for i in range(nc)}
             return self.from_numpy(y[0]) if len(y) == 1 else [self.from_numpy(x) for x in y]
         else:
@@ -713,22 +627,21 @@ class AutoBackend(nn.Module):
             x (np.ndarray): The array to be converted.
 
         Returns:
-            (torch.Tensor): The converted tensor
+            (jt.Tensor): The converted tensor
         """
-        return jt.Var(x).to(self.device) if isinstance(x, np.ndarray) else x
+        return jt.tensor(x).to(self.device) if isinstance(x, np.ndarray) else x
 
     def warmup(self, imgsz=(1, 3, 640, 640)):
         """
-        Warm up the model by running one execute pass with a dummy input.
+        Warm up the model by running one forward pass with a dummy input.
 
         Args:
             imgsz (tuple): The shape of the dummy input tensor in the format (batch_size, channels, height, width)
         """
-        import torchvision  # noqa (import here so torchvision import time not recorded in postprocess time)
 
         warmup_types = self.pt, self.jit, self.onnx, self.engine, self.saved_model, self.pb, self.triton, self.nn_module
-        if any(warmup_types) and (self.device.type != "cpu" or self.triton):
-            im = jt.empty(*imgsz, dtype=jt.half if self.fp16 else jt.float32, device=self.device)  # input
+        if any(warmup_types):
+            im = jt.empty(*imgsz, dtype=jt.half if self.fp16 else jt.float)  # input
             for _ in range(2 if self.jit else 1):
                 self.execute(im)  # warmup
 
@@ -745,7 +658,6 @@ class AutoBackend(nn.Module):
             >>> model = AutoBackend(weights="path/to/model.onnx")
             >>> model_type = model._model_type()  # returns "onnx"
         """
-        from jittoryolo.engine.exporter import export_formats
 
         sf = export_formats()["Suffix"]  # export suffixes
         if not is_url(p) and not isinstance(p, str):
@@ -763,3 +675,23 @@ class AutoBackend(nn.Module):
             triton = bool(url.netloc) and bool(url.path) and url.scheme in {"http", "grpc"}
 
         return types + [triton]
+
+
+def export_formats():
+    """jittoryolo YOLO export formats."""
+    x = [
+        ["Pyjt", "-", ".pt", True, True],
+        ["jtScript", "jtscript", ".jtscript", True, True],
+        ["ONNX", "onnx", ".onnx", True, True],
+        ["OpenVINO", "openvino", "_openvino_model", True, False],
+        ["TensorRT", "engine", ".engine", False, True],
+        ["CoreML", "coreml", ".mlpackage", True, False],
+        ["TensorFlow SavedModel", "saved_model", "_saved_model", True, True],
+        ["TensorFlow GraphDef", "pb", ".pb", True, True],
+        ["TensorFlow Lite", "tflite", ".tflite", True, False],
+        ["TensorFlow Edge TPU", "edgetpu", "_edgetpu.tflite", True, False],
+        ["TensorFlow.js", "tfjs", "_web_model", True, False],
+        ["PaddlePaddle", "paddle", "_paddle_model", True, True],
+        ["NCNN", "ncnn", "_ncnn_model", True, True],
+    ]
+    return dict(zip(["Format", "Argument", "Suffix", "CPU", "GPU"], zip(*x)))

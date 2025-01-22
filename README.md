@@ -1,4 +1,4 @@
-# UltralyticsYOLO-Jittor V1.0
+# jittoryoloYOLO-Jittor V1.0
 
 ## 1. Overview File Tree
 

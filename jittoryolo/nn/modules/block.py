@@ -63,7 +63,7 @@ class DFL(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(c1, 1, 1, bias=False).requires_grad_(False)
         x = jt.arange(c1, dtype=jt.float32)
-        self.conv.weight.data[:] = nn.Parameter(x.view(1, c1, 1, 1))
+        self.conv.weight.data[:] = x.view(1, c1, 1, 1).numpy()
         self.c1 = c1
 
     def execute(self, x):
@@ -229,7 +229,7 @@ class C2f(nn.Module):
         self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
-        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
+        self.m = nn.ModuleList([Bottleneck(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)])
 
     def execute(self, x):
         """execute pass through C2f layer."""
@@ -799,8 +799,8 @@ class RepVGGDW(jt.nn.Module):
         final_conv_w = conv_w + conv1_w
         final_conv_b = conv_b + conv1_b
 
-        conv.weight.data.copy_(final_conv_w)
-        conv.bias.data.copy_(final_conv_b)
+        conv.weight = final_conv_w
+        conv.bias = final_conv_b
 
         self.conv = conv
         del self.conv1
@@ -862,7 +862,7 @@ class C2fCIB(C2f):
     def __init__(self, c1, c2, n=1, shortcut=False, lk=False, g=1, e=0.5):
         """Initializes the module with specified parameters for channel, shortcut, local key, groups, and expansion."""
         super().__init__(c1, c2, n, shortcut, g, e)
-        self.m = nn.ModuleList(CIB(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n))
+        self.m = nn.ModuleList([CIB(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n)])
 
 
 class Attention(nn.Module):
@@ -1061,7 +1061,7 @@ class C2fPSA(C2f):
 
     Examples:
         >>> import torch
-        >>> from ultralytics.models.common import C2fPSA
+        >>> from jittoryolo.models.common import C2fPSA
         >>> model = C2fPSA(c1=64, c2=64, n=3, e=0.5)
         >>> x = torch.randn(1, 64, 128, 128)
         >>> output = model(x)
@@ -1091,7 +1091,7 @@ class SCDown(nn.Module):
 
     Examples:
         >>> import torch
-        >>> from ultralytics import SCDown
+        >>> from jittoryolo import SCDown
         >>> model = SCDown(c1=64, c2=128, k=3, s=2)
         >>> x = torch.randn(1, 64, 128, 128)
         >>> y = model(x)

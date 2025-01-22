@@ -1,4 +1,4 @@
-
+# jittoryolo YOLO 🚀, AGPL-3.0 license
 
 import re
 import shutil
@@ -13,7 +13,7 @@ import jittor as jt
 
 from jittoryolo.utils import LOGGER, TQDM, checks, clean_url, emojis, is_online, url2file
 
-# Define Ultralytics GitHub assets maintained at https://github.com/ultralytics/assets
+# Define jittoryolo GitHub assets maintained at https://github.com/jittoryolo/assets
 GITHUB_ASSETS_REPO = "jittoryolo/assets"
 GITHUB_ASSETS_NAMES = (
     [f"yolov8{k}{suffix}.pt" for k in "nsmlx" for suffix in ("", "-cls", "-seg", "-pose", "-obb", "-oiv7")]
@@ -74,7 +74,7 @@ def delete_dsstore(path, files_to_delete=(".DS_Store", "__MACOSX")):
 
     Example:
         ```python
-        from ultralytics.utils.downloads import delete_dsstore
+        from jittoryolo.utils.downloads import delete_dsstore
 
         delete_dsstore("path/to/dir")
         ```
@@ -106,7 +106,7 @@ def zip_directory(directory, compress=True, exclude=(".DS_Store", "__MACOSX"), p
 
     Example:
         ```python
-        from ultralytics.utils.downloads import zip_directory
+        from jittoryolo.utils.downloads import zip_directory
 
         file = zip_directory("path/to/dir")
         ```
@@ -138,7 +138,7 @@ def unzip_file(file, path=None, exclude=(".DS_Store", "__MACOSX"), exist_ok=Fals
     If a path is not provided, the function will use the parent directory of the zipfile as the default path.
 
     Args:
-        file (str | Path): The path to the zipfile to be extracted.
+        file (str): The path to the zipfile to be extracted.
         path (str, optional): The path to extract the zipfile to. Defaults to None.
         exclude (tuple, optional): A tuple of filename strings to be excluded. Defaults to ('.DS_Store', '__MACOSX').
         exist_ok (bool, optional): Whether to overwrite existing contents if they exist. Defaults to False.
@@ -152,7 +152,7 @@ def unzip_file(file, path=None, exclude=(".DS_Store", "__MACOSX"), exist_ok=Fals
 
     Example:
         ```python
-        from ultralytics.utils.downloads import unzip_file
+        from jittoryolo.utils.downloads import unzip_file
 
         dir = unzip_file("path/to/file.zip")
         ```
@@ -195,12 +195,12 @@ def unzip_file(file, path=None, exclude=(".DS_Store", "__MACOSX"), exist_ok=Fals
     return path  # return unzip dir
 
 
-def check_disk_space(url="https://ultralytics.com/assets/coco8.zip", path=Path.cwd(), sf=1.5, hard=True):
+def check_disk_space(url="https://jittoryolo.com/assets/coco8.zip", path=Path.cwd(), sf=1.5, hard=True):
     """
     Check if there is sufficient disk space to download and store a file.
 
     Args:
-        url (str, optional): The URL to the file. Defaults to 'https://ultralytics.com/assets/coco8.zip'.
+        url (str, optional): The URL to the file. Defaults to 'https://jittoryolo.com/assets/coco8.zip'.
         path (str | Path, optional): The path or drive to check the available free space on.
         sf (float, optional): Safety factor, the multiplier for the required free space. Defaults to 1.5.
         hard (bool, optional): Whether to throw an error or not on insufficient disk space. Defaults to True.
@@ -246,7 +246,7 @@ def get_google_drive_file_info(link):
 
     Example:
         ```python
-        from ultralytics.utils.downloads import get_google_drive_file_info
+        from jittoryolo.utils.downloads import get_google_drive_file_info
 
         link = "https://drive.google.com/file/d/1cqT-cJgANNrhIHCrEufUYhQ4RqiWG_lJ/view?usp=drive_link"
         url, filename = get_google_drive_file_info(link)
@@ -307,9 +307,9 @@ def safe_download(
 
     Example:
         ```python
-        from ultralytics.utils.downloads import safe_download
+        from jittoryolo.utils.downloads import safe_download
 
-        link = "https://ultralytics.com/assets/bus.jpg"
+        link = "https://jittoryolo.com/assets/bus.jpg"
         path = safe_download(link)
         ```
     """
@@ -322,8 +322,8 @@ def safe_download(
         f = Path(url)  # filename
     elif not f.is_file():  # URL and file do not exist
         uri = (url if gdrive else clean_url(url)).replace(  # cleaned and aliased url
-            "https://github.com/ultralytics/assets/releases/download/v0.0.0/",
-            "https://ultralytics.com/assets/",  # assets alias
+            "https://github.com/jittoryolo/assets/releases/download/v0.0.0/",
+            "https://jittoryolo.com/assets/",  # assets alias
         )
         desc = f"Downloading {uri} to '{f}'"
         LOGGER.info(f"{desc}...")
@@ -336,8 +336,8 @@ def safe_download(
                     r = subprocess.run(["curl", "-#", f"-{s}L", url, "-o", f, "--retry", "3", "-C", "-"]).returncode
                     assert r == 0, f"Curl return value {r}"
                 else:  # urllib download
-                    method = "jittor"
-                    if method == "jittor":
+                    method = "torch"
+                    if method == "torch":
                         jt.hub.download_url_to_file(url, f, progress=progress)
                     else:
                         with request.urlopen(url) as response, TQDM(
@@ -352,8 +352,6 @@ def safe_download(
                                 for data in response:
                                     f_opened.write(data)
                                     pbar.update(len(data))
-            except Exception as e:
-                print(f"Download attempt {i} failed: {e}")
 
                 if f.exists():
                     if f.stat().st_size > min_bytes:
@@ -380,13 +378,13 @@ def safe_download(
         return unzip_dir
 
 
-def get_github_assets(repo="ultralytics/assets", version="latest", retry=False):
+def get_github_assets(repo="jittoryolo/assets", version="latest", retry=False):
     """
     Retrieve the specified version's tag and assets from a GitHub repository. If the version is not specified, the
     function fetches the latest release assets.
 
     Args:
-        repo (str, optional): The GitHub repository in the format 'owner/repo'. Defaults to 'ultralytics/assets'.
+        repo (str, optional): The GitHub repository in the format 'owner/repo'. Defaults to 'jittoryolo/assets'.
         version (str, optional): The release version to fetch assets from. Defaults to 'latest'.
         retry (bool, optional): Flag to retry the request in case of a failure. Defaults to False.
 
@@ -395,7 +393,7 @@ def get_github_assets(repo="ultralytics/assets", version="latest", retry=False):
 
     Example:
         ```python
-        tag, assets = get_github_assets(repo="ultralytics/assets", version="latest")
+        tag, assets = get_github_assets(repo="jittoryolo/assets", version="latest")
         ```
     """
     if version != "latest":
@@ -411,14 +409,14 @@ def get_github_assets(repo="ultralytics/assets", version="latest", retry=False):
     return data["tag_name"], [x["name"] for x in data["assets"]]  # tag, assets i.e. ['yolov8n.pt', 'yolov8s.pt', ...]
 
 
-def attempt_download_asset(file, repo="ultralytics/assets", release="v8.3.0", **kwargs):
+def attempt_download_asset(file, repo="jittoryolo/assets", release="v8.3.0", **kwargs):
     """
     Attempt to download a file from GitHub release assets if it is not found locally. The function checks for the file
     locally first, then tries to download it from the specified GitHub repository release.
 
     Args:
         file (str | Path): The filename or file path to be downloaded.
-        repo (str, optional): The GitHub repository in the format 'owner/repo'. Defaults to 'ultralytics/assets'.
+        repo (str, optional): The GitHub repository in the format 'owner/repo'. Defaults to 'jittoryolo/assets'.
         release (str, optional): The specific release version to be downloaded. Defaults to 'v8.3.0'.
         **kwargs (any): Additional keyword arguments for the download process.
 
@@ -427,7 +425,7 @@ def attempt_download_asset(file, repo="ultralytics/assets", release="v8.3.0", **
 
     Example:
         ```python
-        file_path = attempt_download_asset("yolo11n.pt", repo="ultralytics/assets", release="latest")
+        file_path = attempt_download_asset("yolo11n.pt", repo="jittoryolo/assets", release="latest")
         ```
     """
     from jittoryolo.utils import SETTINGS  # scoped for circular import
@@ -482,7 +480,7 @@ def download(url, dir=Path.cwd(), unzip=True, delete=False, curl=False, threads=
 
     Example:
         ```python
-        download("https://ultralytics.com/assets/example.zip", dir="path/to/dir", unzip=True)
+        download("https://jittoryolo.com/assets/example.zip", dir="path/to/dir", unzip=True)
         ```
     """
     dir = Path(dir)

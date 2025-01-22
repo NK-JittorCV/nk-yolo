@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# jittoryolo YOLO 🚀, AGPL-3.0 license
 
 import contextlib
 import importlib.metadata
@@ -22,11 +22,11 @@ from typing import Union
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
+import jittor as jt
 import yaml
 from tqdm import tqdm as tqdm_original
 
-from ultralytics import __version__
+from jittoryolo import __version__
 
 # PyTorch Multi-GPU DDP Constants
 RANK = int(os.getenv("RANK", -1))
@@ -37,30 +37,28 @@ ARGV = sys.argv or ["", ""]  # sometimes sys.argv = []
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[1]  # YOLO
 ASSETS = ROOT / "assets"  # default images
-ASSETS_URL = "https://github.com/ultralytics/assets/releases/download/v0.0.0"  # assets GitHub URL
 DEFAULT_CFG_PATH = ROOT / "cfg/default.yaml"
-DEFAULT_SOL_CFG_PATH = ROOT / "cfg/solutions/default.yaml"  # Ultralytics solutions yaml path
 NUM_THREADS = min(8, max(1, os.cpu_count() - 1))  # number of YOLO multiprocessing threads
 AUTOINSTALL = str(os.getenv("YOLO_AUTOINSTALL", True)).lower() == "true"  # global auto-install mode
 VERBOSE = str(os.getenv("YOLO_VERBOSE", True)).lower() == "true"  # global verbose mode
 TQDM_BAR_FORMAT = "{l_bar}{bar:10}{r_bar}" if VERBOSE else None  # tqdm bar format
-LOGGING_NAME = "ultralytics"
+LOGGING_NAME = "jittoryolo"
 MACOS, LINUX, WINDOWS = (platform.system() == x for x in ["Darwin", "Linux", "Windows"])  # environment booleans
 ARM64 = platform.machine() in {"arm64", "aarch64"}  # ARM64 booleans
 PYTHON_VERSION = platform.python_version()
-TORCH_VERSION = torch.__version__
-TORCHVISION_VERSION = importlib.metadata.version("torchvision")  # faster than importing torchvision
+TORCH_VERSION = jt.__version__
+TORCHVISION_VERSION = jt.__version__  # faster than importing torchvision
 IS_VSCODE = os.environ.get("TERM_PROGRAM", False) == "vscode"
 HELP_MSG = """
-    Examples for running Ultralytics:
+    Examples for running jittoryolo:
 
-    1. Install the ultralytics package:
+    1. Install the jittoryolo package:
 
-        pip install ultralytics
+        pip install jittoryolo
 
     2. Use the Python SDK:
 
-        from ultralytics import YOLO
+        from jittoryolo import YOLO
 
         # Load a model
         model = YOLO("yolo11n.yaml")  # build a new model from scratch
@@ -69,19 +67,19 @@ HELP_MSG = """
         # Use the model
         results = model.train(data="coco8.yaml", epochs=3)  # train the model
         results = model.val()  # evaluate model performance on the validation set
-        results = model("https://ultralytics.com/images/bus.jpg")  # predict on an image
+        results = model("https://jittoryolo.com/images/bus.jpg")  # predict on an image
         success = model.export(format="onnx")  # export the model to ONNX format
 
     3. Use the command line interface (CLI):
 
-        Ultralytics 'yolo' CLI commands use the following syntax:
+        jittoryolo 'yolo' CLI commands use the following syntax:
 
             yolo TASK MODE ARGS
 
             Where   TASK (optional) is one of [detect, segment, classify, pose, obb]
                     MODE (required) is one of [train, val, predict, export, track, benchmark]
                     ARGS (optional) are any number of custom "arg=value" pairs like "imgsz=320" that override defaults.
-                        See all ARGS at https://docs.ultralytics.com/usage/cfg or with "yolo cfg"
+                        See all ARGS at https://docs.jittoryolo.com/usage/cfg or with "yolo cfg"
 
         - Train a detection model for 10 epochs with an initial learning_rate of 0.01
             yolo detect train data=coco8.yaml model=yolo11n.pt epochs=10 lr0=0.01
@@ -103,13 +101,13 @@ HELP_MSG = """
             yolo copy-cfg
             yolo cfg
 
-    Docs: https://docs.ultralytics.com
-    Community: https://community.ultralytics.com
-    GitHub: https://github.com/ultralytics/ultralytics
+    Docs: https://docs.jittoryolo.com
+    Community: https://community.jittoryolo.com
+    GitHub: https://github.com/jittoryolo/jittoryolo
     """
 
 # Settings and Environment Variables
-torch.set_printoptions(linewidth=320, precision=4, profile="default")
+# jt.set_printoptions(linewidth=320, precision=4, profile="default")
 np.set_printoptions(linewidth=320, formatter={"float_kind": "{:11.5g}".format})  # format short g, %precision=5
 cv2.setNumThreads(0)  # prevent OpenCV from multithreading (incompatible with PyTorch DataLoader)
 os.environ["NUMEXPR_MAX_THREADS"] = str(NUM_THREADS)  # NumExpr max threads
@@ -136,7 +134,7 @@ class TQDM(tqdm_original):
         __init__: Initializes the TQDM object with custom settings.
 
     Examples:
-        >>> from ultralytics.utils import TQDM
+        >>> from jittoryolo.utils import TQDM
         >>> for i in TQDM(range(100)):
         ...     # Your processing code here
         ...     pass
@@ -146,7 +144,7 @@ class TQDM(tqdm_original):
         """
         Initializes a custom TQDM progress bar.
 
-        This class extends the original tqdm class to provide customized behavior for Ultralytics projects.
+        This class extends the original tqdm class to provide customized behavior for jittoryolo projects.
 
         Args:
             *args (Any): Variable length argument list to be passed to the original tqdm constructor.
@@ -157,7 +155,7 @@ class TQDM(tqdm_original):
             - The default bar format is set to TQDM_BAR_FORMAT unless overridden in kwargs.
 
         Examples:
-            >>> from ultralytics.utils import TQDM
+            >>> from jittoryolo.utils import TQDM
             >>> for i in TQDM(range(100)):
             ...     # Your code here
             ...     pass
@@ -269,10 +267,10 @@ class IterableSimpleNamespace(SimpleNamespace):
         name = self.__class__.__name__
         raise AttributeError(
             f"""
-            '{name}' object has no attribute '{attr}'. This may be caused by a modified or out of date ultralytics
-            'default.yaml' file.\nPlease update your code with 'pip install -U ultralytics' and if necessary replace
+            '{name}' object has no attribute '{attr}'. This may be caused by a modified or out of date jittoryolo
+            'default.yaml' file.\nPlease update your code with 'pip install -U jittoryolo' and if necessary replace
             {DEFAULT_CFG_PATH} with the latest version from
-            https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/default.yaml
+            https://github.com/jittoryolo/jittoryolo/blob/main/jittoryolo/cfg/default.yaml
             """
         )
 
@@ -330,7 +328,7 @@ def set_logging(name="LOGGING_NAME", verbose=True):
     """
     Sets up logging with UTF-8 encoding and configurable verbosity.
 
-    This function configures logging for the Ultralytics library, setting the appropriate logging level and
+    This function configures logging for the jittoryolo library, setting the appropriate logging level and
     formatter based on the verbosity flag and the current process rank. It handles special cases for Windows
     environments where UTF-8 encoding might not be the default.
 
@@ -339,8 +337,8 @@ def set_logging(name="LOGGING_NAME", verbose=True):
         verbose (bool): Flag to set logging level to INFO if True, ERROR otherwise. Defaults to True.
 
     Examples:
-        >>> set_logging(name="ultralytics", verbose=True)
-        >>> logger = logging.getLogger("ultralytics")
+        >>> set_logging(name="jittoryolo", verbose=True)
+        >>> logger = logging.getLogger("jittoryolo")
         >>> logger.info("This is an info message")
 
     Notes:
@@ -410,7 +408,7 @@ class ThreadingLocked:
 
     Example:
         ```python
-        from ultralytics.utils import ThreadingLocked
+        from jittoryolo.utils import ThreadingLocked
 
         @ThreadingLocked()
         def my_function():
@@ -510,7 +508,6 @@ def yaml_print(yaml_file: Union[str, Path, dict]) -> None:
 
 # Default configuration
 DEFAULT_CFG_DICT = yaml_load(DEFAULT_CFG_PATH)
-DEFAULT_SOL_DICT = yaml_load(DEFAULT_SOL_CFG_PATH)  # Ultralytics solutions configuration
 for k, v in DEFAULT_CFG_DICT.items():
     if isinstance(v, str) and v.lower() == "none":
         DEFAULT_CFG_DICT[k] = None
@@ -569,16 +566,12 @@ def is_kaggle():
 
 def is_jupyter():
     """
-    Check if the current script is running inside a Jupyter Notebook.
+    Check if the current script is running inside a Jupyter Notebook. Verified on Colab, Jupyterlab, Kaggle, Paperspace.
 
     Returns:
         (bool): True if running inside a Jupyter Notebook, False otherwise.
-
-    Note:
-        - Only works on Colab and Kaggle, other environments like Jupyterlab and Paperspace are not reliably detectable.
-        - "get_ipython" in globals() method suffers false positives when IPython package installed manually.
     """
-    return IS_COLAB or IS_KAGGLE
+    return "get_ipython" in globals()
 
 
 def is_docker() -> bool:
@@ -607,12 +600,13 @@ def is_raspberrypi() -> bool:
 
 def is_jetson() -> bool:
     """
-    Determines if the Python environment is running on an NVIDIA Jetson device by checking the device model information.
+    Determines if the Python environment is running on a Jetson Nano or Jetson Orin device by checking the device model
+    information.
 
     Returns:
-        (bool): True if running on an NVIDIA Jetson device, False otherwise.
+        (bool): True if running on a Jetson Nano or Jetson Orin, False otherwise.
     """
-    return any(keyword in PROC_DEVICE_MODEL.lower() for keyword in ("nvidia", "jetson"))
+    return "NVIDIA" in PROC_DEVICE_MODEL  # i.e. "NVIDIA Jetson Nano" or "NVIDIA Orin NX"
 
 
 def is_online() -> bool:
@@ -768,7 +762,7 @@ def get_ubuntu_version():
             return None
 
 
-def get_user_config_dir(sub_dir="Ultralytics"):
+def get_user_config_dir(sub_dir="jittoryolo"):
     """
     Return the appropriate config directory based on the environment operating system.
 
@@ -805,15 +799,15 @@ def get_user_config_dir(sub_dir="Ultralytics"):
 PROC_DEVICE_MODEL = read_device_model()  # is_jetson() and is_raspberrypi() depend on this constant
 ONLINE = is_online()
 IS_COLAB = is_colab()
-IS_KAGGLE = is_kaggle()
 IS_DOCKER = is_docker()
 IS_JETSON = is_jetson()
 IS_JUPYTER = is_jupyter()
+IS_KAGGLE = is_kaggle()
 IS_PIP_PACKAGE = is_pip_package()
 IS_RASPBERRYPI = is_raspberrypi()
 GIT_DIR = get_git_dir()
 IS_GIT_DIR = is_git_dir()
-USER_CONFIG_DIR = Path(os.getenv("YOLO_CONFIG_DIR") or get_user_config_dir())  # Ultralytics settings dir
+USER_CONFIG_DIR = Path(os.getenv("YOLO_CONFIG_DIR") or get_user_config_dir())  # jittoryolo settings dir
 SETTINGS_FILE = USER_CONFIG_DIR / "settings.json"
 
 
@@ -890,7 +884,7 @@ def remove_colorstr(input_string):
 
 class TryExcept(contextlib.ContextDecorator):
     """
-    Ultralytics TryExcept class. Use as @TryExcept() decorator or 'with TryExcept():' context manager.
+    jittoryolo TryExcept class. Use as @TryExcept() decorator or 'with TryExcept():' context manager.
 
     Examples:
         As a decorator:
@@ -1147,7 +1141,7 @@ class JSONDict(dict):
 
 class SettingsManager(JSONDict):
     """
-    SettingsManager class for managing and persisting Ultralytics settings.
+    SettingsManager class for managing and persisting jittoryolo settings.
 
     This class extends JSONDict to provide JSON persistence for settings, ensuring thread-safe operations and default
     values. It validates settings on initialization and provides methods to update or reset settings.
@@ -1175,7 +1169,6 @@ class SettingsManager(JSONDict):
         """Initializes the SettingsManager with default settings and loads user settings."""
         import hashlib
 
-        from ultralytics.utils.torch_utils import torch_distributed_zero_first
 
         root = GIT_DIR or Path()
         datasets_root = (root.parent if GIT_DIR and is_dir_writeable(root.parent) else root).resolve()
@@ -1189,34 +1182,33 @@ class SettingsManager(JSONDict):
             "runs_dir": str(root / "runs"),  # Experiment runs directory
             "uuid": hashlib.sha256(str(uuid.getnode()).encode()).hexdigest(),  # SHA-256 anonymized UUID hash
             "sync": True,  # Enable synchronization
-            "api_key": "",  # Ultralytics API Key
+            "api_key": "",  # jittoryolo API Key
             "openai_api_key": "",  # OpenAI API Key
             "clearml": True,  # ClearML integration
             "comet": True,  # Comet integration
             "dvc": True,  # DVC integration
-            "hub": True,  # Ultralytics HUB integration
+            "hub": True,  # jittoryolo HUB integration
             "mlflow": True,  # MLflow integration
             "neptune": True,  # Neptune integration
             "raytune": True,  # Ray Tune integration
             "tensorboard": True,  # TensorBoard logging
-            "wandb": False,  # Weights & Biases logging
+            "wandb": True,  # Weights & Biases logging
             "vscode_msg": True,  # VSCode messaging
         }
 
         self.help_msg = (
-            f"\nView Ultralytics Settings with 'yolo settings' or at '{self.file}'"
+            f"\nView jittoryolo Settings with 'yolo settings' or at '{self.file}'"
             "\nUpdate Settings with 'yolo settings key=value', i.e. 'yolo settings runs_dir=path/to/dir'. "
-            "For help see https://docs.ultralytics.com/quickstart/#ultralytics-settings."
+            "For help see https://docs.jittoryolo.com/quickstart/#jittoryolo-settings."
         )
 
-        with torch_distributed_zero_first(RANK):
-            super().__init__(self.file)
+        super().__init__(self.file)
 
-            if not self.file.exists() or not self:  # Check if file doesn't exist or is empty
-                LOGGER.info(f"Creating new Ultralytics Settings v{version} file ✅ {self.help_msg}")
-                self.reset()
+        if not self.file.exists() or not self:  # Check if file doesn't exist or is empty
+            LOGGER.info(f"Creating new jittoryolo Settings v{version} file ✅ {self.help_msg}")
+            self.reset()
 
-            self._validate_settings()
+        self._validate_settings()
 
     def _validate_settings(self):
         """Validate the current settings and reset if necessary."""
@@ -1226,14 +1218,14 @@ class SettingsManager(JSONDict):
 
         if not (correct_keys and correct_types and correct_version):
             LOGGER.warning(
-                "WARNING ⚠️ Ultralytics settings reset to default values. This may be due to a possible problem "
-                f"with your settings or a recent ultralytics package update. {self.help_msg}"
+                "WARNING ⚠️ jittoryolo settings reset to default values. This may be due to a possible problem "
+                f"with your settings or a recent jittoryolo package update. {self.help_msg}"
             )
             self.reset()
 
         if self.get("datasets_dir") == self.get("runs_dir"):
             LOGGER.warning(
-                f"WARNING ⚠️ Ultralytics setting 'datasets_dir: {self.get('datasets_dir')}' "
+                f"WARNING ⚠️ jittoryolo setting 'datasets_dir: {self.get('datasets_dir')}' "
                 f"must be different than 'runs_dir: {self.get('runs_dir')}'. "
                 f"Please change one to avoid possible issues during training. {self.help_msg}"
             )
@@ -1242,10 +1234,10 @@ class SettingsManager(JSONDict):
         """Updates settings, validating keys and types."""
         for k, v in kwargs.items():
             if k not in self.defaults:
-                raise KeyError(f"No Ultralytics setting '{k}'. {self.help_msg}")
+                raise KeyError(f"No jittoryolo setting '{k}'. {self.help_msg}")
             t = type(self.defaults[k])
             if not isinstance(v, t):
-                raise TypeError(f"Ultralytics setting '{k}' must be of type '{t}', not '{type(v)}'. {self.help_msg}")
+                raise TypeError(f"jittoryolo setting '{k}' must be of type '{t}', not '{type(v)}'. {self.help_msg}")
         super().update(*args, **kwargs)
 
     def reset(self):
@@ -1254,12 +1246,9 @@ class SettingsManager(JSONDict):
         self.update(self.defaults)
 
 
-def deprecation_warn(arg, new_arg=None):
+def deprecation_warn(arg, new_arg):
     """Issue a deprecation warning when a deprecated argument is used, suggesting an updated argument."""
-    msg = f"WARNING ⚠️ '{arg}' is deprecated and will be removed in in the future."
-    if new_arg is not None:
-        msg += f" Use '{new_arg}' instead."
-    LOGGER.warning(msg)
+    LOGGER.warning(f"WARNING ⚠️ '{arg}' is deprecated and will be removed in in the future. Use '{new_arg}' instead.")
 
 
 def clean_url(url):
@@ -1273,19 +1262,19 @@ def url2file(url):
     return Path(clean_url(url)).name
 
 
-def vscode_msg(ext="ultralytics.ultralytics-snippets") -> str:
-    """Display a message to install Ultralytics-Snippets for VS Code if not already installed."""
+def vscode_msg(ext="jittoryolo.jittoryolo-snippets") -> str:
+    """Display a message to install jittoryolo-Snippets for VS Code if not already installed."""
     path = (USER_CONFIG_DIR.parents[2] if WINDOWS else USER_CONFIG_DIR.parents[1]) / ".vscode/extensions"
     obs_file = path / ".obsolete"  # file tracks uninstalled extensions, while source directory remains
     installed = any(path.glob(f"{ext}*")) and ext not in (obs_file.read_text("utf-8") if obs_file.exists() else "")
-    url = "https://docs.ultralytics.com/integrations/vscode"
-    return "" if installed else f"{colorstr('VS Code:')} view Ultralytics VS Code Extension ⚡ at {url}"
+    url = "https://docs.jittoryolo.com/integrations/vscode"
+    return "" if installed else f"{colorstr('VS Code:')} view jittoryolo VS Code Extension ⚡ at {url}"
 
 
 # Run below code on utils init ------------------------------------------------------------------------------------
 
 # Check first-install steps
-PREFIX = colorstr("Ultralytics: ")
+PREFIX = colorstr("jittoryolo: ")
 SETTINGS = SettingsManager()  # initialize settings
 PERSISTENT_CACHE = JSONDict(USER_CONFIG_DIR / "persistent_cache.json")  # initialize persistent cache
 DATASETS_DIR = Path(SETTINGS["datasets_dir"])  # global datasets directory
@@ -1306,10 +1295,10 @@ TESTS_RUNNING = is_pytest_running() or is_github_action_running()
 set_sentry()
 
 # Apply monkey patches
-from ultralytics.utils.patches import imread, imshow, imwrite, torch_load, torch_save
+from jittoryolo.utils.patches import imread, imshow, imwrite, torch_load, torch_save
 
-torch.load = torch_load
-torch.save = torch_save
+jt.load = torch_load
+jt.save = torch_save
 if WINDOWS:
     # Apply cv2 patches for non-ASCII and non-UTF characters in image paths
     cv2.imread, cv2.imwrite, cv2.imshow = imread, imwrite, imshow

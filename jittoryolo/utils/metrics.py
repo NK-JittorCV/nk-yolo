@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# jittoryolo YOLO 🚀, AGPL-3.0 license
 """Model validation metrics."""
 
 import math
@@ -73,16 +73,11 @@ def box_iou(box1, box2, eps=1e-7):
 
 def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
     """
-    Calculates the Intersection over Union (IoU) between bounding boxes.
-
-    This function supports various shapes for `box1` and `box2` as long as the last dimension is 4.
-    For instance, you may pass tensors shaped like (4,), (N, 4), (B, N, 4), or (B, N, 1, 4).
-    Internally, the code will split the last dimension into (x, y, w, h) if `xywh=True`,
-    or (x1, y1, x2, y2) if `xywh=False`.
+    Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
 
     Args:
-        box1 (torch.Tensor): A tensor representing one or more bounding boxes, with the last dimension being 4.
-        box2 (torch.Tensor): A tensor representing one or more bounding boxes, with the last dimension being 4.
+        box1 (torch.Tensor): A tensor representing a single bounding box with shape (1, 4).
+        box2 (torch.Tensor): A tensor representing n bounding boxes with shape (n, 4).
         xywh (bool, optional): If True, input boxes are in (x, y, w, h) format. If False, input boxes are in
                                (x1, y1, x2, y2) format. Defaults to True.
         GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
@@ -256,7 +251,6 @@ def batch_probiou(obb1, obb2, eps=1e-7):
     obb1 = jt.array(obb1) if isinstance(obb1, np.ndarray) else obb1
     obb2 = jt.array(obb2) if isinstance(obb2, np.ndarray) else obb2
 
-
     x1, y1 = obb1[..., :2].split(1, dim=-1)
     x2, y2 = (x.squeeze(-1)[None] for x in obb2[..., :2].split(1, dim=-1))
     a1, b1, c1 = _get_covariance_matrix(obb1)
@@ -276,12 +270,12 @@ def batch_probiou(obb1, obb2, eps=1e-7):
     return 1 - hd
 
 
-def smooth_bce(eps=0.1):
+def smooth_BCE(eps=0.1):
     """
     Computes smoothed positive and negative Binary Cross-Entropy targets.
 
     This function calculates positive and negative label smoothing BCE targets based on a given epsilon value.
-    For implementation details, refer to https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441.
+    For implementation details, refer to https://github.com/jittoryolo/yolov3/issues/238#issuecomment-598028441.
 
     Args:
         eps (float, optional): The epsilon value for label smoothing. Defaults to 0.1.
@@ -378,9 +372,10 @@ class ConfusionMatrix:
             else:
                 self.matrix[self.nc, gc] += 1  # true background
 
-        for i, dc in enumerate(detection_classes):
-            if not any(m1 == i):
-                self.matrix[dc, self.nc] += 1  # predicted background
+        if n:
+            for i, dc in enumerate(detection_classes):
+                if not any(m1 == i):
+                    self.matrix[dc, self.nc] += 1  # predicted background
 
     def matrix(self):
         """Returns the confusion matrix."""
@@ -405,7 +400,7 @@ class ConfusionMatrix:
             names (tuple): Names of classes, used as labels on the plot.
             on_plot (func): An optional callback to pass plots path and data when they are rendered.
         """
-        import seaborn  # scope for faster 'import ultralytics'
+        import seaborn  # scope for faster 'import jittoryolo'
 
         array = self.matrix / ((self.matrix.sum(0).reshape(1, -1) + 1e-9) if normalize else 1)  # normalize columns
         array[array < 0.005] = np.nan  # don't annotate (would appear as 0.00)
@@ -554,18 +549,19 @@ def ap_per_class(
         prefix (str, optional): A prefix string for saving the plot files. Defaults to an empty string.
 
     Returns:
-        tp (np.ndarray): True positive counts at threshold given by max F1 metric for each class.Shape: (nc,).
-        fp (np.ndarray): False positive counts at threshold given by max F1 metric for each class. Shape: (nc,).
-        p (np.ndarray): Precision values at threshold given by max F1 metric for each class. Shape: (nc,).
-        r (np.ndarray): Recall values at threshold given by max F1 metric for each class. Shape: (nc,).
-        f1 (np.ndarray): F1-score values at threshold given by max F1 metric for each class. Shape: (nc,).
-        ap (np.ndarray): Average precision for each class at different IoU thresholds. Shape: (nc, 10).
-        unique_classes (np.ndarray): An array of unique classes that have data. Shape: (nc,).
-        p_curve (np.ndarray): Precision curves for each class. Shape: (nc, 1000).
-        r_curve (np.ndarray): Recall curves for each class. Shape: (nc, 1000).
-        f1_curve (np.ndarray): F1-score curves for each class. Shape: (nc, 1000).
-        x (np.ndarray): X-axis values for the curves. Shape: (1000,).
-        prec_values (np.ndarray): Precision values at mAP@0.5 for each class. Shape: (nc, 1000).
+        (tuple): A tuple of six arrays and one array of unique classes, where:
+            tp (np.ndarray): True positive counts at threshold given by max F1 metric for each class.Shape: (nc,).
+            fp (np.ndarray): False positive counts at threshold given by max F1 metric for each class. Shape: (nc,).
+            p (np.ndarray): Precision values at threshold given by max F1 metric for each class. Shape: (nc,).
+            r (np.ndarray): Recall values at threshold given by max F1 metric for each class. Shape: (nc,).
+            f1 (np.ndarray): F1-score values at threshold given by max F1 metric for each class. Shape: (nc,).
+            ap (np.ndarray): Average precision for each class at different IoU thresholds. Shape: (nc, 10).
+            unique_classes (np.ndarray): An array of unique classes that have data. Shape: (nc,).
+            p_curve (np.ndarray): Precision curves for each class. Shape: (nc, 1000).
+            r_curve (np.ndarray): Recall curves for each class. Shape: (nc, 1000).
+            f1_curve (np.ndarray): F1-score curves for each class. Shape: (nc, 1000).
+            x (np.ndarray): X-axis values for the curves. Shape: (1000,).
+            prec_values: Precision values at mAP@0.5 for each class. Shape: (nc, 1000).
     """
     # Sort by objectness
     i = np.argsort(-conf)

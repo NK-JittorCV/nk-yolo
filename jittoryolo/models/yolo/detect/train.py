@@ -13,7 +13,7 @@ from jittoryolo.models import yolo
 from jittoryolo.nn.tasks import DetectionModel
 from jittoryolo.utils import LOGGER, RANK
 from jittoryolo.utils.plotting import plot_images, plot_labels, plot_results
-from jittoryolo.utils.jittor_utils import de_parallel, jittor_distributed_zero_first
+from jittoryolo.utils.jittor_utils import de_parallel
 
 
 class DetectionTrainer(BaseTrainer):
