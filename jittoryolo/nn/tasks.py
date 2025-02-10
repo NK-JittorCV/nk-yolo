@@ -61,6 +61,8 @@ from jittoryolo.nn.modules import (
     TorchVision,
     WorldDetect,
     v10Detect,
+    MSBlock,
+    GlobalToken,
 )
 from jittoryolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from jittoryolo.utils.checks import check_requirements, check_suffix, check_yaml
@@ -998,8 +1000,12 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             PSA,
             SCDown,
             C2fCIB,
+            MSBlock,
         }:
-            c1, c2 = ch[f], args[0]
+            if m in {MSBlock} and isinstance(f, list):
+                c1, c2 = ch[f[-1]], args[0]
+            else:
+                c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             if m is C2fAttn:

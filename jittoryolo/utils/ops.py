@@ -226,7 +226,7 @@ def non_max_suppression(
     nc = nc or (prediction.shape[1] - 4)  # number of classes
     nm = prediction.shape[1] - nc - 4  # number of masks
     mi = 4 + nc  # mask start index
-    xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
+    xc = prediction[:, 4:mi].max(1) > conf_thres  # candidates
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
@@ -241,7 +241,7 @@ def non_max_suppression(
             prediction = jt.concat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)  # xywh to xyxy
 
     t = time.time()
-    output = [jt.zeros((0, 6 + nm), device=prediction.device)] * bs
+    output = [jt.zeros((0, 6 + nm))] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
@@ -420,7 +420,7 @@ def xywh2xyxy(x):
         y (np.ndarray | jt.Var): The bounding box coordinates in (x1, y1, x2, y2) format.
     """
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
-    y = jt.empty_like(x) if isinstance(x, jt.Var) else np.empty_like(x)  # faster than clone/copy
+    y = jt.empty(x.shape, dtype=x.dtype) if isinstance(x, jt.Var) else np.empty_like(x)  # faster than clone/copy
     xy = x[..., :2]  # centers
     wh = x[..., 2:] / 2  # half width-height
     y[..., :2] = xy - wh  # top left xy
