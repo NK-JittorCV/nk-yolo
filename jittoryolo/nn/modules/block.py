@@ -1,4 +1,5 @@
 """Block modules."""
+from typing import Union, Sequence
 
 import jittor as jt
 from jittor import nn
@@ -48,6 +49,8 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "MSBlock",
+    "GlobalToken",
 )
 
 
@@ -1159,3 +1162,180 @@ class TorchVision(nn.Module):
         else:
             y = self.m(x)
         return y
+
+
+class GlobalToken(nn.Module):
+    def __init__(self, n, q) -> None:
+        super().__init__()
+        self.query = nn.Parameter(jt.randn((n, q * q)), 
+                                  requires_grad=True)
+    def execute(self, x):
+        return self.query
+    
+    
+class MSBlockBottleNeckLayer(nn.Module):
+    def __init__(self,
+                 in_channel: int,
+                 out_channel: int,
+                 kernel_size: Union[int, Sequence[int]],
+                 conv_group = 'auto',
+                 use_act = True) -> None:
+        super().__init__()
+        groups = 1 if conv_group != 'auto' else out_channel
+        self.in_conv = Conv(in_channel,
+                            out_channel,
+                            1,
+                            act=use_act)       
+        self.mid_conv = Conv(out_channel,
+                             out_channel,
+                             kernel_size,
+                             p=None,
+                             g=groups,
+                             act=use_act)
+        self.out_conv = Conv(out_channel,
+                             in_channel,
+                             1,
+                             act=use_act)
+    
+    def execute(self, x: jt.Var) -> jt.Var:
+        """Forward process
+        Args:
+            x (Tensor): The input tensor.
+        """
+        x = self.in_conv(x)
+        x = self.mid_conv(x)
+        x = self.out_conv(x)
+        return x
+
+class MSBlock_kxk_1x1_Layer(nn.Module):
+    def __init__(self,
+                 in_channel: int,
+                 out_channel: int,
+                 kernel_size: Union[int, Sequence[int]],
+                 conv_group = 'auto',
+                 use_act = True) -> None:
+        super().__init__()
+        groups = 1 if conv_group != 'auto' else in_channel
+        self.in_conv = Conv(in_channel,
+                            out_channel,
+                            kernel_size,
+                            p=None,
+                            g=groups,
+                            act=use_act)
+        self.out_conv = Conv(out_channel,
+                             in_channel,
+                             1,
+                             act=use_act)
+    
+    def execute(self, x):
+        x = self.in_conv(x)
+        x = self.out_conv(x)
+        return x
+
+class BranchAttentionv1(nn.Module):
+    def __init__(self, 
+                 dim, 
+                 length =3, 
+                 size: int = 4) -> None:
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d((size, size))
+        self.length = length
+        self.down_conv = nn.Conv2d(dim, 1, kernel_size=1)
+        
+    def execute(self, inputs: jt.Var, query: jt.Var):
+        n, _ = query.shape
+        b, C, _, _ = inputs.shape
+        outs = self.down_conv(self.pool(inputs))
+        weight = jt.matmul(query[None,...].repeat(b, 1, 1), outs.reshape(b, -1, 1)).sigmoid()
+        inputs = inputs * weight.repeat(1, C//n, 1).unsqueeze(-1)
+        return inputs
+    
+class MSBlock(nn.Module):
+    layer_dict ={
+        "MSBlock_kxk_1x1_Layer": MSBlock_kxk_1x1_Layer,
+        "MSBlockBottleNeckLayer": MSBlockBottleNeckLayer,
+    }
+    
+    def __init__(self,
+                 c1,
+                 c2,
+                 kernel_sizes,
+                 layer = "MSBlock_kxk_1x1_Layer",
+                 mid_expand_ratio: float = 2.,
+                 layers_num: int = 3,
+                 in_down_ratio: float = 1.,
+                 use_act = True,
+                 use_attention = False,
+                 N = -1,
+                 Q = -1):
+        super().__init__()
+        layer = self.layer_dict[layer]
+        self.layers_num = layers_num
+        
+        # Deal with input features
+        self.in_channel = int((c1 * len(kernel_sizes)) * in_down_ratio)
+        self.in_conv = Conv(c1,
+                            self.in_channel,
+                            k=1,
+                            act=use_act)
+        
+        # Deal with middle features
+        self.mid_channels = [int(1 / len(kernel_sizes) * self.in_channel) for _ in range(len(kernel_sizes))]
+        self.mid_expand_ratio = mid_expand_ratio
+        groups = [int(mid_channel * self.mid_expand_ratio) for mid_channel in self.mid_channels]
+        
+        
+        self.mid_convs = []
+        for kernel_size, group, mid_channel in zip(kernel_sizes, groups, self.mid_channels):
+            if kernel_size == 1:
+                self.mid_convs.append(nn.Identity())
+                continue
+            mid_convs = [layer(mid_channel,
+                               group,
+                               kernel_size=kernel_size,
+                               conv_group="auto",
+                               use_act = use_act) for _ in range(int(self.layers_num))]
+            self.mid_convs.append(nn.Sequential(*mid_convs))
+        self.mid_convs = nn.ModuleList(self.mid_convs)
+
+        mid_channels = [0] + self.mid_channels
+        self.indices = [(sum(mid_channels[:i+1]), sum(mid_channels[:i+2])) for i in range(len(self.mid_convs))]
+
+        self.attention = BranchAttentionv1(self.in_channel,
+                                           length=N,
+                                           size=Q) if use_attention else None
+        self.out_conv = Conv(self.in_channel,
+                             c2,
+                             1,
+                             act=use_act)
+
+            
+    def execute(self, x) -> jt.Var:
+        
+        query = None
+        if self.attention is not None:
+            if isinstance(x, list):
+                query, x  = x[0], x[1]
+                
+        out = self.in_conv(x)
+        channels = []
+        
+        n = len(self.mid_convs)
+
+        for i in range(n):
+            start = self.indices[i][0]
+            end = self.indices[i][1]
+            channel = out[:, start:end, ...]
+            if i >= 2:
+                channel = channel + channels[i-1]
+            channel = self.mid_convs[i](channel)
+            channels.append(channel)
+        
+        out = jt.concat(channels, dim=1)
+        if self.attention is not None:
+            if query is not None:
+                out = self.attention(out, query)
+            else:
+                out = self.attention(out)
+        out = self.out_conv(out)
+        return out
