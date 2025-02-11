@@ -171,3 +171,9 @@ pnnx*
 
 # calibration image
 calibration_*.npy
+
+# Ultralytics
+/ultralytics/
+
+# Datasets
+datasets/

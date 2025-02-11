@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 import jittor as jt
 from jittor import nn, optim
-
 from jittoryolo.cfg import get_cfg, get_save_dir
 from jittoryolo.data.utils import check_cls_dataset, check_det_dataset
 from jittoryolo.nn.tasks import attempt_load_one_weight, attempt_load_weights
@@ -50,7 +49,6 @@ from jittoryolo.utils.jittor_utils import (
     select_device,
     strip_optimizer,
 )
-
 
 class BaseTrainer:
     """
@@ -121,13 +119,13 @@ class BaseTrainer:
             print_args(vars(self.args))
 
         # Device
-        if self.device.type in {"cpu", "mps"}:
+        if self.device in {"cpu", "mps"}:
             self.args.workers = 0  # faster CPU training as time dominated by inference, not dataloading
 
         # Model and Dataset
         self.model = check_model_file_from_stem(self.args.model)  # add suffix, i.e. yolov8n -> yolov8n.pt
-        with jt_jtributed_zero_first(LOCAL_RANK):  # avoid auto-downloading dataset multiple times
-            self.trainset, self.testset = self.get_dataset()
+
+        self.trainset, self.testset = self.get_dataset()
         self.ema = None
 
         # Optimization utils init
@@ -229,7 +227,7 @@ class BaseTrainer:
         # Model
         self.run_callbacks("on_pretrain_routine_start")
         ckpt = self.setup_model()
-        self.model = self.model.to(self.device)
+        self.model = self.model
         self.set_model_attributes()
 
         # Freeze layers
@@ -247,6 +245,10 @@ class BaseTrainer:
             if any(x in k for x in freeze_layer_names):
                 LOGGER.info(f"Freezing layer '{k}'")
                 v.requires_grad = False
+            # 增加对BatchNorm参数的特殊处理
+            elif "running_mean" in k or "running_var" in k:
+                # BatchNorm的running_mean和running_var不需要梯度
+                v.requires_grad = False
             elif not v.requires_grad and v.dtype.is_floating_point:  # only floating point Tensor can require gradients
                 LOGGER.info(
                     f"WARNING ⚠️ setting 'requires_grad=True' for frozen layer '{k}'. "
@@ -255,19 +257,45 @@ class BaseTrainer:
                 v.requires_grad = True
 
         # Check AMP
-        self.amp = jt.tensor(self.args.amp).to(self.device)  # True or False
-        if self.amp and RANK in {-1, 0}:  # Single-GPU and DDP
-            callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
-            self.amp = jt.tensor(check_amp(self.model), device=self.device)
-            callbacks.default_callbacks = callbacks_backup  # restore callbacks
-        if RANK > -1 and world_size > 1:  # DDP
-            jt.broadcast(self.amp, src=0)  # broadcast the tensor from rank 0 to all other ranks (returns None)
-        self.amp = bool(self.amp)  # as boolean
-        self.scaler = (
-            jt.amp.GradScaler("cuda", enabled=self.amp) if jt else jt.cuda.amp.GradScaler(enabled=self.amp)
-        )
-        if world_size > 1:
-            self.model = nn.parallel.jtributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
+        # self.amp = self.args.amp  # True or False
+        # if self.amp and RANK in {-1, 0}:  # Single-GPU and DDP
+        #     callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
+        #     self.amp = check_amp(self.model)
+        #     callbacks.default_callbacks = callbacks_backup  # restore callbacks
+        # if RANK > -1 and world_size > 1:  # DDP
+        #     jt.broadcast(self.amp, src=0)  # broadcast the tensor from rank 0 to all other ranks (returns None)
+        # self.amp = bool(self.amp)  # as boolean
+        # self.scaler = (
+        #     jt.amp.GradScaler("cuda", enabled=self.amp) if jt else jt.cuda.amp.GradScaler(enabled=self.amp)
+        # )
+        # if world_size > 1:
+        #     self.model = nn.parallel.jtributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
+        # self.amp = self.args.amp  # True or False
+        # callbacks_backup = None  # Placeholder for callbacks in case needed
+
+        # # Check if AMP is enabled and synchronize across processes
+        # if self.amp and (jt.rank == -1 or jt.rank == 0):  # Single-GPU or main process in DDP
+        #     jt.flags.use_cuda_amp = self.amp  # Enable/disable mixed precision
+
+        # # Broadcast the AMP setting from rank 0 to all other processes
+        # if jt.world_size > 1:
+        #     # Create a Jittor Var from the boolean value and convert to integer for broadcasting
+        #     amp_var = jt.Var([int(self.amp)], dtype=jt.int32)
+        #     jt.distributed.broadcast(amp_var, 0)  # Broadcast from rank 0 to all ranks
+        #     self.amp = bool(amp_var.item())  # Update self.amp based on rank 0's value
+
+        # # Ensure self.amp is a boolean
+        # self.amp = bool(self.amp)
+
+        # # Enable mixed precision based on the broadcasted flag
+        # jt.flags.use_cuda_amp = int(self.amp)
+
+        # # Initialize the GradScaler (placeholder, Jittor does not require this)
+        # self.scaler = None
+
+        # # Wrap the model with DistributedDataParallel if using multiple GPUs
+        # if jt.world_size > 1:
+        #     self.model = jt.distributed.ParallelModel(self.model)
 
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
