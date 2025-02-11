@@ -138,7 +138,10 @@ class HGBlock(nn.Module):
         """Initializes a CSP Bottleneck with 1 convolution using specified input and output channels."""
         super().__init__()
         block = LightConv if lightconv else Conv
-        self.m = nn.ModuleList(block(c1 if i == 0 else cm, cm, k=k, act=act) for i in range(n))
+        blocks = []
+        for i in range(n):
+            blocks.append(block(c1 if i == 0 else cm, cm, k=k, act=act))
+        self.m = nn.ModuleList(blocks)
         self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act)  # squeeze conv
         self.ec = Conv(c2 // 2, c2, 1, 1, act=act)  # excitation conv
         self.add = shortcut and c1 == c2
@@ -232,7 +235,10 @@ class C2f(nn.Module):
         self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
-        self.m = nn.ModuleList([Bottleneck(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n)])
+        blocks = []
+        for _ in range(n):
+            blocks.append(Bottleneck(self.c, self.c, shortcut, g, k=(3, 3), e=1.0))
+        self.m = nn.ModuleList(blocks)
 
     def execute(self, x):
         """execute pass through C2f layer."""
@@ -721,7 +727,10 @@ class C3f(nn.Module):
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv(c1, c_, 1, 1)
         self.cv3 = Conv((2 + n) * c_, c2, 1)  # optional act=FReLU(c2)
-        self.m = nn.ModuleList(Bottleneck(c_, c_, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
+        blocks = []
+        for _ in range(n):
+            blocks.append(Bottleneck(c_, c_, shortcut, g, k=((3, 3), (3, 3)), e=1.0))
+        self.m = nn.ModuleList(blocks)
 
     def execute(self, x):
         """execute pass through C2f layer."""
@@ -736,9 +745,11 @@ class C3k2(C2f):
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
         """Initializes the C3k2 module, a faster CSP Bottleneck with 2 convolutions and optional C3k blocks."""
         super().__init__(c1, c2, n, shortcut, g, e)
-        self.m = nn.ModuleList(
-            C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g) for _ in range(n)
-        )
+        blocks = []
+        for _ in range(n):
+            block = C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g)
+            blocks.append(block)
+        self.m = nn.ModuleList(blocks)
 
 
 class C3k(C3):
@@ -1075,7 +1086,10 @@ class C2fPSA(C2f):
         """Initializes the C2fPSA module, a variant of C2f with PSA blocks for enhanced feature extraction."""
         assert c1 == c2
         super().__init__(c1, c2, n=n, e=e)
-        self.m = nn.ModuleList(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64) for _ in range(n))
+        blocks = []
+        for _ in range(n):
+            blocks.append(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64))
+        self.m = nn.ModuleList(blocks)
 
 
 class SCDown(nn.Module):

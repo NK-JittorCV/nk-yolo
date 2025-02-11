@@ -131,104 +131,83 @@ def get_gpu_info(index):
 
 def select_device(device="", batch=0, newline=False, verbose=True):
     """
-    Selects the appropriate PyTorch device based on the provided arguments.
-
-    The function takes a string specifying the device or a torch.device object and returns a torch.device object
-    representing the selected device. The function also validates the number of available devices and raises an
-    exception if the requested device(s) are not available.
-
+    Select appropriate Jittor device for running.
+    
     Args:
-        device (str | torch.device, optional): Device string or torch.device object.
-            Options are 'None', 'cpu', or 'cuda', or '0' or '0,1,2,3'. Defaults to an empty string, which auto-selects
-            the first available GPU, or CPU if no GPU is available.
-        batch (int, optional): Batch size being used in your model. Defaults to 0.
-        newline (bool, optional): If True, adds a newline at the end of the log string. Defaults to False.
-        verbose (bool, optional): If True, logs the device information. Defaults to True.
-
+        device (str, optional): Device string. Available options: "", "cpu", "cuda", "0", etc.
+           Default empty string will auto-select first available GPU, or CPU if no GPU exists.
+        batch (int, optional): Batch size used in model. Defaults to 0.
+        newline (bool, optional): If True, add newline at end of log string. Defaults to False.
+        verbose (bool, optional): If True, print device info. Defaults to True.
+    
     Returns:
-        (torch.device): Selected device.
-
+        str: Selected device string ("cpu" or "cuda")
+    
     Raises:
-        ValueError: If the specified device is not available or if the batch size is not a multiple of the number of
-            devices when using multiple GPUs.
-
-    Examples:
-        >>> select_device("cuda:0")
-        device(type='cuda', index=0)
-
-        >>> select_device("cpu")
-        device(type='cpu')
-
-    Note:
-        Sets the 'CUDA_VISIBLE_DEVICES' environment variable for specifying which GPUs to use.
+        ValueError: If requested device is not available, or batch size is not multiple of GPU count in multi-GPU mode.
     """
-    if isinstance(device, torch.device) or str(device).startswith("tpu"):
-        return device
+    s = f"jittoryolo {__version__} 🚀 Python-{PYTHON_VERSION} Jittor-{jt.__version__}"
 
-    s = f"jittoryolo {__version__} 🚀 Python-{PYTHON_VERSION} torch-{torch.__version__} "
-    device = str(device).lower()
+    # Process device string
+    device = str(device).lower().strip()
+    # Remove unnecessary chars 
     for remove in "cuda:", "none", "(", ")", "[", "]", "'", " ":
-        device = device.replace(remove, "")  # to string, 'cuda:0' -> '0' and '(0, 1)' -> '0,1'
-    cpu = device == "cpu"
-    mps = device in {"mps", "mps:0"}  # Apple Metal Performance Shaders (MPS)
-    if cpu or mps:
-        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # force torch.cuda.is_available() = False
-    elif device:  # non-cpu device requested
+        device = device.replace(remove, "")
+
+    # CPU mode
+    if device == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+        if verbose:
+            LOGGER.info(f"{s} CPU Mode {'↵' if newline else ''}")
+        return "cpu"
+
+    # GPU mode
+    if device:  # specific device requested
         if device == "cuda":
             device = "0"
-        if "," in device:
-            device = ",".join([x for x in device.split(",") if x])  # remove sequential commas, i.e. "0,,1" -> "0,1"
+        if "," in device:  # multi-GPU case
+            device = ",".join(x for x in device.split(",") if x)  # clean sequential commas
+            
+        # Set visible GPUs
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        os.environ["CUDA_VISIBLE_DEVICES"] = device  # set environment variable - must be before assert is_available()
-        if not (torch.cuda.is_available() and torch.cuda.device_count() >= len(device.split(","))):
+        os.environ["CUDA_VISIBLE_DEVICES"] = device
+        
+        # Check CUDA availability
+        if not jt.has_cuda:
             LOGGER.info(s)
-            install = (
-                "See https://pytorch.org/get-started/locally/ for up-to-date torch install instructions if no "
-                "CUDA devices are seen by torch.\n"
-                if torch.cuda.device_count() == 0
-                else ""
-            )
             raise ValueError(
-                f"Invalid CUDA 'device={device}' requested."
-                f" Use 'device=cpu' or pass valid CUDA device(s) if available,"
-                f" i.e. 'device=0' or 'device=0,1,2,3' for Multi-GPU.\n"
-                f"\ntorch.cuda.is_available(): {torch.cuda.is_available()}"
-                f"\ntorch.cuda.device_count(): {torch.cuda.device_count()}"
-                f"\nos.environ['CUDA_VISIBLE_DEVICES']: {visible}\n"
-                f"{install}"
+                f"Invalid CUDA 'device={device}' requested. "
+                f"Use 'device=cpu' or pass valid CUDA device(s) if available, "
+                f"i.e. 'device=0' or 'device=0,1,2,3' for Multi-GPU.\n"
+                f"\njt.has_cuda: {jt.has_cuda}"
+                f"\nos.environ['CUDA_VISIBLE_DEVICES']: {visible}"
             )
-
-    if not cpu and not mps and torch.cuda.is_available():  # prefer GPU if available
-        devices = device.split(",") if device else "0"  # i.e. "0,1" -> ["0", "1"]
-        n = len(devices)  # device count
-        if n > 1:  # multi-GPU
-            if batch < 1:
+            
+        # Check batch size for multi-GPU
+        n = len(device.split(","))
+        if n > 1 and batch > 0:  # multi-GPU training
+            if batch < n:
                 raise ValueError(
-                    "AutoBatch with batch<1 not supported for Multi-GPU training, "
-                    "please specify a valid batch size, i.e. batch=16."
+                    f"Batch size {batch} must be larger than GPU count {n} for Multi-GPU training"
                 )
-            if batch >= 0 and batch % n != 0:  # check batch_size is divisible by device_count
+            if batch % n != 0:
                 raise ValueError(
-                    f"'batch={batch}' must be a multiple of GPU count {n}. Try 'batch={batch // n * n}' or "
-                    f"'batch={batch // n * n + n}', the nearest batch sizes evenly divisible by {n}."
+                    f"Batch size {batch} must be divisible by GPU count {n} for Multi-GPU training. "
+                    f"Try using batch size {batch // n * n} or {batch // n * n + n}"
                 )
-        space = " " * (len(s) + 1)
-        for i, d in enumerate(devices):
-            s += f"{'' if i == 0 else space}CUDA:{d} ({get_gpu_info(i)})\n"  # bytes to MB
-        arg = "cuda:0"
-    elif mps and TORCH_2_0 and torch.backends.mps.is_available():
-        # Prefer MPS if available
-        s += f"MPS ({get_cpu_info()})\n"
-        arg = "mps"
-    else:  # revert to CPU
-        s += f"CPU ({get_cpu_info()})\n"
-        arg = "cpu"
+    
+    # Default to CUDA if available
+    if jt.has_cuda:
+        device = "cuda"
+        if verbose:
+            LOGGER.info(f"{s} CUDA enabled {'↵' if newline else ''}")
+    else:  # fallback to CPU
+        device = "cpu" 
+        if verbose:
+            LOGGER.info(f"{s} CPU Mode {'↵' if newline else ''}")
 
-    if arg in {"cpu", "mps"}:
-        torch.set_num_threads(NUM_THREADS)  # reset OMP_NUM_THREADS for cpu training
-    if verbose:
-        LOGGER.info(s if newline else s.rstrip())
-    return jt.device(arg)
+    jt.flags.use_cuda = (device == "cuda")
+    return device
 
 
 def time_sync():
@@ -483,24 +462,31 @@ def one_cycle(y1=0.0, y2=1.0, steps=100):
 
 
 def init_seeds(seed=0, deterministic=False):
-    """Initialize random number generator (RNG) seeds https://pytorch.org/docs/stable/notes/randomness.html."""
+    """Initialize RNG seeds and configure deterministic settings for Jittor."""
+    # Set Python's random seed
     random.seed(seed)
+    
+    # Set NumPy's random seed
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # for Multi-GPU, exception safe
-    # torch.backends.cudnn.benchmark = True  # AutoBatch problem https://github.com/jittoryolo/yolov5/issues/9287
+    
+    # Set Jittor's global seed
+    jt.set_global_seed(seed)
+    
+    # Configure deterministic settings
     if deterministic:
-        if TORCH_2_0:
-            torch.use_deterministic_algorithms(True, warn_only=True)  # warn if deterministic is not possible
-            torch.backends.cudnn.deterministic = True
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-            os.environ["PYTHONHASHSEED"] = str(seed)
-        else:
-            LOGGER.warning("WARNING ⚠️ Upgrade to torch>=2.0.0 for deterministic training.")
+        # Set CUBLAS workspace configuration for deterministic behavior
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        # Set Python's hash seed
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        # Enable deterministic algorithms (Jittor-specific logic may vary)
+        # Note: Jittor may not have a direct equivalent to torch.use_deterministic_algorithms
+        # You can set additional environment variables or configurations if available
     else:
-        torch.use_deterministic_algorithms(False)
-        torch.backends.cudnn.deterministic = False
+        # Reset deterministic settings (if applicable)
+        if "CUBLAS_WORKSPACE_CONFIG" in os.environ:
+            del os.environ["CUBLAS_WORKSPACE_CONFIG"]
+        if "PYTHONHASHSEED" in os.environ:
+            del os.environ["PYTHONHASHSEED"]
 
 
 class ModelEMA:

@@ -34,7 +34,7 @@ from jittoryolo.utils.checks import check_file, check_font, is_ascii
 from jittoryolo.utils.downloads import download, safe_download, unzip_file
 from jittoryolo.utils.ops import segments2boxes
 
-HELP_URL = "See https://docs.jittoryolo.com/datasets for dataset formatting guidance."
+HELP_URL = "See https://docs.ultralytics.com/datasets for dataset formatting guidance."
 IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm", "heic"}  # image suffixes
 VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"}  # video suffixes
 PIN_MEMORY = str(os.getenv("PIN_MEMORY", True)).lower() == "true"  # global pin_memory for dataloaders
@@ -379,7 +379,7 @@ def check_cls_dataset(dataset, split=""):
         if str(dataset) == "imagenet":
             subprocess.run(f"bash {ROOT / 'data/scripts/get_imagenet.sh'}", shell=True, check=True)
         else:
-            url = f"https://github.com/jittoryolo/assets/releases/download/v0.0.0/{dataset}.zip"
+            url = f"https://github.com/yolo/assets/releases/download/v0.0.0/{dataset}.zip"
             download(url, dir=data_dir.parent)
         s = f"Dataset download success ✅ ({time.time() - t:.1f}s), saved to {colorstr('bold', data_dir)}\n"
         LOGGER.info(s)
@@ -433,8 +433,8 @@ class HUBDatasetStats:
         autodownload (bool): Attempt to download dataset if not found locally. Default is False.
 
     Example:
-        Download *.zip files from https://github.com/jittoryolo/hub/tree/main/example_datasets
-            i.e. https://github.com/jittoryolo/hub/raw/main/example_datasets/coco8.zip for coco8.zip.
+        Download *.zip files from https://github.com/ultralytics/hub/tree/main/example_datasets
+            i.e. https://github.com/ultralytics/hub/raw/main/example_datasets/coco8.zip for coco8.zip.
         ```python
         from jittoryolo.data.utils import HUBDatasetStats
 
@@ -656,7 +656,7 @@ def load_dataset_cache_file(path):
     """Load an jittoryolo *.cache dictionary from path."""
     import gc
 
-    gc.disable()  # reduce pickle load time https://github.com/jittoryolo/jittoryolo/pull/1585
+    gc.disable()  
     cache = np.load(str(path), allow_pickle=True).item()  # load dict
     gc.enable()
     return cache

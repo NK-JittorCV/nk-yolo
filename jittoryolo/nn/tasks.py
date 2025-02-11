@@ -326,7 +326,7 @@ class DetectionModel(BaseModel):
         # Build strides
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
-            s = 256  # 2x min stride
+            s = 640  # 2x min stride
             m.inplace = self.inplace
 
             def _execute(x):
@@ -950,10 +950,28 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             LOGGER.warning(f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}'.")
         depth, width, max_channels = scales[scale]
 
-    if act:
-        Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
-        if verbose:
-            LOGGER.info(f"{colorstr('activation:')} {act}")  # print
+        activation_mapping = {
+            'SiLU': nn.SiLU,
+            'silu': nn.SiLU,
+            'ReLU': nn.ReLU,
+            'relu': nn.ReLU,
+            'LeakyReLU': nn.LeakyReLU,
+            'leakyrelu': nn.LeakyReLU,
+
+        }
+        
+        if 'act' in d:
+            act = d['act']
+            if isinstance(act, str):
+                if act in activation_mapping:
+                    Conv.default_act = activation_mapping[act]()
+                else:
+                    try:
+                        Conv.default_act = getattr(nn, act)()
+                    except AttributeError:
+                        raise ValueError(f"Activation function '{act}' not found in jittor.nn")
+            else:
+                Conv.default_act = act
 
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
