@@ -224,18 +224,31 @@ class YOLODataset(BaseDataset):
     @staticmethod
     def collate_fn(batch):
         """Collates data samples into batches."""
+        if not batch:
+            return None
+        
         new_batch = {}
-        keys = batch[0].keys()
-        values = list(zip(*[list(b.values()) for b in batch]))
-        for i, k in enumerate(keys):
-            value = values[i]
+        for k in batch[0].keys():
+            values = [item[k] for item in batch]
+            
             if k == "img":
-                value = jt.stack(value, 0)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
-                value = jt.concat(value, 0)
-            new_batch[k] = value
-        new_batch["batch_idx"] = list(new_batch["batch_idx"])
-        for i in range(len(new_batch["batch_idx"])):
-            new_batch["batch_idx"][i] += i  # add target image index for build_targets()
-        new_batch["batch_idx"] = jt.concat(new_batch["batch_idx"], 0)
+                # 图像可以直接堆叠，因为已经被预处理为相同大小
+                new_batch[k] = jt.stack(values, 0)
+            elif k == "cls":
+                # 类别索引可能长度不同，保持为列表
+                new_batch[k] = values
+            elif k == "bboxes":
+                # 边界框可能大小不同，保持为列表
+                new_batch[k] = values
+            elif k == "batch_idx":
+                # 创建批次索引
+                lengths = [len(v) for v in values[0]]  # 获取每个样本中实例的数量
+                batch_idx = []
+                for i, length in enumerate(lengths):
+                    batch_idx.extend([i] * length)
+                new_batch[k] = jt.array(batch_idx)
+            else:
+                # 其他数据保持原样
+                new_batch[k] = values
+        
         return new_batch

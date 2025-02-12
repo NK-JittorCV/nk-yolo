@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import jittor as jt
+from jittor.dataset import Dataset, DataLoader
 from PIL import Image
 
 from jittoryolo.data.dataset import YOLODataset
@@ -24,60 +25,162 @@ from jittoryolo.utils import RANK, colorstr
 from jittoryolo.utils.checks import check_file
 
 
-class InfiniteDataLoader(object):
-    """
-    Dataloader that reuses workers.
+class InfiniteDataset(Dataset):
+    """Dataset wrapper that repeats forever."""
+    
+    def __init__(self, dataset):
+        """Initialize infinite dataset wrapper."""
+        super().__init__()
+        self.dataset = dataset
+        
+        # Set basic dataset attributes
+        self.set_attrs(
+            total_len=len(dataset),
+            batch_size=1,
+            shuffle=False,
+            drop_last=False,
+            num_workers=0,
+            buffer_size=1
+        )
+        
+        # Forward all attributes from the original dataset that we don't explicitly define
+        self.__dict__.update({k: v for k, v in dataset.__dict__.items() if not hasattr(self, k)})
+        
+        # Set collate function directly 
+        if hasattr(dataset, 'collate_fn'):
+            self.collate_fn = dataset.collate_fn
 
-    Uses same syntax as vanilla DataLoader.
-    """
+    def __getitem__(self, index):
+        """Get item at index from dataset."""
+        return self.dataset[index % len(self.dataset)]
 
-    def __init__(self, *args, **kwargs):
-        """Dataloader that infinitely recycles workers, inherits from DataLoader."""
-        super().__init__(*args, **kwargs)
-        object.__setattr__(self, "batch_sampler", _RepeatSampler(self.batch_sampler))
-        self.iterator = super().__iter__()
+    # 新增：覆盖默认的collate_batch方法，使用自定义collate_fn
+    def collate_batch(self, batch):
+        return self.collate_fn(batch)
+
+
+def collate_fn(batch):
+    """Collates data samples into batches.
+    
+    Args:
+        batch: List of samples from dataset
+        
+    Returns:
+        Dictionary with batched data
+    """
+    n = len(batch)
+    if n == 0:
+        return None
+    
+    out = {}
+    keys = batch[0].keys()
+    
+    for k in keys:
+        values = [item[k] for item in batch]
+        
+        if k == "img":
+            # Images should always be stacked
+            out[k] = jt.stack(values, 0)
+            
+        elif k in ["masks", "keypoints", "bboxes", "cls", "segments"]:
+            # These items may have different sizes per sample
+            if isinstance(values[0], jt.Var):
+                try:
+                    # Try stacking if shapes match
+                    out[k] = jt.stack(values, 0)
+                except:
+                    # Fall back to list if shapes don't match
+                    out[k] = values
+            else:
+                out[k] = values
+                
+        elif k == "batch_idx":
+            # Special handling for batch indices
+            if isinstance(values[0], (list, tuple)):
+                out[k] = []
+                for i, v in enumerate(values):
+                    out[k].extend([i] * len(v))
+                out[k] = jt.array(out[k])
+            else:
+                out[k] = jt.array(values)
+                
+        elif isinstance(values[0], (int, float)):
+            # Basic numeric types
+            out[k] = jt.array(values)
+            
+        else:
+            # Keep other types as lists
+            out[k] = values
+            
+    return out
+
+class InfiniteDataLoader:
+    """
+    DataLoader wrapper for infinite iteration.
+    """
+    def __init__(self, dataset, batch_size, shuffle=False, num_workers=0,
+                 pin_memory=False, worker_init_fn=None, drop_last=False,
+                 buffer_size=512, collate_fn=None):  # 默认 buffer_size 为 512
+        """Initialize InfiniteDataLoader."""
+        # Create infinite dataset
+        self.dataset = InfiniteDataset(dataset)
+        
+        # Use dataset's collate_fn if available, otherwise use provided or default
+        if collate_fn is None and hasattr(dataset, 'collate_fn'):
+            collate_fn = dataset.collate_fn
+        
+        # 修改此处：使用传入的 batch_size，而不是固定的 1
+        self.dataset.set_attrs(
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            num_workers=num_workers,
+            buffer_size=buffer_size
+        )
+        # 直接设置 dataset.buffer_size 确保 RingBuffer 使用正确大小
+        self.dataset.buffer_size = buffer_size
+        
+        if collate_fn:
+            self.dataset.collate_fn = collate_fn
+        
+        # Store configuration
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.worker_init_fn = worker_init_fn
+        self.collate_fn = collate_fn
+        
+        # Create iterator
+        self.iterator = iter(self.dataset)
 
     def __len__(self):
-        """Returns the length of the batch sampler's sampler."""
-        return len(self.batch_sampler.sampler)
+        """Return length of dataset."""
+        return len(self.dataset)
 
     def __iter__(self):
-        """Creates a sampler that repeats indefinitely."""
-        for _ in range(len(self)):
-            yield next(self.iterator)
+        """Return self as iterator."""
+        return self
+
+    def __next__(self):
+        """Get next batch."""
+        try:
+            batch = next(self.iterator)
+        except StopIteration:
+            self.iterator = iter(self.dataset)
+            batch = next(self.iterator)
+        return batch
 
     def reset(self):
-        """
-        Reset iterator.
-
-        This is useful when we want to modify settings of dataset while training.
-        """
-        self.iterator = self._get_iterator()
-
-
-class _RepeatSampler:
-    """
-    Sampler that repeats forever.
-
-    Args:
-        sampler (Dataset.sampler): The sampler to repeat.
-    """
-
-    def __init__(self, sampler):
-        """Initializes an object that repeats a given sampler indefinitely."""
-        self.sampler = sampler
-
-    def __iter__(self):
-        """Iterates over the 'sampler' and yields its contents."""
-        while True:
-            yield from iter(self.sampler)
+        """Reset iterator."""
+        self.iterator = iter(self.dataset)
 
 
 def seed_worker(worker_id):  # noqa
-    """Set dataloader worker seed https://pytorch.org/docs/stable/notes/randomness.html#dataloader."""
-    worker_seed = jt.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
+    """Set dataloader worker seed."""
+    # Use Python's random and numpy instead of torch/jittor specific RNG
+    seed = int(random.random() * 2**32)  # Generate random seed
+    np.random.seed(seed + worker_id)
+    random.seed(seed + worker_id)
 
 
 def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, stride=32, multi_modal=False):
@@ -101,25 +204,23 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     )
 
 
-def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1):
-    """Return an InfiniteDataLoader or DataLoader for training or validation set."""
+def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size=512):  # 修改默认 buffer_size 为 512
+    """Return an InfiniteDataLoader for training or validation set."""
     batch = min(batch, len(dataset))
-    nd = jt.cuda.device_count()  # number of CUDA devices
-    nw = min(os.cpu_count() // max(nd, 1), workers)  # number of workers
-    sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
-    generator = jt.Generator()
-    generator.manual_seed(6148914691236517205 + RANK)
-    return InfiniteDataLoader(
+    workers = min(os.cpu_count() or 1, workers)  # Limit workers
+    
+    loader = InfiniteDataLoader(
         dataset=dataset,
         batch_size=batch,
-        shuffle=shuffle and sampler is None,
-        num_workers=nw,
-        sampler=sampler,
+        shuffle=shuffle and rank == -1,
+        num_workers=workers,
         pin_memory=PIN_MEMORY,
-        collate_fn=getattr(dataset, "collate_fn", None),
         worker_init_fn=seed_worker,
-        generator=generator,
+        drop_last=False,
+        buffer_size=buffer_size  # 使用更新后的 buffer_size
     )
+    
+    return loader
 
 
 def check_source(source):

@@ -17,7 +17,7 @@ from jittoryolo.utils.downloads import download
 __all__ = (
     "__version__",
     # "ASSETS",
-    # "YOLO",
+     "YOLO",
     # "YOLOWorld",
     # "NAS",
     # "SAM",

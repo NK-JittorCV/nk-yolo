@@ -36,7 +36,7 @@ class TaskAlignedAssigner(nn.Module):
         self.eps = eps
 
     @jt.no_grad()
-    def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+    def execute(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
         """
         Compute the task-aligned assignment. Reference code is available at
         https://github.com/Nioolek/PPYOLOE_pyjt/blob/master/ppyoloe/assigner/tal_assigner.py.
@@ -60,13 +60,12 @@ class TaskAlignedAssigner(nn.Module):
         self.n_max_boxes = gt_bboxes.shape[1]
 
         if self.n_max_boxes == 0:
-            device = gt_bboxes.device
             return (
-                jt.full_like(pd_scores[..., 0], self.bg_idx).to(device),
-                jt.zeros_like(pd_bboxes).to(device),
-                jt.zeros_like(pd_scores).to(device),
-                jt.zeros_like(pd_scores[..., 0]).to(device),
-                jt.zeros_like(pd_scores[..., 0]).to(device),
+                jt.full_like(pd_scores[..., 0], self.bg_idx),
+                jt.zeros_like(pd_bboxes),
+                jt.zeros_like(pd_scores),
+                jt.zeros_like(pd_scores[..., 0]),
+                jt.zeros_like(pd_scores[..., 0]),
             )
 
         mask_pos, align_metric, overlaps = self.get_pos_mask(
@@ -80,9 +79,9 @@ class TaskAlignedAssigner(nn.Module):
 
         # Normalize
         align_metric *= mask_pos
-        pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)  # b, max_num_obj
-        pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)  # b, max_num_obj
-        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
+        pos_align_metrics = align_metric.max(dim=-1, keepdim=True)  # b, max_num_obj
+        pos_overlaps = (overlaps * mask_pos).max(dim=-1, keepdim=True)  # b, max_num_obj
+        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).max(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
 
         return target_labels, target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
@@ -103,10 +102,10 @@ class TaskAlignedAssigner(nn.Module):
         """Compute alignment metric given predicted and ground truth bounding boxes."""
         na = pd_bboxes.shape[-2]
         mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
-        overlaps = jt.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
-        bbox_scores = jt.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
+        overlaps = jt.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype)
+        bbox_scores = jt.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype)
 
-        ind = jt.zeros([2, self.bs, self.n_max_boxes], dtype=jt.long)  # 2, b, max_num_obj
+        ind = jt.zeros([2, self.bs, self.n_max_boxes], dtype=jt.int64)  # 2, b, max_num_obj
         ind[0] = jt.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
         ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
         # Get the scores of each grid for each gt cls
@@ -145,14 +144,16 @@ class TaskAlignedAssigner(nn.Module):
         if topk_mask is None:
             topk_mask = (topk_metrics.max(-1, keepdim=True)[0] > self.eps).expand_as(topk_idxs)
         # (b, max_num_obj, topk)
-        topk_idxs.masked_fill_(~topk_mask, 0)
+        topk_idxs.masked_fill_(jt.logical_not(topk_mask), 0)
+
 
         # (b, max_num_obj, topk, h*w) -> (b, max_num_obj, h*w)
-        count_tensor = jt.zeros(metrics.shape, dtype=jt.int8, device=topk_idxs.device)
-        ones = jt.ones_like(topk_idxs[:, :, :1], dtype=jt.int8, device=topk_idxs.device)
+        count_tensor = jt.zeros(metrics.shape, dtype=jt.int8)
+        ones = jt.ones_like(topk_idxs[:, :, :1]).astype(jt.int8)
+
         for k in range(self.topk):
             # Expand topk_idxs for each value of k and add 1 at the specified positions
-            count_tensor.scatter_add_(-1, topk_idxs[:, :, k : k + 1], ones)
+            count_tensor = jt.scatter(count_tensor, -1, topk_idxs[:, :, k : k + 1], ones, reduce='add')
         # count_tensor.scatter_add_(-1, topk_idxs, jt.ones_like(topk_idxs, dtype=jt.int8, device=topk_idxs.device))
         # Filter invalid bboxes
         count_tensor.masked_fill_(count_tensor > 1, 0)
@@ -183,9 +184,14 @@ class TaskAlignedAssigner(nn.Module):
                                           for positive anchor points, where num_classes is the number
                                           of object classes.
         """
-        # Assigned target labels, (b, 1)
-        batch_ind = jt.arange(end=self.bs, dtype=jt.int64, device=gt_labels.device)[..., None]
-        target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
+        # 如果 target_gt_idx 为嵌套的 tuple，则一直取第一个元素直到为 jt.Var
+        while isinstance(target_gt_idx, tuple):
+            target_gt_idx = target_gt_idx[0]
+        target_gt_idx = target_gt_idx.long()
+        batch_ind = jt.arange(self.bs, dtype=jt.int64).unsqueeze(-1)
+        n_boxes = jt.array(self.n_max_boxes, dtype=jt.int64)
+        target_gt_idx = target_gt_idx + batch_ind * n_boxes  # (b, h*w)
+        
         target_labels = gt_labels.long().flatten()[target_gt_idx]  # (b, h*w)
 
         # Assigned target boxes, (b, max_num_obj, 4) -> (b, h*w, 4)
@@ -197,10 +203,9 @@ class TaskAlignedAssigner(nn.Module):
         # 10x faster than F.one_hot()
         target_scores = jt.zeros(
             (target_labels.shape[0], target_labels.shape[1], self.num_classes),
-            dtype=jt.int64,
-            device=target_labels.device,
+            dtype=jt.int64
         )  # (b, h*w, 80)
-        target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
+        target_scores.scatter_(2, target_labels.unsqueeze(-1), jt.array(1, dtype=target_scores.dtype))
 
         fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 80)
         target_scores = jt.where(fg_scores_mask > 0, target_scores, 0)
@@ -229,7 +234,7 @@ class TaskAlignedAssigner(nn.Module):
         lt, rb = gt_bboxes.view(-1, 1, 4).chunk(2, 2)  # left-top, right-bottom
         bbox_deltas = jt.cat((xy_centers[None] - lt, rb - xy_centers[None]), dim=2).view(bs, n_boxes, n_anchors, -1)
         # return (bbox_deltas.min(3)[0] > eps).to(gt_bboxes.dtype)
-        return bbox_deltas.amin(3).gt_(eps)
+        return bbox_deltas.min(3) > eps
 
     @staticmethod
     def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):
@@ -250,18 +255,19 @@ class TaskAlignedAssigner(nn.Module):
             b: batch size, h: height, w: width.
         """
         # Convert (b, n_max_boxes, h*w) -> (b, h*w)
-        fg_mask = mask_pos.sum(-2)
+        fg_mask = mask_pos.sum(1)  # Changed from dim=-2 to dim=1
         if fg_mask.max() > 1:  # one anchor is assigned to multiple gt_bboxes
             mask_multi_gts = (fg_mask.unsqueeze(1) > 1).expand(-1, n_max_boxes, -1)  # (b, n_max_boxes, h*w)
-            max_overlaps_idx = overlaps.argmax(1)  # (b, h*w)
+            max_overlaps_idx = overlaps.argmax(1)  # Changed from dim=1 to dim=1 (explicit)
 
-            is_max_overlaps = jt.zeros(mask_pos.shape, dtype=mask_pos.dtype, device=mask_pos.device)
+            is_max_overlaps = jt.zeros(mask_pos.shape, dtype=mask_pos.dtype)
             is_max_overlaps.scatter_(1, max_overlaps_idx.unsqueeze(1), 1)
 
             mask_pos = jt.where(mask_multi_gts, is_max_overlaps, mask_pos).float()  # (b, n_max_boxes, h*w)
-            fg_mask = mask_pos.sum(-2)
+            fg_mask = mask_pos.sum(1)  # Changed from dim=-2 to dim=1
+            
         # Find each grid serve which gt(index)
-        target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
+        target_gt_idx = mask_pos.argmax(1)  # Changed from dim=-2 to dim=1
         return target_gt_idx, fg_mask, mask_pos
 
 

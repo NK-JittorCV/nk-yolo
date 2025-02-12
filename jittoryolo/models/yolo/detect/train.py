@@ -3,7 +3,7 @@
 import math
 import random
 from copy import copy
-
+import jittor as jt
 import numpy as np
 import jittor.nn as nn
 
@@ -39,8 +39,17 @@ class DetectionTrainer(BaseTrainer):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
-        gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
-        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=gs)
+        if self.model:
+            # Get stride directly from model since Jittor handles parallel processing differently
+            try:
+                stride = max(int(self.model.stride.max()), 32)
+            except (AttributeError, ValueError):
+                stride = 32
+                LOGGER.warning("WARNING: Unable to get model stride, using default value of 32")
+        else:
+            stride = 32
+        
+        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=stride)
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
         """Construct and return dataloader."""
@@ -52,7 +61,7 @@ class DetectionTrainer(BaseTrainer):
             LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
             shuffle = False
         workers = self.args.workers if mode == "train" else self.args.workers * 2
-        return build_dataloader(dataset, batch_size, workers, shuffle, rank)  # return dataloader
+        return build_dataloader(dataset, batch_size, workers, shuffle, rank, buffer_size=16)  # return dataloader
 
     def preprocess_batch(self, batch):
         """Preprocesses a batch of images by scaling and converting to float."""
@@ -122,10 +131,11 @@ class DetectionTrainer(BaseTrainer):
 
     def plot_training_samples(self, batch, ni):
         """Plots training samples with their annotations."""
+        cls_tensor = jt.array(batch["cls"]).squeeze(-1)
         plot_images(
             images=batch["img"],
             batch_idx=batch["batch_idx"],
-            cls=batch["cls"].squeeze(-1),
+            cls=cls_tensor,
             bboxes=batch["bboxes"],
             paths=batch["im_file"],
             fname=self.save_dir / f"train_batch{ni}.jpg",
