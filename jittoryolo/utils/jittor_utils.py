@@ -75,35 +75,16 @@ def smart_inference_mode():
     return decorate
 
 
+@contextmanager
 def autocast(enabled: bool, device: str = "cuda"):
-    """
-    Get the appropriate autocast context manager based on PyTorch version and AMP setting.
-
-    This function returns a context manager for automatic mixed precision (AMP) training that is compatible with both
-    older and newer versions of PyTorch. It handles the differences in the autocast API between PyTorch versions.
-
-    Args:
-        enabled (bool): Whether to enable automatic mixed precision.
-        device (str, optional): The device to use for autocast. Defaults to 'cuda'.
-
-    Returns:
-        (torch.amp.autocast): The appropriate autocast context manager.
-
-    Note:
-        - For PyTorch versions 1.13 and newer, it uses `torch.amp.autocast`.
-        - For older versions, it uses `torch.cuda.autocast`.
-
-    Example:
-        ```python
-        with autocast(amp=True):
-            # Your mixed precision operations here
-            pass
-        ```
-    """
-    if TORCH_1_13:
-        return jt.amp.autocast(device, enabled=enabled)
-    else:
-        return jt.cuda.amp.autocast(enabled)
+    prev_amp = jt.flags.use_cuda_amp if hasattr(jt.flags, "use_cuda_amp") else 0
+    if enabled and device == "cuda":
+        jt.flags.use_cuda_amp = 1
+    try:
+        yield
+    finally:
+        if hasattr(jt.flags, "use_cuda_amp"):
+            jt.flags.use_cuda_amp = prev_amp
 
 
 def get_cpu_info():
@@ -447,13 +428,23 @@ def intersect_dicts(da, db, exclude=()):
 
 
 def is_parallel(model):
-    """Returns True if model is of type DP or DDP."""
-    return isinstance(model, (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel))
-
+    """
+    Returns True if model is parallelized in Jittor.
+    Note: Currently just return False since Jittor's parallelization is different from PyTorch.
+    """
+    return False  # TODO: check if model is parallelized in Jittor
 
 def de_parallel(model):
-    """De-parallelize a model: returns single-GPU model if model is of type DP or DDP."""
-    return model.module if is_parallel(model) else model
+    """
+    De-parallelize a model. In Jittor this is a pass-through for now.
+    
+    Args:
+        model: A Jittor model.
+        
+    Returns:
+        The same model since Jittor handles parallelization differently.
+    """
+    return model  # Currently just return model as is for Jittor
 
 
 def one_cycle(y1=0.0, y2=1.0, steps=100):
@@ -491,21 +482,20 @@ def init_seeds(seed=0, deterministic=False):
 
 class ModelEMA:
     """
-    Updated Exponential Moving Average (EMA) from https://github.com/rwightman/pytorch-image-models. Keeps a moving
-    average of everything in the model state_dict (parameters and buffers).
-
-    For EMA details see https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage
-
-    To disable EMA set the `enabled` attribute to `False`.
+    Updated Exponential Moving Average (EMA) from https://github.com/rwightman/pytorch-image-models.
+    Keeps a moving average of everything in the model state_dict (parameters and buffers).
     """
 
     def __init__(self, model, decay=0.9999, tau=2000, updates=0):
         """Initialize EMA for 'model' with given arguments."""
         self.ema = deepcopy(de_parallel(model)).eval()  # FP32 EMA
         self.updates = updates  # number of EMA updates
-        self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp (to help early epochs)
+        self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp
+        
+        # Disable gradient computation for EMA model parameters
         for p in self.ema.parameters():
-            p.requires_grad_(False)
+            p.requires_grad = False  # Use requires_grad property instead of requires_grad_()
+            
         self.enabled = True
 
     def update(self, model):
@@ -516,10 +506,8 @@ class ModelEMA:
 
             msd = de_parallel(model).state_dict()  # model state_dict
             for k, v in self.ema.state_dict().items():
-                if v.dtype.is_floating_point:  # true for FP16 and FP32
-                    v *= d
-                    v += (1 - d) * msd[k].detach()
-                    # assert v.dtype == msd[k].dtype == torch.float32, f'{k}: EMA {v.dtype},  model {msd[k].dtype}'
+                if isinstance(v, jt.Var) and str(v.dtype).startswith(('float', 'half')):  # FP16 and FP32
+                    v.update(v * d + (1 - d) * msd[k].detach())
 
     def update_attr(self, model, include=(), exclude=("process_group", "reducer")):
         """Updates attributes and saves stripped model with optimizer removed."""
@@ -713,3 +701,52 @@ class EarlyStopping:
                 f"i.e. `patience=300` or use `patience=0` to disable EarlyStopping."
             )
         return stop
+
+
+class LambdaLR:
+    """
+    Custom LR scheduler that multiplies the learning rate by a given function.
+    Implements similar functionality to PyTorch's LambdaLR.
+    """
+    def __init__(self, optimizer, lr_lambda):
+        """Initialize LambdaLR scheduler."""
+        self.optimizer = optimizer
+        self.lr_lambda = lr_lambda
+        self.last_epoch = -1
+        # Store initial learning rates from optimizer
+        self.base_lrs = []
+        for param_group in optimizer.param_groups:
+            # In Jittor, we need to access the learning rate differently
+            self.base_lrs.append(param_group.get("lr", param_group.get("learning_rate", 0.01)))
+        
+    def step(self):
+        """Update learning rates for all parameter groups."""
+        self.last_epoch += 1
+        for param_group, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+            # Calculate new learning rate
+            new_lr = base_lr * self.lr_lambda(self.last_epoch)
+            # Update learning rate in optimizer's param group
+            # Some Jittor optimizers might use "learning_rate" instead of "lr"
+            if "lr" in param_group:
+                param_group["lr"] = new_lr
+            else:
+                param_group["learning_rate"] = new_lr
+
+    def state_dict(self):
+        """Returns scheduler state as a dictionary."""
+        return {
+            'base_lrs': self.base_lrs,
+            'last_epoch': self.last_epoch
+        }
+
+    def load_state_dict(self, state_dict):
+        """Loads scheduler state."""
+        self.base_lrs = state_dict['base_lrs']
+        self.last_epoch = state_dict['last_epoch']
+
+# Add lr_scheduler namespace to Jittor optim module if it doesn't exist
+if not hasattr(jt.optim, 'lr_scheduler'):
+    class LRScheduler:
+        LambdaLR = LambdaLR
+    
+    jt.optim.lr_scheduler = LRScheduler

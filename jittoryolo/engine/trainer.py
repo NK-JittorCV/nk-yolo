@@ -170,7 +170,7 @@ class BaseTrainer:
             world_size = len(self.args.device)
         elif self.args.device in {"cpu", "mps"}:  # i.e. device='cpu' or 'mps'
             world_size = 0
-        elif jt.cuda.is_available():  # i.e. device=None or device='' or device=number
+        elif jt.has_cuda:  # i.e. device=None or device='' or device=number
             world_size = 1  # default to device 0
         else:  # i.e. device=None or device=''
             world_size = 0
@@ -257,7 +257,7 @@ class BaseTrainer:
                 v.requires_grad = True
 
         # Check AMP
-        # self.amp = self.args.amp  # True or False
+        self.amp = False # True or False
         # if self.amp and RANK in {-1, 0}:  # Single-GPU and DDP
         #     callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
         #     self.amp = check_amp(self.model)
@@ -284,16 +284,16 @@ class BaseTrainer:
         #     jt.distributed.broadcast(amp_var, 0)  # Broadcast from rank 0 to all ranks
         #     self.amp = bool(amp_var.item())  # Update self.amp based on rank 0's value
 
-        # # Ensure self.amp is a boolean
-        # self.amp = bool(self.amp)
+        # Ensure self.amp is a boolean
+        self.amp = bool(self.amp)
 
-        # # Enable mixed precision based on the broadcasted flag
+        # Enable mixed precision based on the broadcasted flag
         # jt.flags.use_cuda_amp = int(self.amp)
 
-        # # Initialize the GradScaler (placeholder, Jittor does not require this)
-        # self.scaler = None
+        # Initialize the GradScaler (placeholder, Jittor does not require this)
+        self.scaler = None
 
-        # # Wrap the model with DistributedDataParallel if using multiple GPUs
+        # Wrap the model with DistributedDataParallel if using multiple GPUs
         # if jt.world_size > 1:
         #     self.model = jt.distributed.ParallelModel(self.model)
 
@@ -399,7 +399,7 @@ class BaseTrainer:
                     for j, x in enumerate(self.optimizer.param_groups):
                         # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
                         x["lr"] = np.interp(
-                            ni, xi, [self.args.warmup_bias_lr if j == 0 else 0.0, x["initial_lr"] * self.lf(epoch)]
+                            ni, xi, [self.args.warmup_bias_lr if j == 0 else 0.0, x.get("initial_lr", self.args.lr0) * self.lf(epoch)]
                         )
                         if "momentum" in x:
                             x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
@@ -414,8 +414,11 @@ class BaseTrainer:
                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
 
-                # Backward
-                self.scaler.scale(self.loss).backward()
+                # Backward (使用 optimizer.backward(loss) 替代 loss.backward())
+                if self.scaler is not None:
+                    self.scaler.backward(self.loss)
+                else:
+                    self.optimizer.backward(self.loss)
 
                 # Optimize - https://pyjt.org/docs/master/notes/amp_examples.html
                 if ni - last_opt_step >= self.accumulate:
@@ -441,8 +444,8 @@ class BaseTrainer:
                             f"{epoch + 1}/{self.epochs}",
                             f"{self._get_memory():.3g}G",  # (GB) GPU memory util
                             *(self.tloss if loss_length > 1 else jt.unsqueeze(self.tloss, 0)),  # losses
-                            batch["cls"].shape[0],  # batch size, i.e. 8
-                            batch["img"].shape[-1],  # imgsz, i.e 640
+                            batch["cls"][0].shape[0],  # batch size, i.e. 8
+                            batch["img"][0].shape[-1],  # imgsz, i.e 640
                         )
                     )
                     self.run_callbacks("on_batch_end")
@@ -505,9 +508,9 @@ class BaseTrainer:
 
     def _get_memory(self):
         """Get accelerator memory utilization in GB."""
-        if self.device.type == "mps":
+        if self.device == "mps":
             memory = jt.mps.driver_allocated_memory()
-        elif self.device.type == "cpu":
+        elif self.device == "cpu":
             memory = 0
         else:
             memory = jt.cuda.memory_reserved()
@@ -604,10 +607,14 @@ class BaseTrainer:
 
     def optimizer_step(self):
         """Perform a single step of the training optimizer with gradient clipping and EMA update."""
-        self.scaler.unscale_(self.optimizer)  # unscale gradients
-        jt.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)  # clip gradients
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        if self.scaler is not None:
+            self.scaler.unscale_(self.optimizer)
+            self.optimizer.clip_grad_norm(10.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            self.optimizer.clip_grad_norm(10.0)
+            self.optimizer.step()
         self.optimizer.zero_grad()
         if self.ema:
             self.ema.update(self.model)

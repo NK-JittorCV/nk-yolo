@@ -1046,11 +1046,17 @@ def plot_images(
             annotator.text((x + 5, y + 5), text=Path(paths[i]).name[:40], txt_color=(220, 220, 220))  # filenames
         if len(cls) > 0:
             idx = batch_idx == i
-            classes = cls[idx].astype("int")
+            classes = np.array(cls).flatten()[idx].astype("int")
             labels = confs is None
 
             if len(bboxes):
-                boxes = bboxes[idx]
+                boxes_array = np.array(bboxes)
+                if idx.ndim > 1:
+                    idx = idx.any(axis=1)
+                # 若 idx 元素数与 boxes_array 第一维不匹配，采用全 True 掩码
+                if idx.size != boxes_array.shape[0]:
+                    idx = np.ones(boxes_array.shape[0], dtype=bool)
+                boxes = boxes_array[idx]
                 conf = confs[idx] if confs is not None else None  # check for confidence presence (label vs pred)
                 if len(boxes):
                     if boxes[:, :4].max() <= 1.1:  # if normalized with tolerance 0.1

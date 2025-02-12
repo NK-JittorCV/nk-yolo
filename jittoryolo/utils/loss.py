@@ -24,7 +24,7 @@ class VarifocalLoss(nn.Module):
         super().__init__()
 
     @staticmethod
-    def forward(pred_score, gt_score, label, alpha=0.75, gamma=2.0):
+    def execute(pred_score, gt_score, label, alpha=0.75, gamma=2.0):
         """Computes varfocal loss."""
         weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score * label
         with autocast(enabled=False):
@@ -44,7 +44,7 @@ class FocalLoss(nn.Module):
         super().__init__()
 
     @staticmethod
-    def forward(pred, label, gamma=1.5, alpha=0.25):
+    def execute(pred, label, gamma=1.5, alpha=0.25):
         """Calculates and updates confusion matrix for object detection/classification tasks."""
         loss = nn.binary_cross_entropy_with_logits(pred, label, reduction="none")
         # p_t = torch.exp(-loss)
@@ -82,8 +82,8 @@ class DFLoss(nn.Module):
         wl = tr - target  # weight left
         wr = 1 - wl  # weight right
         return (
-        nn.cross_entropy(pred_dist, tl.view(-1), reduction="none").view(tl.shape) * wl
-            + nn.cross_entropy(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
+        nn.cross_entropy_loss(pred_dist, tl.view(-1), reduction="none").view(tl.shape) * wl
+            + nn.cross_entropy_loss(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
         ).mean(-1, keepdim=True)
 
 
@@ -95,7 +95,7 @@ class BboxLoss(nn.Module):
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
 
-    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+    def execute(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
@@ -107,7 +107,7 @@ class BboxLoss(nn.Module):
             loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
-            loss_dfl = jt.Var(0.0).to(pred_dist.device)
+            loss_dfl = jt.Var(0.0)
 
         return loss_iou, loss_dfl
 
@@ -119,7 +119,7 @@ class RotatedBboxLoss(BboxLoss):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__(reg_max)
 
-    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+    def execute(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         iou = probiou(pred_bboxes[fg_mask], target_bboxes[fg_mask])
@@ -131,7 +131,7 @@ class RotatedBboxLoss(BboxLoss):
             loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
-            loss_dfl = jt.Var(0.0).to(pred_dist.device)
+            loss_dfl = jt.Var(0.0)
 
         return loss_iou, loss_dfl
 
@@ -144,7 +144,7 @@ class KeypointLoss(nn.Module):
         super().__init__()
         self.sigmas = sigmas
 
-    def forward(self, pred_kpts, gt_kpts, kpt_mask, area):
+    def execute(self, pred_kpts, gt_kpts, kpt_mask, area):
         """Calculates keypoint loss factor and Euclidean distance loss for predicted and actual keypoints."""
         d = (pred_kpts[..., 0] - gt_kpts[..., 0]).pow(2) + (pred_kpts[..., 1] - gt_kpts[..., 1]).pow(2)
         kpt_loss_factor = kpt_mask.shape[1] / (jt.sum(kpt_mask != 0, dim=1) + 1e-9)
@@ -158,34 +158,41 @@ class v8DetectionLoss:
 
     def __init__(self, model, tal_topk=10):  # model must be de-paralleled
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
-        device = next(model.parameters()).device  # get model device
+        params = model.parameters()  # parameters() 返回列表
+        if params:
+            device = "cuda" if jt.flags.use_cuda else "cpu"
+        else:
+            device = "cpu"
+        self.device = device
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
-        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.bce = nn.BCEWithLogitsLoss()
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
         self.reg_max = m.reg_max
-        self.device = device
 
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
-        self.proj = jt.arange(m.reg_max, dtype=jt.float32, device=device)
+        self.bbox_loss = BboxLoss(m.reg_max)
+        self.proj = jt.arange(m.reg_max, dtype=jt.float32)
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
         nl, ne = targets.shape
         if nl == 0:
-            out = jt.zeros((batch_size, 0, ne - 1), dtype=jt.float32, device=self.device)
+            out = jt.zeros((batch_size, 0, ne - 1), dtype=jt.float32)
         else:
             i = targets[:, 0]  # image index
-            _, counts = i.unique(return_counts=True)
+            unique_values = i.unique()
+            counts = jt.zeros_like(unique_values)
+            for idx, val in enumerate(unique_values):
+                counts[idx] = (i == val).sum()
             counts = counts.to(dtype=jt.int32)
-            out = jt.zeros((batch_size, jt.max(counts).item(), ne - 1), dtype=jt.float32, device=self.device)
+            out = jt.zeros((batch_size, jt.max(counts).item(), ne - 1), dtype=jt.float32)
             for j in range(batch_size):
                 matches = i == j
                 n = matches.sum()
@@ -198,14 +205,14 @@ class v8DetectionLoss:
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
         if self.use_dfl:
             b, a, c = pred_dist.shape  # batch, anchors, channels
-            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj)
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = jt.zeros(3, device=self.device)  # box, cls, dfl
+        loss = jt.zeros(3)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = jt.concat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -216,14 +223,19 @@ class v8DetectionLoss:
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
-        imgsz = jt.Var(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = jt.array(list(feats[0].shape[2:]),dtype = dtype) * self.stride[0]  # image size (h,w)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
-        targets = jt.concat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
-        targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+        targets = jt.concat((
+            jt.array(batch["batch_idx"]).view(-1, 1),
+            jt.array(batch["cls"]).view(-1, 1),
+            jt.array(batch["bboxes"]).view(-1,4),
+        ), 1)
+        targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
-        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+        # 修改 gt_ 为 gt
+        mask_gt = gt_bboxes.sum(2, keepdim=True) > 0.0
 
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
@@ -233,7 +245,7 @@ class v8DetectionLoss:
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
-            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            (pred_bboxes.detach() * stride_tensor).to(dtype),   
             anchor_points * stride_tensor,
             gt_labels,
             gt_bboxes,
@@ -247,7 +259,7 @@ class v8DetectionLoss:
         loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
-        if fg_mask.sum():
+        if (fg_mask > 0).sum():
             target_bboxes /= stride_tensor
             loss[0], loss[2] = self.bbox_loss(
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
@@ -270,7 +282,7 @@ class v8SegmentationLoss(v8DetectionLoss):
 
     def __call__(self, preds, batch):
         """Calculate and return the loss for the YOLO model."""
-        loss = jt.zeros(4, device=self.device)  # box, cls, dfl
+        loss = jt.zeros(4)  # box, cls, dfl
         feats, pred_masks, proto = preds if len(preds) == 3 else preds[1]
         batch_size, _, mask_h, mask_w = proto.shape  # batch size, number of masks, mask height, mask width
         pred_distri, pred_scores = jt.concat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
@@ -283,16 +295,17 @@ class v8SegmentationLoss(v8DetectionLoss):
         pred_masks = pred_masks.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
-        imgsz = jt.Var(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = jt.Var(feats[0].shape[2:], dtype=dtype) * self.stride[0]  # image size (h,w)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
         try:
             batch_idx = batch["batch_idx"].view(-1, 1)
             targets = jt.concat((batch_idx, batch["cls"].view(-1, 1), batch["bboxes"]), 1)
-            targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+            targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
             gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
-            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+            mask_gt = gt_bboxes.sum(2, keepdim=True) > 0.0
+
         except RuntimeError as e:
             raise TypeError(
                 "ERROR ❌ segment dataset incorrectly formatted or not a segment dataset.\n"
@@ -332,7 +345,7 @@ class v8SegmentationLoss(v8DetectionLoss):
                 fg_mask,
             )
             # Masks loss
-            masks = batch["masks"].to(self.device).float()
+            masks = batch["masks"].float()
             if tuple(masks.shape[-2:]) != (mask_h, mask_w):  # downsample
                 masks = nn.interpolate(masks[None], (mask_h, mask_w), mode="nearest")[0]
 
@@ -421,7 +434,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         marea = xyxy2xywh(target_bboxes_normalized)[..., 2:].prod(2)
 
         # Normalize to mask size
-        mxyxy = target_bboxes_normalized * jt.Var([mask_w, mask_h, mask_w, mask_h], device=proto.device)
+        mxyxy = target_bboxes_normalized * jt.Var([mask_w, mask_h, mask_w, mask_h])
 
         for i, single_i in enumerate(zip(fg_mask, target_gt_idx, pred_masks, proto, mxyxy, marea, masks)):
             fg_mask_i, target_gt_idx_i, pred_masks_i, proto_i, mxyxy_i, marea_i, masks_i = single_i
@@ -454,12 +467,12 @@ class v8PoseLoss(v8DetectionLoss):
         self.bce_pose = nn.BCEWithLogitsLoss()
         is_pose = self.kpt_shape == [17, 3]
         nkpt = self.kpt_shape[0]  # number of keypoints
-        sigmas = jt.array(OKS_SIGMA, dtype=jt.float32, device=self.device) if is_pose else jt.ones(nkpt, dtype=jt.float32, device=self.device) / nkpt
+        sigmas = jt.array(OKS_SIGMA, dtype=jt.float32) if is_pose else jt.ones(nkpt, dtype=jt.float32) / nkpt
         self.keypoint_loss = KeypointLoss(sigmas=sigmas)
 
     def __call__(self, preds, batch):
         """Calculate the total loss and detach it."""
-        loss = jt.zeros(5, device=self.device)  # box, cls, dfl, kpt_location, kpt_visibility
+        loss = jt.zeros(5)  # box, cls, dfl, kpt_location, kpt_visibility
         feats, pred_kpts = preds if isinstance(preds[0], list) else preds[1]
         pred_distri, pred_scores = jt.concat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -471,16 +484,17 @@ class v8PoseLoss(v8DetectionLoss):
         pred_kpts = pred_kpts.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
-        imgsz = jt.Var(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = jt.Var(feats[0].shape[2:], dtype=dtype) * self.stride[0]  # image size (h,w)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
         batch_size = pred_scores.shape[0]
         batch_idx = batch["batch_idx"].view(-1, 1)
         targets = jt.concat((batch_idx, batch["cls"].view(-1, 1), batch["bboxes"]), 1)
-        targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+        targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
-        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+        mask_gt = gt_bboxes.sum(2, keepdim=True) > 0.0
+
 
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
@@ -507,7 +521,7 @@ class v8PoseLoss(v8DetectionLoss):
             loss[0], loss[4] = self.bbox_loss(
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
-            keypoints = batch["keypoints"].to(self.device).float().clone()
+            keypoints = batch["keypoints"].float().clone()
             keypoints[..., 0] *= imgsz[1]
             keypoints[..., 1] *= imgsz[0]
 
@@ -564,7 +578,7 @@ class v8PoseLoss(v8DetectionLoss):
 
         # Create a tensor to hold batched keypoints
         batched_keypoints = jt.zeros(
-            (batch_size, max_kpts, keypoints.shape[1], keypoints.shape[2]), device=keypoints.device
+            (batch_size, max_kpts, keypoints.shape[1], keypoints.shape[2])
         )
 
         # TODO: any idea how to vectorize this?
@@ -605,7 +619,7 @@ class v8ClassificationLoss:
 
     def __call__(self, preds, batch):
         """Compute the classification loss between predictions and true labels."""
-        loss = nn.cross_entropy(preds, batch["cls"], reduction="mean")
+        loss = nn.cross_entropy_loss(preds, batch["cls"], reduction="mean")
         loss_items = loss.detach()
         return loss, loss_items
 
@@ -617,17 +631,17 @@ class v8OBBLoss(v8DetectionLoss):
         """Initializes v8OBBLoss with model, assigner, and rotated bbox loss; note model must be de-paralleled."""
         super().__init__(model)
         self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = RotatedBboxLoss(self.reg_max).to(self.device)
+        self.bbox_loss = RotatedBboxLoss(self.reg_max)
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
         if targets.shape[0] == 0:
-            out = jt.zeros(batch_size, 0, 6, device=self.device)
+            out = jt.zeros(batch_size, 0, 6)
         else:
             i = targets[:, 0]  # image index
             _, counts = i.unique(return_counts=True)
             counts = counts.to(dtype=jt.int32)
-            out = jt.zeros((batch_size, counts.max().item(), 6), dtype=jt.float32, device=self.device)
+            out = jt.zeros((batch_size, counts.max().item(), 6), dtype=jt.float32)
             for j in range(batch_size):
                 matches = i == j
                 n = matches.sum()
@@ -639,7 +653,7 @@ class v8OBBLoss(v8DetectionLoss):
 
     def __call__(self, preds, batch):
         """Calculate and return the loss for the YOLO model."""
-        loss = jt.zeros(3, device=self.device)  # box, cls, dfl
+        loss = jt.zeros(3)  # box, cls, dfl
         feats, pred_angle = preds if isinstance(preds[0], list) else preds[1]
         batch_size = pred_angle.shape[0]  # batch size, number of masks, mask height, mask width
         pred_distri, pred_scores = jt.concat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
@@ -652,7 +666,7 @@ class v8OBBLoss(v8DetectionLoss):
         pred_angle = pred_angle.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
-        imgsz = jt.Var(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = jt.Var(feats[0].shape[2:] , dtype=dtype) * self.stride[0]  # image size (h,w)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # targets
@@ -661,9 +675,10 @@ class v8OBBLoss(v8DetectionLoss):
             targets = jt.concat((batch_idx, batch["cls"].view(-1, 1), batch["bboxes"].view(-1, 5)), 1)
             rw, rh = targets[:, 4] * imgsz[0].item(), targets[:, 5] * imgsz[1].item()
             targets = targets[(rw >= 2) & (rh >= 2)]  # filter rboxes of tiny size to stabilize training
-            targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+            targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
             gt_labels, gt_bboxes = targets.split((1, 5), 2)  # cls, xywhr
-            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+            mask_gt = gt_bboxes.sum(2, keepdim=True) > 0.0
+
         except RuntimeError as e:
             raise TypeError(
                 "ERROR ❌ OBB dataset incorrectly formatted or not a OBB dataset.\n"
@@ -730,8 +745,17 @@ class v8OBBLoss(v8DetectionLoss):
 class E2EDetectLoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model):
-        """Initialize E2EDetectLoss with one-to-many and one-to-one detection losses using the provided model."""
+    def __init__(self, model, **kwargs):  # 接受多余的关键字参数例如 'reduction'
+        params = model.parameters()  # parameters() 返回列表
+        if params:
+            if hasattr(params[0], "is_cuda"):
+                device = "cuda" if params[0].is_cuda else "cpu"
+            else:
+                device = "cuda" if jt.flags.use_cuda else "cpu"
+        else:
+            device = "cpu"
+        self.device = device
+        self.nc = model.nc  # number of classes
         self.one2many = v8DetectionLoss(model, tal_topk=10)
         self.one2one = v8DetectionLoss(model, tal_topk=1)
 
