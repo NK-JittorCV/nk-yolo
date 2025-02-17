@@ -2,6 +2,11 @@
 ## Introduction
 JittorYOLO is an object detection benchmark based on [Jittor](https://github.com/Jittor/jittor). 
 
+We now support these YOLOs: 
+- YOLOv5: [https://github.com/ultralytics/yolov5](https://github.com/ultralytics/yolov5)
+- YOLOv10: [https://github.com/THU-MIG/yolov10](https://github.com/THU-MIG/yolov10)
+- ✨ YOLO-MS: [https://github.com/FishAndWasabi/YOLO-MS](https://github.com/FishAndWasabi/YOLO-MS)
+
 <!-- **Features**
 - Automatic compilation. Our framwork is based on Jittor, which means we don't need to Manual compilation for these code with CUDA and C++.
 -  -->
@@ -48,7 +53,7 @@ source .bashrc
 python demo.py
 ```
 
-## Models
+<!-- ## Models
 | Model | Test Size | #Params | FLOPs | AP<sup>val</sup> | Latency |
 |:---------------|:----:|:---:|:--:|:--:|:--:|
 | [YOLOv10-N](https://huggingface.co/jameslahm/yolov10n) |   640  |     2.3M    |   6.7G   |     38.5%     | 1.84ms |
@@ -56,7 +61,7 @@ python demo.py
 | [YOLOv10-M](https://huggingface.co/jameslahm/yolov10m) |   640  |     15.4M   |   59.1G  |     51.1%     | 4.74ms |
 | [YOLOv10-B](https://huggingface.co/jameslahm/yolov10b) |   640  |     19.1M   |  92.0G |     52.5%     | 5.74ms |
 | [YOLOv10-L](https://huggingface.co/jameslahm/yolov10l) |   640  |     24.4M   |  120.3G   |     53.2%     | 7.28ms |
-| [YOLOv10-X](https://huggingface.co/jameslahm/yolov10x) |   640  |     29.5M    |   160.4G   |     54.4%     | 10.70ms |
+| [YOLOv10-X](https://huggingface.co/jameslahm/yolov10x) |   640  |     29.5M    |   160.4G   |     54.4%     | 10.70ms | -->
 
 
 ## Citation
@@ -71,6 +76,18 @@ python demo.py
   number={222103},
   pages={1--21},
   year={2020}
+}
+
+@article{Chen2025,
+  title = {YOLO-MS: Rethinking Multi-Scale Representation Learning for Real-time Object Detection},
+  ISSN = {1939-3539},
+  url = {http://dx.doi.org/10.1109/TPAMI.2025.3538473},
+  DOI = {10.1109/tpami.2025.3538473},
+  journal = {IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  publisher = {Institute of Electrical and Electronics Engineers (IEEE)},
+  author = {Chen, Yuming and Yuan, Xinbin and Wang, Jiabao and Wu, Ruiqi and Li, Xiang and Hou, Qibin and Cheng, Ming-Ming},
+  year = {2025},
+  pages = {1–14}
 }
 
 @article{wang2024yolov10,
