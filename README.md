@@ -4,6 +4,9 @@ JittorYOLO is an object detection benchmark based on [Jittor](https://github.com
 
 We now support these YOLOs: 
 - YOLOv5: [https://github.com/ultralytics/yolov5](https://github.com/ultralytics/yolov5)
+- YOLOv6: [https://github.com/meituan/YOLOv6](https://github.com/meituan/YOLOv6)
+- YOLOv7: [https://github.com/WongKinYiu/yolov7](https://github.com/WongKinYiu/yolov7)
+- YOLOv8: [https://github.com/ultralytics/ultralytics](https://github.com/ultralytics/ultralytics)
 - YOLOv10: [https://github.com/THU-MIG/yolov10](https://github.com/THU-MIG/yolov10)
 - ✨ YOLO-MS: [https://github.com/FishAndWasabi/YOLO-MS](https://github.com/FishAndWasabi/YOLO-MS)
 
