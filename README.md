@@ -2,7 +2,8 @@
 ## Introduction
 JittorYOLO is an object detection benchmark based on [Jittor](https://github.com/Jittor/jittor). 
 
-We now support these YOLOs: 
+## Supported Models
+Currently supported YOLOs are as below:
 - YOLOv5: [https://github.com/ultralytics/yolov5](https://github.com/ultralytics/yolov5)
 - YOLOv6: [https://github.com/meituan/YOLOv6](https://github.com/meituan/YOLOv6)
 - YOLOv7: [https://github.com/WongKinYiu/yolov7](https://github.com/WongKinYiu/yolov7)
@@ -69,6 +70,7 @@ python demo.py
 
 ## Citation
 
+If this work is helpful for your research, please consider citing the following entry.
 
 ```bibtex
 @article{hu2020jittor,
@@ -102,6 +104,10 @@ python demo.py
 ```
 
 ## Reference
+Our code is developed on top of the following open source codebase:
+
 1. [Jittor](https://github.com/Jittor/jittor)
 2. [ultralytics](https://github.com/ultralytics/ultralytics)
 3. [yolov10](https://github.com/THU-MIG/yolov10/tree/main)
+
+We sincerely appreciate their incredible work.
