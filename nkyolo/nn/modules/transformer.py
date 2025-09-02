@@ -9,6 +9,7 @@ from jittor.init import constant_,xavier_uniform_
 from .conv import Conv
 from .utils import _get_clones, inverse_sigmoid
 from .attentionblock import MultiheadAttention
+from .attentionblock import multi_scale_deformable_attn_pytorch
 
 __all__ = (
     "TransformerEncoderLayer",
@@ -95,7 +96,7 @@ class AIFI(TransformerEncoderLayer):
         c, h, w = x.shape[1:]
         pos_embed = self.build_2d_sincos_position_embedding(w, h, c)
         # Flatten [B, C, H, W] to [B, HxW, C]
-        x = super().execute(x.flatten(2).permute(0, 2, 1), pos=pos_embed.to(device=x.device, dtype=x.dtype))
+        x = super().execute(x.flatten(2).permute(0, 2, 1), pos=pos_embed.to(dtype=x.dtype))
         return x.permute(0, 2, 1).view([-1, c, h, w]).contiguous()
 
     @staticmethod
@@ -298,7 +299,7 @@ class MSDeformAttn(nn.Module):
         # N, Len_q, n_heads, n_levels, n_points, 2
         num_points = refer_bbox.shape[-1]
         if num_points == 2:
-            offset_normalizer = jt.Var(value_shapes, dtype=query.dtype, device=query.device).flip(-1)
+            offset_normalizer = jt.Var(value_shapes, dtype=query.dtype).flip(-1)
             add = sampling_offsets / offset_normalizer[None, None, None, :, None, :]
             sampling_locations = refer_bbox[:, :, None, :, None, :] + add
         elif num_points == 4:
