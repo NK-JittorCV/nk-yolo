@@ -248,7 +248,7 @@ class MSDeformAttn(nn.Module):
 
     def _reset_parameters(self):
         """Reset module parameters."""
-        constant_(self.sampling_offsets.weight.data, 0.0)
+        nn.init.constant_(self.sampling_offsets.weight, 0.0)
         thetas = jt.arange(self.n_heads, dtype=jt.float32) * (2.0 * math.pi / self.n_heads)
         grid_init = jt.stack([thetas.cos(), thetas.sin()], -1)
         grid_init = (
@@ -260,12 +260,12 @@ class MSDeformAttn(nn.Module):
             grid_init[:, :, i, :] *= i + 1
         with jt.no_grad():
             self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
-        constant_(self.attention_weights.weight.data, 0.0)
-        constant_(self.attention_weights.bias.data, 0.0)
-        xavier_uniform_(self.value_proj.weight.data)
-        constant_(self.value_proj.bias.data, 0.0)
-        xavier_uniform_(self.output_proj.weight.data)
-        constant_(self.output_proj.bias.data, 0.0)
+        nn.init.constant_(self.attention_weights.weight, 0.0)
+        nn.init.constant_(self.attention_weights.bias, 0.0)
+        nn.init.xavier_uniform_(self.value_proj.weight)
+        nn.init.constant_(self.value_proj.bias, 0.0)
+        nn.init.xavier_uniform_(self.output_proj.weight)
+        nn.init.constant_(self.output_proj.bias, 0.0)
 
     def execute(self, query, refer_bbox, value, value_shapes, value_mask=None):
         """
