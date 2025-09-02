@@ -415,7 +415,7 @@ class RTDETRDecoder(nn.Module):
         self.num_decoder_layers = ndl
 
         # Backbone feature projection
-        self.input_proj = nn.ModuleList(nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch)
+        self.input_proj = nn.ModuleList([nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch])
         # NOTE: simplified version but it's not consistent with .pt weights.
         # self.input_proj = nn.ModuleList(Conv(x, hd, act=False) for x in ch)
 
