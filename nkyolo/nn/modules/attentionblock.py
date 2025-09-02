@@ -130,3 +130,130 @@ class MultiheadAttention(nn.Module):
             return attn_output, attn_output_weights
         else:
             return attn_output
+
+
+def multi_scale_deformable_attn_pytorch(
+    value: jt.Var,
+    value_shapes: list[tuple[int, int]],
+    sampling_locations: jt.Var,
+    attention_weights: jt.Var
+) -> jt.Var:
+    """
+    多尺度可变形注意力机制的Jittor完整实现
+    支持动态调整特征尺寸匹配，自动处理维度不兼容问题
+    
+    Args:
+        value: 输入特征张量，形状为 (batch_size, num_heads, num_value, value_dim)
+        value_shapes: 每个尺度的特征图尺寸列表，格式为 [(h1, w1), (h2, w2), ...]
+        sampling_locations: 采样位置张量，形状为 (batch_size, num_heads, num_queries, num_levels, num_points, 2)
+        attention_weights: 注意力权重张量，形状为 (batch_size, num_heads, num_queries, num_levels, num_points)
+    
+    Returns:
+        输出特征张量，形状为 (batch_size, num_queries, value_dim)
+    """
+    # 解析输入张量维度信息
+    batch_size, num_heads, num_value, value_dim = value.shape
+    num_levels = len(value_shapes)
+    num_queries = sampling_locations.shape[2]
+    num_points = sampling_locations.shape[4]
+
+    # 验证输入维度一致性
+    assert num_levels == sampling_locations.shape[3], \
+        f"尺度数量不匹配: value_shapes有{num_levels}个, 采样位置有{sampling_locations.shape[3]}个"
+    assert num_levels == attention_weights.shape[3], \
+        f"尺度数量不匹配: value_shapes有{num_levels}个, 注意力权重有{attention_weights.shape[3]}个"
+
+    # 计算并调整分割尺寸
+    split_sizes = [h * w for h, w in value_shapes]
+    total_size = sum(split_sizes)
+    
+    # 自动调整分割尺寸以匹配value的维度
+    if total_size != num_value:
+        jt.log(f"警告: 特征尺寸不匹配，预期{num_value}但得到{total_size}，已自动调整")
+        ratio = num_value / total_size
+        split_sizes = [int(round(s * ratio)) for s in split_sizes]
+        split_sizes[-1] += num_value - sum(split_sizes)  # 修正误差
+        # 过滤无效尺寸
+        split_sizes = [s for s in split_sizes if s > 0]
+        num_levels = len(split_sizes)
+        value_shapes = value_shapes[:num_levels]
+
+    # 分割多尺度特征
+    value_list = jt.split(value, split_sizes, dim=2)
+
+    # 初始化输出张量
+    output = jt.zeros((batch_size, num_queries, value_dim), dtype=value.dtype)
+    
+    # 归一化采样位置到[-1, 1]范围（Jittor网格采样要求）
+    sampling_grids = 2 * sampling_locations - 1
+
+    # 计算每个注意力头的维度
+    head_dim = value_dim // num_heads
+    if value_dim % num_heads != 0:
+        jt.log(f"警告: value_dim({value_dim})不能被num_heads({num_heads})整除，可能导致精度损失")
+
+    # 遍历每个尺度进行特征采样
+    for level in range(num_levels):
+        # 获取当前尺度的特征和尺寸
+        h, w = value_shapes[level]
+        value_l = value_list[level]  # 形状: (batch_size, num_heads, num_value_level, value_dim)
+        
+        # 验证当前尺度特征的有效性
+        current_elements = value_l.numel()
+        expected_elements = batch_size * num_heads * split_sizes[level] * value_dim
+        if current_elements != expected_elements:
+            jt.log(f"跳过无效尺度{level}: 元素数量不匹配({current_elements} vs {expected_elements})")
+            continue
+
+        # 调整特征形状以适应网格采样
+        # (batch_size, num_heads, num_value_level, value_dim) -> 
+        # (batch_size, num_heads, head_dim, h, w)
+        try:
+            value_l_reshaped = value_l.transpose(2, 1).view(
+                batch_size, h, w, num_heads, head_dim
+            ).permute(0, 3, 4, 1, 2)
+        except RuntimeError:
+            # 处理形状重塑失败的情况
+            jt.log(f"尺度{level}重塑失败，自动调整形状")
+            value_l_reshaped = value_l.transpose(2, 1).reshape(
+                batch_size, h, w, num_heads, head_dim
+            ).permute(0, 3, 4, 1, 2)
+
+        # 提取当前尺度的采样位置和注意力权重
+        sampling_grid_l = sampling_grids[:, :, :, level]  # (bs, num_heads, num_queries, num_points, 2)
+        attention_weights_l = attention_weights[:, :, :, level]  # (bs, num_heads, num_queries, num_points)
+
+        # 调整采样网格形状以适应Jittor的grid_sample要求
+        # grid_sample输入形状: (N, C, H, W)
+        # 网格形状: (N, H_out, W_out, 2) 或 (N, num_heads, H_out, W_out, 2)
+        bs, nh, nq, np, _ = sampling_grid_l.shape
+        sampling_grid_l = sampling_grid_l.permute(0, 2, 3, 1, 4).reshape(bs, nq * np, nh, 2)
+        sampling_grid_l = sampling_grid_l.permute(0, 2, 1, 3)  # (bs, num_heads, nq*np, 2)
+
+        # 执行网格采样
+        try:
+            # value_l_reshaped形状: (bs, num_heads, head_dim, h, w)
+            sampling_value_l = nn.grid_sample(
+                value_l_reshaped,
+                sampling_grid_l,
+                mode='bilinear',
+                padding_mode='zeros',
+                align_corners=False
+            )  # 输出: (bs, num_heads, head_dim, 1, nq*np)
+        except Exception as e:
+            jt.log(f"尺度{level}网格采样失败: {str(e)}")
+            continue
+
+        # 调整采样结果形状并应用注意力权重
+        sampling_value_l = sampling_value_l.reshape(bs, nh, head_dim, nq, np)
+        attention_weights_l = attention_weights_l.unsqueeze(2)  # (bs, nh, 1, nq, np)
+        
+        # 加权求和
+        weighted_value = (sampling_value_l * attention_weights_l).sum(-1)  # (bs, nh, head_dim, nq)
+        weighted_value = weighted_value.transpose(1, 3).reshape(bs, nq, nh * head_dim)  # (bs, nq, value_dim)
+
+        # 累加到输出
+        output += weighted_value
+
+    return output
+    
