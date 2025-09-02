@@ -896,6 +896,8 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
                 model = OBBModel(cfg=yaml_config, verbose=False)
             elif task == "classify":
                 model = ClassificationModel(cfg=yaml_config, verbose=False)
+            elif task == "RTDETRDecoder":
+                model = RTDETRDetectionModel(cfg=yaml_config, verbose=False)
             else:
                 # 默认使用DetectionModel
                 model = DetectionModel(cfg=yaml_config, verbose=False)
