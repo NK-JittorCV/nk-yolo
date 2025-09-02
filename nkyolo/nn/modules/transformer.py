@@ -8,6 +8,7 @@ from jittor.init import constant_,xavier_uniform_
 
 from .conv import Conv
 from .utils import _get_clones, inverse_sigmoid
+from .attentionblock import MultiheadAttention
 
 __all__ = (
     "TransformerEncoderLayer",
@@ -36,7 +37,7 @@ class TransformerEncoderLayer(nn.Module):
         #     raise ModuleNotFoundError(
         #         "TransformerEncoderLayer() requires torch>=1.9 to use nn.MultiheadAttention(batch_first=True)."
         #     )
-        self.ma = nn.MultiheadAttention(c1, num_heads, dropout=dropout, batch_first=True)
+        self.ma = MultiheadAttention(c1, num_heads, dropout=dropout, batch_first=True)
         # Implementation of Feedexecute model
         self.fc1 = nn.Linear(c1, cm)
         self.fc2 = nn.Linear(cm, c1)
@@ -124,7 +125,7 @@ class TransformerLayer(nn.Module):
         self.q = nn.Linear(c, c, bias=False)
         self.k = nn.Linear(c, c, bias=False)
         self.v = nn.Linear(c, c, bias=False)
-        self.ma = nn.MultiheadAttention(embed_dim=c, num_heads=num_heads)
+        self.ma = MultiheadAttention(embed_dim=c, num_heads=num_heads)
         self.fc1 = nn.Linear(c, c, bias=False)
         self.fc2 = nn.Linear(c, c, bias=False)
 
@@ -322,7 +323,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         super().__init__()
 
         # Self attention
-        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
+        self.self_attn = MultiheadAttention(d_model, n_heads, dropout=dropout)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
