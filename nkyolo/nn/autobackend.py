@@ -162,7 +162,7 @@ class AutoBackend(nn.Module):
                 kpt_shape = model.kpt_shape  # pose-only
             stride = max(int(model.stride.max()), 32)  # model stride
             names = model.module.names if hasattr(model, "module") else model.names  # get class names
-            model.half() if fp16 else model.float32()
+            model.half() if fp16 else model.float()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
 
         # jtScript
@@ -229,7 +229,7 @@ class AutoBackend(nn.Module):
                     check_requirements("tensorrt>7.0.0,!=10.1.0")
                 import tensorrt as trt  # noqa
             check_version(trt.__version__, ">=7.0.0", hard=True)
-            check_version(trt.__version__, "!=10.1.0", msg="https://github.com/ultralytics/ultralytics/pull/14239")
+            check_version(trt.__version__, "!=10.1.0", msg="https://github.com/jittoryolo/jittoryolo/pull/14239")
             if device.type == "cpu":
                 device = jt.device("cuda:0")
             Binding = namedtuple("Binding", ("name", "dtype", "shape", "data", "ptr"))
@@ -310,7 +310,7 @@ class AutoBackend(nn.Module):
             LOGGER.info(f"Loading {w} for TensorFlow GraphDef inference...")
             import tensorflow as tf
 
-            from nkyolo.engine.exporter import gd_outputs
+            from jittoryolo.engine.exporter import gd_outputs
 
             def wrap_frozen_graph(gd, inputs, outputs):
                 """Wrap frozen graphs for deployment."""
@@ -398,17 +398,17 @@ class AutoBackend(nn.Module):
         # NVIDIA Triton Inference Server
         elif triton:
             check_requirements("tritonclient[all]")
-            from nkyolo.utils.triton import TritonRemoteModel
+            from jittoryolo.utils.triton import TritonRemoteModel
 
             model = TritonRemoteModel(w)
 
         # Any other format (unsupported)
         else:
-            from nkyolo.engine.exporter import export_formats
+            from jittoryolo.engine.exporter import export_formats
 
             raise TypeError(
                 f"model='{w}' is not a supported model format. Ultralytics supports: {export_formats()['Format']}\n"
-                f"See https://docs.ultralytics.com/modes/predict for help."
+                f"See https://docs.jittoryolo.com/modes/predict for help."
             )
 
         # Load external metadata YAML
@@ -438,8 +438,8 @@ class AutoBackend(nn.Module):
         if pt:
             for p in model.parameters():
                 p.requires_grad = False
-                
-        # self.__dict__.update(locals())  # assign all variables to self
+
+        self.__dict__.update(locals())  # assign all variables to self
 
     def execute(self, im, augment=False, visualize=False, embed=None):
         """
@@ -537,7 +537,7 @@ class AutoBackend(nn.Module):
                     f"'nms=False', but 'model={w}' has an NMS pipeline created by an 'nms=True' export."
                 )
                 # TODO: CoreML NMS inference handling
-                # from nkyolo.utils.ops import xywh2xyxy
+                # from jittoryolo.utils.ops import xywh2xyxy
                 # box = xywh2xyxy(y['coordinates'] * [[w, h, w, h]])  # xyxy pixels
                 # conf, cls = y['confidence'].max(1), y['confidence'].argmax(1).astype(np.float32)
                 # y = np.concatenate((box, conf.reshape(-1, 1), cls.reshape(-1, 1)), 1)
@@ -590,7 +590,7 @@ class AutoBackend(nn.Module):
                         scale, zero_point = output["quantization"]
                         x = (x.astype(np.float32) - zero_point) * scale  # re-scale
                     if x.ndim == 3:  # if task is not classification, excluding masks (ndim=4) as well
-                        # Denormalize xywh by image size. See https://github.com/ultralytics/ultralytics/pull/1695
+                        # Denormalize xywh by image size. See https://github.com/jittoryolo/jittoryolo/pull/1695
                         # xywh are normalized in TFLite/EdgeTPU to mitigate quantization error of integer models
                         if x.shape[-1] == 6:  # end-to-end model
                             x[:, :, [0, 2]] *= w
@@ -679,7 +679,7 @@ class AutoBackend(nn.Module):
 
 
 def export_formats():
-    """NK-YOLO export formats."""
+    """jittoryolo YOLO export formats."""
     x = [
         ["Pyjt", "-", ".pt", True, True],
         ["jtScript", "jtscript", ".jtscript", True, True],

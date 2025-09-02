@@ -1,8 +1,8 @@
 # Jittor YOLO, Apache License
-# Based on jittoryolo, https://jittoryolo.com
+# Based on nkyolo, https://nkyolo.com
 
 # Overview:
-# This pyproject.toml file manages the build, packaging, and distribution of the JittorYOLO library.
+# This pyproject.toml file manages the build, packaging, and distribution of the nkyolo library.
 # It defines essential project metadata, dependencies, and settings used to develop and deploy the library.
 
 # Key Sections:
@@ -21,7 +21,7 @@ build-backend = "setuptools.build_meta"
 
 # Project settings -----------------------------------------------------------------------------------------------------
 [project]
-name = "JittorYOLO"
+name = "nkyolo"
 dynamic = ["version"]
 description = "Jittor version YOLO for SOTA object detection."
 readme = "README.md"
@@ -58,7 +58,7 @@ classifiers = [
 
 # Required dependencies ------------------------------------------------------------------------------------------------
 dependencies = [
-    "numpy>=1.23.0",
+    "numpy==1.26.4",
     "matplotlib>=3.3.0",
     "opencv-python>=4.6.0",
     "pillow>=7.1.2",
@@ -84,7 +84,7 @@ dev = [
     "mkdocstrings[python]",
     "mkdocs-jupyter", # notebooks
     "mkdocs-redirects", # 301 redirects
-    "mkdocs-jittoryolo-plugin>=0.1.8", # for meta descriptions and images, dates and authors
+    "mkdocs-nkyolo-plugin>=0.1.8", # for meta descriptions and images, dates and authors
     "mkdocs-macros-plugin>=1.0.5"  # duplicating content (i.e. export tables) in multiple places
 ]
 export = [
@@ -102,23 +102,23 @@ extra = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/NK-JittorCV/jittoryolo"
-"Source" = "https://github.com/NK-JittorCV/jittoryolo"
-"Documentation" = "https://github.com/NK-JittorCV/jittoryolo"
-"Bug Reports" = "https://github.com/NK-JittorCV/jittoryolo"
-"Changelog" = "https://github.com/NK-JittorCV/jittoryolo"
+"Homepage" = "https://github.com/NK-JittorCV/nkyolo"
+"Source" = "https://github.com/NK-JittorCV/nkyolo"
+"Documentation" = "https://github.com/NK-JittorCV/nkyolo"
+"Bug Reports" = "https://github.com/NK-JittorCV/nkyolo"
+"Changelog" = "https://github.com/NK-JittorCV/nkyolo"
 
 [project.scripts]
-yolo = "jittoryolo.cfg:entrypoint"
-jittoryolo = "jittoryolo.cfg:entrypoint"
+yolo = "nkyolo.cfg:entrypoint"
+nkyolo = "nkyolo.cfg:entrypoint"
 
 # Tools settings -------------------------------------------------------------------------------------------------------
 [tool.setuptools]  # configuration specific to the `setuptools` build backend.
-packages = { find = { where = ["."], include = ["jittoryolo", "jittoryolo.*"] } }
-package-data = { "jittoryolo" = ["**/*.yaml", "../tests/*.py"], "jittoryolo.assets" = ["*.jpg"] }
+packages = { find = { where = ["."], include = ["nkyolo", "nkyolo.*"] } }
+package-data = { "nkyolo" = ["**/*.yaml", "../tests/*.py"], "nkyolo.assets" = ["*.jpg"] }
 
 [tool.setuptools.dynamic]
-version = { attr = "jittoryolo.__version__" }
+version = { attr = "nkyolo.__version__" }
 
 [tool.pytest.ini_options]
 addopts = "--doctest-modules --durations=30 --color=yes"
@@ -128,9 +128,9 @@ markers = [
 norecursedirs = [".git", "dist", "build"]
 
 [tool.coverage.run]
-source = ["jittoryolo/"]
+source = ["nkyolo/"]
 data_file = "tests/.coverage"
-omit = ["jittoryolo/utils/callbacks/*"]
+omit = ["nkyolo/utils/callbacks/*"]
 
 [tool.isort]
 line_length = 120
