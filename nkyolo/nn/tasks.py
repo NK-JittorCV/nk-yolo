@@ -971,6 +971,8 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
             model = OBBModel(cfg=yaml_config, verbose=False)
         elif task == "classify":
             model = ClassificationModel(cfg=yaml_config, verbose=False)
+        elif task == "RTDETRDecoder":
+            model = RTDETRDetectionModel(cfg=yaml_config, verbose=False)
         else:
             # 默认使用DetectionModel
             model = DetectionModel(cfg=yaml_config, verbose=False)
@@ -1233,6 +1235,7 @@ def guess_model_task(model):
             return "pose"
         if m == "obb":
             return "obb"
+        return "detect" # Default: use detect task
 
     # Guess from model cfg
     if isinstance(model, dict):
