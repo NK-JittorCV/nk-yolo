@@ -660,7 +660,10 @@ class Results(SimpleClass):
         if boxes:
             for c in boxes.cls.unique():
                 n = (boxes.cls == c).sum()  # detections per class
-                log_string += f"{n} {self.names[int(c)]}{'s' * (n > 1)}, "
+                n_val = int(n.item()) if hasattr(n, 'item') else int(n)
+                suffix = 's' if n_val > 1 else ''
+                log_string += f"{n_val} {self.names[int(c)]}{suffix}, "
+                # log_string += f"{n} {self.names[int(c)]}{'s' * (n > 1)}, "
         return log_string
 
     def save_txt(self, txt_file, save_conf=False):
