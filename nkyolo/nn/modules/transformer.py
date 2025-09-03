@@ -9,7 +9,7 @@ from jittor.init import constant_,xavier_uniform_
 from .conv import Conv
 from .utils import _get_clones, inverse_sigmoid
 from .attentionblock import MultiheadAttention
-from .attentionblock import multi_scale_deformable_attn_pytorch
+from nkyolo.nn.modules.utils import multi_scale_deformable_attn_jittor
 
 __all__ = (
     "TransformerEncoderLayer",
@@ -38,7 +38,9 @@ class TransformerEncoderLayer(nn.Module):
         #     raise ModuleNotFoundError(
         #         "TransformerEncoderLayer() requires torch>=1.9 to use nn.MultiheadAttention(batch_first=True)."
         #     )
+        print("c1 = ", c1)
         self.ma = MultiheadAttention(c1, num_heads, dropout=dropout, batch_first=True)
+        print("self.ma ok")
         # Implementation of Feedexecute model
         self.fc1 = nn.Linear(c1, cm)
         self.fc2 = nn.Linear(cm, c1)
@@ -307,7 +309,7 @@ class MSDeformAttn(nn.Module):
             sampling_locations = refer_bbox[:, :, None, :, None, :2] + add
         else:
             raise ValueError(f"Last dim of reference_points must be 2 or 4, but got {num_points}.")
-        output = multi_scale_deformable_attn_pytorch(value, value_shapes, sampling_locations, attention_weights)
+        output = multi_scale_deformable_attn_jittor(value, value_shapes, sampling_locations, attention_weights)
         return self.output_proj(output)
 
 
