@@ -161,6 +161,71 @@ def nms_rotated(boxes, scores, threshold=0.45):
     return sorted_idx[pick]
 
 
+# import jittor as jt
+
+def jtnms(boxes: jt.Var, scores: jt.Var, iou_threshold: float) -> jt.Var:
+    """
+    Jittor 实现的 NMS，接口与 PyTorch 一致：
+        i = nms(boxes, scores, iou_threshold)
+
+    Args:
+        boxes (jt.Var): [N, 4], 格式为 xyxy
+        scores (jt.Var): [N] 或 [N, 1]，置信度
+        iou_threshold (float): IOU 阈值
+
+    Returns:
+        jt.Var: 保留的框索引 [M,], dtype=int32
+    """
+    # 0. 处理空输入
+    if boxes.shape[0] == 0:
+        return jt.array([], dtype='int32')
+
+    # 1. 确保 scores 是 [N] 形状
+    if scores.ndim == 2:
+        scores = scores.squeeze(1)  # [N, 1] -> [N]
+
+    # 2. 按 scores 降序排序
+    _, order = jt.argsort(scores, descending=True)
+    boxes = boxes[order]  # 排序后的 boxes
+    scores = scores[order]  # 排序后的 scores
+    keep = []
+
+    while len(boxes) > 0:
+        # 取出分数最高的框
+        keep.append(order[0].unsqueeze(0))
+
+        if len(boxes) == 1:
+            break
+
+        # 计算当前框与其余所有框的 IOU
+        # boxes[0] 与 boxes[1:]
+        xx1 = jt.maximum(boxes[0, 0], boxes[1:, 0])
+        yy1 = jt.maximum(boxes[0, 1], boxes[1:, 1])
+        xx2 = jt.minimum(boxes[0, 2], boxes[1:, 2])
+        yy2 = jt.minimum(boxes[0, 3], boxes[1:, 3])
+
+        w = jt.maximum(xx2 - xx1, 0.0)
+        h = jt.maximum(yy2 - yy1, 0.0)
+        inter = w * h
+
+        area_i = (boxes[0, 2] - boxes[0, 0]) * (boxes[0, 3] - boxes[0, 1])
+        area_o = (boxes[1:, 2] - boxes[1:, 0]) * (boxes[1:, 3] - boxes[1:, 1])
+        union = area_i + area_o - inter
+
+        # 防止除以 0
+        iou = inter / jt.maximum(union, 1e-9)
+
+        # 保留 IOU 小于阈值的框
+        mask = iou <= iou_threshold
+        boxes = boxes[1:][mask]
+        order = order[1:][mask]
+        scores = scores[1:][mask]
+
+    # 合并保留的索引
+    keep = jt.concat(keep, dim=0)
+    return keep
+
+
 def non_max_suppression(
     prediction,
     conf_thres=0.25,
@@ -307,7 +372,7 @@ def non_max_suppression(
             #     print("scores shape:", scores.shape)
             #     scores = scores.unsqueeze(1)
             # boxes_with_scores = jt.concat([boxes, scores], dim=1)
-            i = jt.nms(boxes, scores, iou_thres)  # NMS
+            i = jtnms(boxes, scores, iou_thres)  # NMS
         i = i[:max_det]  # limit detections
 
         # # Experimental
