@@ -267,7 +267,19 @@ def non_max_suppression(
             i, j = jt.where(cls > conf_thres)
             x = jt.concat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
         else:  # best class only
-            conf, j = cls.max(1, keepdim=True)
+            # conf, j = cls.max(1, keepdim=True)
+            conf = jt.max(cls, dim=1, keepdims=True)  # shape: [N, 1]
+            j = jt.argmax(cls, dim=1, keepdims=True)  # shape: [N, 1]
+            if isinstance(j, tuple):
+                # 防御性编程：如果 j 是 tuple，取第一个元素（调试残留）
+                # print("type(jt.max):", jt.max)
+                # print("type(jt.argmax):", jt.argmax)
+                # print("jt.argmax is jt.max:", jt.argmax is jt.max)
+                # print("now, j = ", j)
+                # print("conf = ", conf)
+                j = j[0]
+            # 确保转为 float
+            j = j.float()
             x = jt.concat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]
 
         # Filter by class
@@ -289,7 +301,13 @@ def non_max_suppression(
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-            i = jt.ops.nms(boxes, scores, iou_thres)  # NMS
+            print("boxes shape:", boxes.shape)
+            print("scores shape", scores.shape)
+            # if scores.ndim == 1:
+            #     print("scores shape:", scores.shape)
+            #     scores = scores.unsqueeze(1)
+            # boxes_with_scores = jt.concat([boxes, scores], dim=1)
+            i = jt.nms(boxes, scores, iou_thres)  # NMS
         i = i[:max_det]  # limit detections
 
         # # Experimental
