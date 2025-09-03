@@ -31,10 +31,9 @@ def linear_init(module):
 
 def inverse_sigmoid(x, eps=1e-5):
     """Calculate the inverse sigmoid function for a tensor."""
-    x = x.clamp(min=0, max=1)
-    x1 = x.clamp(min=eps)
-    x2 = (1 - x).clamp(min=eps)
-    return jt.log(x1 / x2)
+    x = x.clamp(0.0, 1.0)
+    x = jt.clamp(x, eps, 1.0 - eps)
+    return jt.log(x / (1 - x))
 
 
 def multi_scale_deformable_attn_jittor(
