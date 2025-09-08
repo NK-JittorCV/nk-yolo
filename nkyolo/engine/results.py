@@ -660,7 +660,10 @@ class Results(SimpleClass):
         if boxes:
             for c in boxes.cls.unique():
                 n = (boxes.cls == c).sum()  # detections per class
-                log_string += f"{n} {self.names[int(c)]}{'s' * (n > 1)}, "
+                # 修复 Jittor 变量比较问题
+                n_val = int(n.item()) if hasattr(n, 'item') else int(n)
+                c_val = int(c.item()) if hasattr(c, 'item') else int(c)
+                log_string += f"{n_val} {self.names[c_val]}{'s' * (n_val > 1)}, "
         return log_string
 
     def save_txt(self, txt_file, save_conf=False):

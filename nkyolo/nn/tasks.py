@@ -5,6 +5,7 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
 import jittor as jt
 from jittor import nn
 
@@ -815,7 +816,7 @@ def jittor_safe_load(weight, safe_only=False):
     """
     from nkyolo.utils.downloads import attempt_download_asset
 
-    check_suffix(file=weight, suffix=".pt")
+    check_suffix(file=weight, suffix=(".pt", ".pkl"))
     file = attempt_download_asset(weight)  # search online if missing locally
     try:
         with temporary_modules(
@@ -913,7 +914,23 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
                 model.load_state_dict(model_state_dict)
         else:
             # 原有的加载逻辑（向后兼容）
-            model = (ckpt.get("ema") or ckpt["model"]).float()  # FP32 model
+            model_data = ckpt.get("ema") or ckpt["model"]
+            if isinstance(model_data, dict):
+                # 如果是权重字典（例如 .pkl 文件），需要重新构建模型
+                from nkyolo.nn.tasks import DetectionModel
+                
+                # 对于 .pkl 文件，使用默认的 YOLOv11 配置
+                if w.endswith('.pkl'):
+                    model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+                else:
+                    # 对于其他格式，使用通用配置或抛出错误
+                    raise ValueError(f"Cannot handle weight dictionary format for file: {w}")
+                
+                # 直接加载权重字典（假设是 Jittor 格式）
+                model.load_state_dict(model_data)
+            else:
+                # 如果是模型对象
+                model = model_data.float()  # FP32 model
 
         # Model compatibility updates
         model.args = args  # attach args to model
@@ -982,7 +999,45 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
         model = model.to(device).float()  # FP32 model
     else:
         # 原有的加载逻辑（向后兼容）
-        model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
+        model_data = ckpt.get("ema") or ckpt["model"]
+        if isinstance(model_data, dict):
+            # 如果是权重字典，需要重新构建模型
+            from nkyolo.nn.tasks import DetectionModel
+            model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+            
+            # 转换权重字典中的 PyTorch tensor 到 Jittor，确保使用 float32
+            jittor_state_dict = {}
+            for k, v in model_data.items():
+                if hasattr(v, 'detach'):  # PyTorch tensor
+                    numpy_val = v.detach().cpu().numpy()
+                    # 确保所有浮点权重都是 float32
+                    if numpy_val.dtype in [np.float16, np.float64]:
+                        numpy_val = numpy_val.astype(np.float32)
+                    jittor_state_dict[k] = jt.array(numpy_val)
+                else:
+                    jittor_state_dict[k] = v
+            
+            model.load_state_dict(jittor_state_dict)
+        else:
+            # 如果是模型对象，需要转换 PyTorch 模型到 Jittor
+            # 直接转换权重，因为是 PyTorch 模型
+            from nkyolo.nn.tasks import DetectionModel
+            model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+            
+            # 转换 PyTorch 权重到 Jittor，确保使用 float32
+            pytorch_state_dict = model_data.state_dict()
+            jittor_state_dict = {}
+            for k, v in pytorch_state_dict.items():
+                if hasattr(v, 'detach'):  # PyTorch tensor
+                    numpy_val = v.detach().cpu().numpy()
+                    # 确保所有浮点权重都是 float32
+                    if numpy_val.dtype in [np.float16, np.float64]:
+                        numpy_val = numpy_val.astype(np.float32)
+                    jittor_state_dict[k] = jt.array(numpy_val)
+                else:
+                    jittor_state_dict[k] = v
+            
+            model.load_state_dict(jittor_state_dict)
 
     # Model compatibility updates
     model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
