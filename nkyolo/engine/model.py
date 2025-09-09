@@ -161,7 +161,7 @@ class Model(nn.Module):
         """
         return self.predict(source, stream, **kwargs)  
 
-    def _new(self, cfg: str, task=None, model=None, verbose=True) -> None:
+    def _new(self, cfg: str, task=None, model=None, verbose=True, isdetr=False) -> None:
         """
         Initializes a new model and infers the task type from the model definitions.
 
@@ -184,6 +184,9 @@ class Model(nn.Module):
             >>> model = Model()
             >>> model._new("yolov8n.yaml", task="detect", verbose=True)
         """
+        print("-------------- cfg = ", cfg)
+        if "detr" in cfg:
+            isdetr=True
         cfg_dict = yaml_model_load(cfg)
         self.cfg = cfg
         self.task = task or guess_model_task(cfg_dict)

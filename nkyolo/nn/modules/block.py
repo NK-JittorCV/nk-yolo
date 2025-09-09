@@ -8,6 +8,7 @@ from nkyolo.utils.jittor_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
+from .batchnormblock import MyBatchNorm2d
 
 __all__ = (
     "DFL",
@@ -79,17 +80,17 @@ class DFL(nn.Module):
 class Proto(nn.Module):
     """YOLOv8 mask Proto module for segmentation models."""
 
-    def __init__(self, c1, c_=256, c2=32):
+    def __init__(self, c1, c_=256, c2=32, isdetr=False):
         """
         Initializes the YOLOv8 mask Proto module with specified number of protos and masks.
 
         Input arguments are ch_in, number of protos, number of masks.
         """
         super().__init__()
-        self.cv1 = Conv(c1, c_, k=3)
+        self.cv1 = Conv(c1, c_, k=3, isdetr=isdetr)
         self.upsample = nn.ConvTranspose2d(c_, c_, 2, 2, 0, bias=True)  # nn.Upsample(scale_factor=2, mode='nearest')
-        self.cv2 = Conv(c_, c_, k=3)
-        self.cv3 = Conv(c_, c2)
+        self.cv2 = Conv(c_, c_, k=3, isdetr=isdetr)
+        self.cv3 = Conv(c_, c2, isdetr=isdetr)
 
     def execute(self, x):
         """Performs a execute pass through layers using an upsampled input image."""
@@ -103,14 +104,14 @@ class HGStem(nn.Module):
     https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
     """
 
-    def __init__(self, c1, cm, c2):
+    def __init__(self, c1, cm, c2, isdetr=False):
         """Initialize the SPP layer with input/output channels and specified kernel sizes for max pooling."""
         super().__init__()
-        self.stem1 = Conv(c1, cm, 3, 2, act=nn.ReLU())
-        self.stem2a = Conv(cm, cm // 2, 2, 1, 0, act=nn.ReLU())
-        self.stem2b = Conv(cm // 2, cm, 2, 1, 0, act=nn.ReLU())
-        self.stem3 = Conv(cm * 2, cm, 3, 2, act=nn.ReLU())
-        self.stem4 = Conv(cm, c2, 1, 1, act=nn.ReLU())
+        self.stem1 = Conv(c1, cm, 3, 2, act=nn.ReLU(), isdetr=isdetr)
+        self.stem2a = Conv(cm, cm // 2, 2, 1, 0, act=nn.ReLU, isdetr=isdetr)
+        self.stem2b = Conv(cm // 2, cm, 2, 1, 0, act=nn.ReLU(), isdetr=isdetr)
+        self.stem3 = Conv(cm * 2, cm, 3, 2, act=nn.ReLU(), isdetr=isdetr)
+        self.stem4 = Conv(cm, c2, 1, 1, act=nn.ReLU(), isdetr=isdetr)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=1, padding=0, ceil_mode=True)
 
     def execute(self, x):
@@ -134,7 +135,7 @@ class HGBlock(nn.Module):
     https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
     """
 
-    def __init__(self, c1, cm, c2, k=3, n=6, lightconv=False, shortcut=False, act=nn.ReLU()):
+    def __init__(self, c1, cm, c2, k=3, n=6, lightconv=False, shortcut=False, act=nn.ReLU(), isdetr=False):
         """Initializes a CSP Bottleneck with 1 convolution using specified input and output channels."""
         super().__init__()
         block = LightConv if lightconv else Conv
@@ -142,8 +143,8 @@ class HGBlock(nn.Module):
         for i in range(n):
             blocks.append(block(c1 if i == 0 else cm, cm, k=k, act=act))
         self.m = nn.ModuleList(blocks)
-        self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act)  # squeeze conv
-        self.ec = Conv(c2 // 2, c2, 1, 1, act=act)  # excitation conv
+        self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act, isdetr=isdetr)  # squeeze conv
+        self.ec = Conv(c2 // 2, c2, 1, 1, act=act, isdetr=isdetr)  # excitation conv
         self.add = shortcut and c1 == c2
 
     def execute(self, x):
@@ -157,12 +158,12 @@ class HGBlock(nn.Module):
 class SPP(nn.Module):
     """Spatial Pyramid Pooling (SPP) layer https://arxiv.org/abs/1406.4729."""
 
-    def __init__(self, c1, c2, k=(5, 9, 13)):
+    def __init__(self, c1, c2, k=(5, 9, 13), isdetr=False):
         """Initialize the SPP layer with input/output channels and pooling kernel sizes."""
         super().__init__()
         c_ = c1 // 2  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_ * (len(k) + 1), c2, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(c_ * (len(k) + 1), c2, 1, 1, isdetr=isdetr)
         self.m = nn.ModuleList([nn.MaxPool2d(kernel_size=x, stride=1, padding=x // 2) for x in k])
 
     def execute(self, x):
@@ -174,7 +175,7 @@ class SPP(nn.Module):
 class SPPF(nn.Module):
     """Spatial Pyramid Pooling - Fast (SPPF) layer for YOLOv5 by Glenn Jocher."""
 
-    def __init__(self, c1, c2, k=5):
+    def __init__(self, c1, c2, k=5, isdetr=False):
         """
         Initializes the SPPF layer with given input/output channels and kernel size.
 
@@ -182,8 +183,8 @@ class SPPF(nn.Module):
         """
         super().__init__()
         c_ = c1 // 2  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_ * 4, c2, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(c_ * 4, c2, 1, 1, isdetr=isdetr)
         self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
 
     def execute(self, x):
@@ -196,11 +197,11 @@ class SPPF(nn.Module):
 class C1(nn.Module):
     """CSP Bottleneck with 1 convolution."""
 
-    def __init__(self, c1, c2, n=1):
+    def __init__(self, c1, c2, n=1, isdetr=False):
         """Initializes the CSP Bottleneck with configurations for 1 convolution with arguments ch_in, ch_out, number."""
         super().__init__()
-        self.cv1 = Conv(c1, c2, 1, 1)
-        self.m = nn.Sequential(*(Conv(c2, c2, 3) for _ in range(n)))
+        self.cv1 = Conv(c1, c2, 1, 1, isdetr=isdetr)
+        self.m = nn.Sequential(*(Conv(c2, c2, 3, isdetr=isdetr) for _ in range(n)))
 
     def execute(self, x):
         """Applies cross-convolutions to input in the C3 module."""
@@ -211,12 +212,12 @@ class C1(nn.Module):
 class C2(nn.Module):
     """CSP Bottleneck with 2 convolutions."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, isdetr=False):
         """Initializes a CSP Bottleneck with 2 convolutions and optional shortcut connection."""
         super().__init__()
         self.c = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv(2 * self.c, c2, 1)  # optional act=FReLU(c2)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(2 * self.c, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         # self.attention = ChannelAttention(2 * self.c)  # or SpatialAttention()
         self.m = nn.Sequential(*(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n)))
 
@@ -229,12 +230,12 @@ class C2(nn.Module):
 class C2f(nn.Module):
     """Faster Implementation of CSP Bottleneck with 2 convolutions."""
 
-    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, isdetr=False):
         """Initializes a CSP bottleneck with 2 convolutions and n Bottleneck blocks for faster processing."""
         super().__init__()
         self.c = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         blocks = []
         for _ in range(n):
             blocks.append(Bottleneck(self.c, self.c, shortcut, g, k=(3, 3), e=1.0))
@@ -257,13 +258,13 @@ class C2f(nn.Module):
 class C3(nn.Module):
     """CSP Bottleneck with 3 convolutions."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, isdetr=False):
         """Initialize the CSP Bottleneck with given channels, number, shortcut, groups, and expansion values."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)
+        self.cv1 = Conv(c1, c_, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(c1, c_, 1, 1, isdetr=isdetr)
+        self.cv3 = Conv(2 * c_, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=((1, 1), (3, 3)), e=1.0) for _ in range(n)))
 
     def execute(self, x):
@@ -284,14 +285,14 @@ class C3x(C3):
 class RepC3(nn.Module):
     """Rep C3."""
 
-    def __init__(self, c1, c2, n=3, e=1.0):
+    def __init__(self, c1, c2, n=3, e=1.0, isdetr=False):
         """Initialize CSP Bottleneck with a single convolution using input channels, output channels, and number."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(c1, c_, 1, 1, isdetr=isdetr)
         self.m = nn.Sequential(*[RepConv(c_, c_) for _ in range(n)])
-        self.cv3 = Conv(c_, c2, 1, 1) if c_ != c2 else nn.Identity()
+        self.cv3 = Conv(c_, c2, 1, 1, isdetr=isdetr) if c_ != c2 else nn.Identity()
 
     def execute(self, x):
         """execute pass of RT-DETR neck layer."""
@@ -321,7 +322,7 @@ class C3Ghost(C3):
 class GhostBottleneck(nn.Module):
     """Ghost Bottleneck https://github.com/huawei-noah/ghostnet."""
 
-    def __init__(self, c1, c2, k=3, s=1):
+    def __init__(self, c1, c2, k=3, s=1, isdetr=False):
         """Initializes GhostBottleneck module with arguments ch_in, ch_out, kernel, stride."""
         super().__init__()
         c_ = c2 // 2
@@ -331,7 +332,7 @@ class GhostBottleneck(nn.Module):
             GhostConv(c_, c2, 1, 1, act=False),  # pw-linear
         )
         self.shortcut = (
-            nn.Sequential(DWConv(c1, c1, k, s, act=False), Conv(c1, c2, 1, 1, act=False)) if s == 2 else nn.Identity()
+            nn.Sequential(DWConv(c1, c1, k, s, act=False), Conv(c1, c2, 1, 1, act=False, isdetr=isdetr)) if s == 2 else nn.Identity()
         )
 
     def execute(self, x):
@@ -342,12 +343,12 @@ class GhostBottleneck(nn.Module):
 class Bottleneck(nn.Module):
     """Standard bottleneck."""
 
-    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5, isdetr=False):
         """Initializes a standard bottleneck module with optional shortcut connection and configurable parameters."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, k[0], 1)
-        self.cv2 = Conv(c_, c2, k[1], 1, g=g)
+        self.cv1 = Conv(c1, c_, k[0], 1, isdetr=isdetr)
+        self.cv2 = Conv(c_, c2, k[1], 1, g=g, isdetr=isdetr)
         self.add = shortcut and c1 == c2
 
     def execute(self, x):
@@ -358,15 +359,15 @@ class Bottleneck(nn.Module):
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, isdetr=False):
         """Initializes the CSP Bottleneck given arguments for ch_in, ch_out, number, shortcut, groups, expansion."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1, isdetr=isdetr)
         self.cv2 = nn.Conv2d(c1, c_, 1, 1, bias=False)
         self.cv3 = nn.Conv2d(c_, c_, 1, 1, bias=False)
-        self.cv4 = Conv(2 * c_, c2, 1, 1)
-        self.bn = nn.BatchNorm2d(2 * c_)  # applied to cat(cv2, cv3)
+        self.cv4 = Conv(2 * c_, c2, 1, 1, isdetr=isdetr)
+        self.bn = MyBatchNorm2d(2 * c_, use_unbiased_update=isdetr)  # applied to cat(cv2, cv3)
         self.act = nn.SiLU()
         self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
 
@@ -380,14 +381,14 @@ class BottleneckCSP(nn.Module):
 class ResNetBlock(nn.Module):
     """ResNet block with standard convolution layers."""
 
-    def __init__(self, c1, c2, s=1, e=4):
+    def __init__(self, c1, c2, s=1, e=4, isdetr=False):
         """Initialize convolution with given parameters."""
         super().__init__()
         c3 = e * c2
-        self.cv1 = Conv(c1, c2, k=1, s=1, act=True)
-        self.cv2 = Conv(c2, c2, k=3, s=s, p=1, act=True)
-        self.cv3 = Conv(c2, c3, k=1, act=False)
-        self.shortcut = nn.Sequential(Conv(c1, c3, k=1, s=s, act=False)) if s != 1 or c1 != c3 else nn.Identity()
+        self.cv1 = Conv(c1, c2, k=1, s=1, act=True, isdetr=isdetr)
+        self.cv2 = Conv(c2, c2, k=3, s=s, p=1, act=True, isdetr=isdetr)
+        self.cv3 = Conv(c2, c3, k=1, act=False, isdetr=isdetr)
+        self.shortcut = nn.Sequential(Conv(c1, c3, k=1, s=s, act=False, isdetr=isdetr)) if s != 1 or c1 != c3 else nn.Identity()
 
     def execute(self, x):
         """execute pass through the ResNet block."""
@@ -397,14 +398,14 @@ class ResNetBlock(nn.Module):
 class ResNetLayer(nn.Module):
     """ResNet layer with multiple ResNet blocks."""
 
-    def __init__(self, c1, c2, s=1, is_first=False, n=1, e=4):
+    def __init__(self, c1, c2, s=1, is_first=False, n=1, e=4, isdetr=False):
         """Initializes the ResNetLayer given arguments."""
         super().__init__()
         self.is_first = is_first
 
         if self.is_first:
             self.layer = nn.Sequential(
-                Conv(c1, c2, k=7, s=2, p=3, act=True), nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+                Conv(c1, c2, k=7, s=2, p=3, act=True, isdetr=isdetr), nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
             )
         else:
             blocks = [ResNetBlock(c1, c2, s, e=e)]
@@ -419,15 +420,15 @@ class ResNetLayer(nn.Module):
 class MaxSigmoidAttnBlock(nn.Module):
     """Max Sigmoid attention block."""
 
-    def __init__(self, c1, c2, nh=1, ec=128, gc=512, scale=False):
+    def __init__(self, c1, c2, nh=1, ec=128, gc=512, scale=False, isdetr=False):
         """Initializes MaxSigmoidAttnBlock with specified arguments."""
         super().__init__()
         self.nh = nh
         self.hc = c2 // nh
-        self.ec = Conv(c1, ec, k=1, act=False) if c1 != ec else None
+        self.ec = Conv(c1, ec, k=1, act=False, isdetr=isdetr) if c1 != ec else None
         self.gl = nn.Linear(gc, ec)
         self.bias = jt.nn.Parameter(jt.zeros(nh))
-        self.proj_conv = Conv(c1, c2, k=3, s=1, act=False)
+        self.proj_conv = Conv(c1, c2, k=3, s=1, act=False, isdetr=isdetr)
         self.scale = jt.nn.Parameter(jt.ones(1, nh, 1, 1)) if scale else 1.0
 
 
@@ -455,12 +456,12 @@ class MaxSigmoidAttnBlock(nn.Module):
 class C2fAttn(nn.Module):
     """C2f module with an additional attn module."""
 
-    def __init__(self, c1, c2, n=1, ec=128, nh=1, gc=512, shortcut=False, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, ec=128, nh=1, gc=512, shortcut=False, g=1, e=0.5, isdetr=False):
         """Initializes C2f module with attention mechanism for enhanced feature extraction and processing."""
         super().__init__()
         self.c = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((3 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv((3 + n) * self.c, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
         self.attn = MaxSigmoidAttnBlock(self.c, self.c, gc=gc, ec=ec, nh=nh)
 
@@ -555,10 +556,10 @@ class BNContrastiveHead(nn.Module):
         embed_dims (int): Embed dimensions of text and image features.
     """
 
-    def __init__(self, embed_dims: int):
+    def __init__(self, embed_dims: int, isdetr=False):
         """Initialize ContrastiveHead with region-text similarity parameters."""
         super().__init__()
-        self.norm = nn.BatchNorm2d(embed_dims)
+        self.norm = MyBatchNorm2d(embed_dims,use_unbiased_update=isdetr)
         # NOTE: use -10.0 to keep the init cls loss consistency with other losses
         self.bias = nn.Parameter(jt.Var([-10.0]))
         # use -1.0 is more stable
@@ -597,14 +598,14 @@ class RepCSP(C3):
 class RepNCSPELAN4(nn.Module):
     """CSP-ELAN."""
 
-    def __init__(self, c1, c2, c3, c4, n=1):
+    def __init__(self, c1, c2, c3, c4, n=1, isdetr=False):
         """Initializes CSP-ELAN layer with specified channel sizes, repetitions, and convolutions."""
         super().__init__()
         self.c = c3 // 2
-        self.cv1 = Conv(c1, c3, 1, 1)
-        self.cv2 = nn.Sequential(RepCSP(c3 // 2, c4, n), Conv(c4, c4, 3, 1))
-        self.cv3 = nn.Sequential(RepCSP(c4, c4, n), Conv(c4, c4, 3, 1))
-        self.cv4 = Conv(c3 + (2 * c4), c2, 1, 1)
+        self.cv1 = Conv(c1, c3, 1, 1, isdetr=isdetr)
+        self.cv2 = nn.Sequential(RepCSP(c3 // 2, c4, n), Conv(c4, c4, 3, 1, isdetr=isdetr))
+        self.cv3 = nn.Sequential(RepCSP(c4, c4, n), Conv(c4, c4, 3, 1, isdetr=isdetr))
+        self.cv4 = Conv(c3 + (2 * c4), c2, 1, 1, isdetr=isdetr)
 
     def execute(self, x):
         """execute pass through RepNCSPELAN4 layer."""
@@ -622,23 +623,23 @@ class RepNCSPELAN4(nn.Module):
 class ELAN1(RepNCSPELAN4):
     """ELAN1 module with 4 convolutions."""
 
-    def __init__(self, c1, c2, c3, c4):
+    def __init__(self, c1, c2, c3, c4, isdetr=False):
         """Initializes ELAN1 layer with specified channel sizes."""
         super().__init__(c1, c2, c3, c4)
         self.c = c3 // 2
-        self.cv1 = Conv(c1, c3, 1, 1)
-        self.cv2 = Conv(c3 // 2, c4, 3, 1)
-        self.cv3 = Conv(c4, c4, 3, 1)
-        self.cv4 = Conv(c3 + (2 * c4), c2, 1, 1)
+        self.cv1 = Conv(c1, c3, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(c3 // 2, c4, 3, 1, isdetr=isdetr)
+        self.cv3 = Conv(c4, c4, 3, 1, isdetr=isdetr)
+        self.cv4 = Conv(c3 + (2 * c4), c2, 1, 1, isdetr=isdetr)
 
 
 class AConv(nn.Module):
     """AConv."""
 
-    def __init__(self, c1, c2):
+    def __init__(self, c1, c2, isdetr=False):
         """Initializes AConv module with convolution layers."""
         super().__init__()
-        self.cv1 = Conv(c1, c2, 3, 2, 1)
+        self.cv1 = Conv(c1, c2, 3, 2, 1, isdetr=isdetr)
 
     def execute(self, x):
         """execute pass through AConv layer."""
@@ -649,12 +650,12 @@ class AConv(nn.Module):
 class ADown(nn.Module):
     """ADown."""
 
-    def __init__(self, c1, c2):
+    def __init__(self, c1, c2, isdetr=False):
         """Initializes ADown module with convolution layers to downsample input from channels c1 to c2."""
         super().__init__()
         self.c = c2 // 2
-        self.cv1 = Conv(c1 // 2, self.c, 3, 2, 1)
-        self.cv2 = Conv(c1 // 2, self.c, 1, 1, 0)
+        self.cv1 = Conv(c1 // 2, self.c, 3, 2, 1, isdetr=isdetr)
+        self.cv2 = Conv(c1 // 2, self.c, 1, 1, 0, isdetr=isdetr)
 
     def execute(self, x):
         """execute pass through ADown layer."""
@@ -669,15 +670,15 @@ class ADown(nn.Module):
 class SPPELAN(nn.Module):
     """SPP-ELAN."""
 
-    def __init__(self, c1, c2, c3, k=5):
+    def __init__(self, c1, c2, c3, k=5, isdetr=False):
         """Initializes SPP-ELAN block with convolution and max pooling layers for spatial pyramid pooling."""
         super().__init__()
         self.c = c3
-        self.cv1 = Conv(c1, c3, 1, 1)
+        self.cv1 = Conv(c1, c3, 1, 1, isdetr=isdetr)
         self.cv2 = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
         self.cv3 = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
         self.cv4 = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
-        self.cv5 = Conv(4 * c3, c2, 1, 1)
+        self.cv5 = Conv(4 * c3, c2, 1, 1, isdetr=isdetr)
 
     def execute(self, x):
         """execute pass through SPPELAN layer."""
@@ -718,15 +719,15 @@ class CBFuse(nn.Module):
 class C3f(nn.Module):
     """Faster Implementation of CSP Bottleneck with 2 convolutions."""
 
-    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, isdetr=False):
         """Initialize CSP bottleneck layer with two convolutions with arguments ch_in, ch_out, number, shortcut, groups,
         expansion.
         """
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv((2 + n) * c_, c2, 1)  # optional act=FReLU(c2)
+        self.cv1 = Conv(c1, c_, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(c1, c_, 1, 1, isdetr=isdetr)
+        self.cv3 = Conv((2 + n) * c_, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         blocks = []
         for _ in range(n):
             blocks.append(Bottleneck(c_, c_, shortcut, g, k=((3, 3), (3, 3)), e=1.0))
@@ -766,11 +767,11 @@ class C3k(C3):
 class RepVGGDW(jt.nn.Module):
     """RepVGGDW is a class that represents a depth wise separable convolutional block in RepVGG architecture."""
 
-    def __init__(self, ed) -> None:
+    def __init__(self, ed, isdetr=False) -> None:
         """Initializes RepVGGDW with depthwise separable convolutional layers for efficient processing."""
         super().__init__()
-        self.conv = Conv(ed, ed, 7, 1, 3, g=ed, act=False)
-        self.conv1 = Conv(ed, ed, 3, 1, 1, g=ed, act=False)
+        self.conv = Conv(ed, ed, 7, 1, 3, g=ed, act=False, isdetr=isdetr)
+        self.conv1 = Conv(ed, ed, 3, 1, 1, g=ed, act=False, isdetr=isdetr)
         self.dim = ed
         self.act = nn.SiLU()
 
@@ -832,16 +833,16 @@ class CIB(nn.Module):
         lk (bool, optional): Whether to use RepVGGDW for the third convolutional layer. Defaults to False.
     """
 
-    def __init__(self, c1, c2, shortcut=True, e=0.5, lk=False):
+    def __init__(self, c1, c2, shortcut=True, e=0.5, lk=False, isdetr=False):
         """Initializes the custom model with optional shortcut, scaling factor, and RepVGGDW layer."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = nn.Sequential(
-            Conv(c1, c1, 3, g=c1),
-            Conv(c1, 2 * c_, 1),
-            RepVGGDW(2 * c_) if lk else Conv(2 * c_, 2 * c_, 3, g=2 * c_),
-            Conv(2 * c_, c2, 1),
-            Conv(c2, c2, 3, g=c2),
+            Conv(c1, c1, 3, g=c1, isdetr=isdetr),
+            Conv(c1, 2 * c_, 1, isdetr=isdetr),
+            RepVGGDW(2 * c_) if lk else Conv(2 * c_, 2 * c_, 3, g=2 * c_, isdetr=isdetr),
+            Conv(2 * c_, c2, 1, isdetr=isdetr),
+            Conv(c2, c2, 3, g=c2, isdetr=isdetr),
         )
 
         self.add = shortcut and c1 == c2
@@ -898,7 +899,7 @@ class Attention(nn.Module):
         pe (Conv): Convolutional layer for positional encoding.
     """
 
-    def __init__(self, dim, num_heads=8, attn_ratio=0.5):
+    def __init__(self, dim, num_heads=8, attn_ratio=0.5, isdetr=False):
         """Initializes multi-head attention module with query, key, and value convolutions and positional encoding."""
         super().__init__()
         self.num_heads = num_heads
@@ -907,9 +908,9 @@ class Attention(nn.Module):
         self.scale = self.key_dim**-0.5
         nh_kd = self.key_dim * num_heads
         h = dim + nh_kd * 2
-        self.qkv = Conv(dim, h, 1, act=False)
-        self.proj = Conv(dim, dim, 1, act=False)
-        self.pe = Conv(dim, dim, 3, 1, g=dim, act=False)
+        self.qkv = Conv(dim, h, 1, act=False, isdetr=isdetr)
+        self.proj = Conv(dim, dim, 1, act=False, isdetr=isdetr)
+        self.pe = Conv(dim, dim, 3, 1, g=dim, act=False, isdetr=isdetr)
 
     def execute(self, x):
         """
@@ -957,12 +958,12 @@ class PSABlock(nn.Module):
         >>> output_tensor = psablock(input_tensor)
     """
 
-    def __init__(self, c, attn_ratio=0.5, num_heads=4, shortcut=True) -> None:
+    def __init__(self, c, attn_ratio=0.5, num_heads=4, shortcut=True, isdetr=False) -> None:
         """Initializes the PSABlock with attention and feed-execute layers for enhanced feature extraction."""
         super().__init__()
 
         self.attn = Attention(c, attn_ratio=attn_ratio, num_heads=num_heads)
-        self.ffn = nn.Sequential(Conv(c, c * 2, 1), Conv(c * 2, c, 1, act=False))
+        self.ffn = nn.Sequential(Conv(c, c * 2, 1, isdetr=isdetr), Conv(c * 2, c, 1, act=False, isdetr=isdetr))
         self.add = shortcut
 
     def execute(self, x):
@@ -996,16 +997,16 @@ class PSA(nn.Module):
         >>> output_tensor = psa.execute(input_tensor)
     """
 
-    def __init__(self, c1, c2, e=0.5):
+    def __init__(self, c1, c2, e=0.5, isdetr=False):
         """Initializes the PSA module with input/output channels and attention mechanism for feature extraction."""
         super().__init__()
         assert c1 == c2
         self.c = int(c1 * e)
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv(2 * self.c, c1, 1)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(2 * self.c, c1, 1, isdetr=isdetr)
 
         self.attn = Attention(self.c, attn_ratio=0.5, num_heads=self.c // 64)
-        self.ffn = nn.Sequential(Conv(self.c, self.c * 2, 1), Conv(self.c * 2, self.c, 1, act=False))
+        self.ffn = nn.Sequential(Conv(self.c, self.c * 2, 1, isdetr=isdetr), Conv(self.c * 2, self.c, 1, act=False, isdetr=isdetr))
 
     def execute(self, x):
         """Executes execute pass in PSA module, applying attention and feed-execute layers to the input tensor."""
@@ -1040,13 +1041,13 @@ class C2PSA(nn.Module):
         >>> output_tensor = c2psa(input_tensor)
     """
 
-    def __init__(self, c1, c2, n=1, e=0.5):
+    def __init__(self, c1, c2, n=1, e=0.5, isdetr=False):
         """Initializes the C2PSA module with specified input/output channels, number of layers, and expansion ratio."""
         super().__init__()
         assert c1 == c2
         self.c = int(c1 * e)
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv(2 * self.c, c1, 1)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(2 * self.c, c1, 1, isdetr=isdetr)
 
         self.m = nn.Sequential(*(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64) for _ in range(n)))
 
@@ -1116,11 +1117,11 @@ class SCDown(nn.Module):
         torch.Size([1, 128, 64, 64])
     """
 
-    def __init__(self, c1, c2, k, s):
+    def __init__(self, c1, c2, k, s, isdetr=False):
         """Initializes the SCDown module with specified input/output channels, kernel size, and stride."""
         super().__init__()
-        self.cv1 = Conv(c1, c2, 1, 1)
-        self.cv2 = Conv(c2, c2, k=k, s=s, g=c2, act=False)
+        self.cv1 = Conv(c1, c2, 1, 1, isdetr=isdetr)
+        self.cv2 = Conv(c2, c2, k=k, s=s, g=c2, act=False, isdetr=isdetr)
 
     def execute(self, x):
         """Applies convolution and downsampling to the input tensor in the SCDown module."""
@@ -1193,23 +1194,27 @@ class MSBlockBottleNeckLayer(nn.Module):
                  out_channel: int,
                  kernel_size: Union[int, Sequence[int]],
                  conv_group = 'auto',
-                 use_act = True) -> None:
+                 use_act = True,
+                 isdetr = False) -> None:
         super().__init__()
         groups = 1 if conv_group != 'auto' else out_channel
         self.in_conv = Conv(in_channel,
                             out_channel,
                             1,
-                            act=use_act)       
+                            act=use_act,
+                            isdetr=isdetr)       
         self.mid_conv = Conv(out_channel,
                              out_channel,
                              kernel_size,
                              p=None,
                              g=groups,
-                             act=use_act)
+                             act=use_act,
+                             isdetr=isdetr)
         self.out_conv = Conv(out_channel,
                              in_channel,
                              1,
-                             act=use_act)
+                             act=use_act,
+                             isdetr=isdetr)
     
     def execute(self, x: jt.Var) -> jt.Var:
         """Forward process
@@ -1227,7 +1232,8 @@ class MSBlock_kxk_1x1_Layer(nn.Module):
                  out_channel: int,
                  kernel_size: Union[int, Sequence[int]],
                  conv_group = 'auto',
-                 use_act = True) -> None:
+                 use_act = True,
+                 isdetr = False) -> None:
         super().__init__()
         groups = 1 if conv_group != 'auto' else in_channel
         self.in_conv = Conv(in_channel,
@@ -1235,11 +1241,13 @@ class MSBlock_kxk_1x1_Layer(nn.Module):
                             kernel_size,
                             p=None,
                             g=groups,
-                            act=use_act)
+                            act=use_act,
+                            isdetr=isdetr)
         self.out_conv = Conv(out_channel,
                              in_channel,
                              1,
-                             act=use_act)
+                             act=use_act,
+                             isdetr=isdetr)
     
     def execute(self, x):
         x = self.in_conv(x)
@@ -1281,7 +1289,8 @@ class MSBlock(nn.Module):
                  use_act = True,
                  use_attention = False,
                  N = -1,
-                 Q = -1):
+                 Q = -1,
+                 isdetr = False):
         super().__init__()
         layer = self.layer_dict[layer]
         self.layers_num = layers_num
@@ -1291,7 +1300,8 @@ class MSBlock(nn.Module):
         self.in_conv = Conv(c1,
                             self.in_channel,
                             k=1,
-                            act=use_act)
+                            act=use_act,
+                            isdetr=isdetr)
         
         # Deal with middle features
         self.mid_channels = [int(1 / len(kernel_sizes) * self.in_channel) for _ in range(len(kernel_sizes))]
@@ -1321,7 +1331,8 @@ class MSBlock(nn.Module):
         self.out_conv = Conv(self.in_channel,
                              c2,
                              1,
-                             act=use_act)
+                             act=use_act,
+                             isdetr=isdetr)
 
             
     def execute(self, x) -> jt.Var:

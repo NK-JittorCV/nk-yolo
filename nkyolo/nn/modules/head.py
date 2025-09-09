@@ -12,6 +12,7 @@ from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto
 from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
+from .batchnormblock import MyBatchNorm2d
 
 __all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder", "v10Detect"
 
@@ -305,12 +306,12 @@ class Classify(nn.Module):
 class WorldDetect(Detect):
     """Head for integrating YOLO detection models with semantic understanding from text embeddings."""
 
-    def __init__(self, nc=80, embed=512, with_bn=False, ch=()):
+    def __init__(self, nc=80, embed=512, with_bn=False, ch=(), isdetr=False):
         """Initialize YOLO detection layer with nc classes and layer channels ch."""
         super().__init__(nc, ch)
         c3 = max(ch[0], min(self.nc, 100))
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch)
-        self.cv4 = nn.ModuleList(BNContrastiveHead(embed) if with_bn else ContrastiveHead() for _ in ch)
+        self.cv4 = nn.ModuleList(BNContrastiveHead(embed, isdetr=isdetr) if with_bn else ContrastiveHead() for _ in ch)
 
     def execute(self, x, text):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
@@ -385,6 +386,7 @@ class RTDETRDecoder(nn.Module):
         label_noise_ratio=0.5,
         box_noise_scale=1.0,
         learnt_init_query=False,
+        isdetr=True
     ):
         """
         Initializes the RTDETRDecoder module with the given parameters.
@@ -415,7 +417,7 @@ class RTDETRDecoder(nn.Module):
         self.num_decoder_layers = ndl
 
         # Backbone feature projection
-        self.input_proj = nn.ModuleList([nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch])
+        self.input_proj = nn.ModuleList([nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), MyBatchNorm2d(hd, use_unbiased_update=isdetr)) for x in ch])
         # NOTE: simplified version but it's not consistent with .pt weights.
         # self.input_proj = nn.ModuleList(Conv(x, hd, act=False) for x in ch)
 

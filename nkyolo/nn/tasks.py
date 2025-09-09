@@ -7,6 +7,7 @@ from pathlib import Path
 
 import jittor as jt
 from jittor import nn
+from nkyolo.nn.modules.batchnormblock import MyBatchNorm2d
 
 from nkyolo.nn.modules import (
     AIFI,
@@ -1139,7 +1140,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 n = 1
         elif m is ResNetLayer:
             c2 = args[1] if args[3] else args[1] * 4
-        elif m is nn.BatchNorm2d:
+        elif m is MyBatchNorm2d:
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)

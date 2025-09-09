@@ -2,7 +2,7 @@ import jittor as jt
 import jittor.nn as nn
 
 
-class FlexibleBatchNorm2d(nn.BatchNorm2d):
+class MyBatchNorm2d(nn.BatchNorm2d):
     """
     继承Jittor原生BatchNorm2d，支持两种更新模式：
     1. 原生模式（默认）：running_mean/var使用momentum指数移动平均
@@ -10,19 +10,22 @@ class FlexibleBatchNorm2d(nn.BatchNorm2d):
     通过use_unbiased_update参数控制，完全兼容原生接口
     """
     def __init__(self, num_features, eps=1e-5, momentum=0.1, 
-                 affine=True, track_running_stats=True, 
-                 use_unbiased_update=False):  # 新增控制参数
+                 affine=True, use_unbiased_update=False):  # 新增控制参数
         # 调用父类初始化（保留原生所有参数）
         super().__init__(
             num_features=num_features,
             eps=eps,
             momentum=momentum,
             affine=affine,
-            track_running_stats=track_running_stats
         )
         
         # 新增功能参数
         self.use_unbiased_update = use_unbiased_update  # 控制是否启用无偏更新
+        self.track_running_stats = use_unbiased_update
+        
+        # 计算广播形状 (1, num_features, 1, 1)，适用于4D输入
+        self.broadcast_shape = (1, num_features, 1, 1)
+        
         # 批次计数器：仅在跟踪统计时创建
         if self.track_running_stats:
             self.num_batches_tracked = jt.zeros((), dtype='int64')

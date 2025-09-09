@@ -2,6 +2,7 @@ import math
 import numpy as np
 import jittor as jt
 from jittor import nn
+from .batchnormblock import MyBatchNorm2d
 
 __all__ = (
     "Conv",
@@ -36,7 +37,7 @@ class Conv(nn.Module):
     
     default_act = nn.SiLU()  # default activation
 
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True, isdetr=False):
         """Initialize Conv layer with given arguments including activation."""
         super().__init__()
         k_size = k[0] if isinstance(k, (tuple, list)) else k
@@ -44,7 +45,7 @@ class Conv(nn.Module):
         if isinstance(padding, (tuple, list)):
             padding = padding[0]  
         self.conv = nn.Conv2d(c1, c2, k_size, s, padding, groups=g, dilation=d, bias=False)
-        self.bn = nn.BatchNorm2d(c2)
+        self.bn = MyBatchNorm2d(c2, use_unbiased_update=isdetr)
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def execute(self, x):
@@ -121,11 +122,11 @@ class ConvTranspose(nn.Module):
 
     default_act = nn.SiLU()  # default activation
 
-    def __init__(self, c1, c2, k=2, s=2, p=0, bn=True, act=True):
+    def __init__(self, c1, c2, k=2, s=2, p=0, bn=True, act=True, isdetr=False):
         """Initialize ConvTranspose2d layer with batch normalization and activation function."""
         super().__init__()
         self.conv_transpose = nn.ConvTranspose2d(c1, c2, k, s, p, bias=not bn)
-        self.bn = nn.BatchNorm2d(c2) if bn else nn.Identity()
+        self.bn = MyBatchNorm2d(c2, use_unbiased_update=isdetr) if bn else nn.Identity()
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def execute(self, x):
@@ -182,7 +183,7 @@ class RepConv(nn.Module):
 
     default_act = nn.SiLU()  # default activation
 
-    def __init__(self, c1, c2, k=3, s=1, p=1, g=1, d=1, act=True, bn=False, deploy=False):
+    def __init__(self, c1, c2, k=3, s=1, p=1, g=1, d=1, act=True, bn=False, deploy=False, isdetr=False):
         """Initializes Light Convolution layer with inputs, outputs & optional activation function."""
         super().__init__()
         assert k == 3 and p == 1
@@ -191,7 +192,7 @@ class RepConv(nn.Module):
         self.c2 = c2
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
-        self.bn = nn.BatchNorm2d(num_features=c1) if bn and c2 == c1 and s == 1 else None
+        self.bn = MyBatchNorm2d(num_features=c1, use_unbiased_update=isdetr) if bn and c2 == c1 and s == 1 else None
         self.conv1 = Conv(c1, c2, k, s, p=p, g=g, act=False)
         self.conv2 = Conv(c1, c2, 1, s, p=(p - k // 2), g=g, act=False)
 
@@ -230,7 +231,7 @@ class RepConv(nn.Module):
             gamma = branch.bn.weight
             beta = branch.bn.bias
             eps = branch.bn.eps
-        elif isinstance(branch, nn.BatchNorm2d):
+        elif isinstance(branch, MyBatchNorm2d):
             if not hasattr(self, "id_tensor"):
                 input_dim = self.c1 // self.g
                 kernel_value = np.zeros((self.c1, input_dim, 3, 3), dtype=np.float32)
