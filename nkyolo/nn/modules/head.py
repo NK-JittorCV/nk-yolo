@@ -30,7 +30,7 @@ class Detect(nn.Module):
     strides = jt.empty(0)  # init
     legacy = False  # backward compatibility for v3/v5/v8/v9 models
 
-    def __init__(self, nc=80, ch=()):
+    def __init__(self, nc=80, ch=(), isdetr=False):
         """Initializes the YOLO detection layer with specified number of classes and channels."""
         super().__init__()
         self.nc = nc  # number of classes
@@ -40,15 +40,15 @@ class Detect(nn.Module):
         self.stride = jt.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
-            [nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch]
+            [nn.Sequential(Conv(x, c2, 3, isdetr=isdetr), Conv(c2, c2, 3, isdetr=isdetr), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch]
         )
         self.cv3 = (
-            nn.ModuleList([nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch])
+            nn.ModuleList([nn.Sequential(Conv(x, c3, 3, isdetr=isdetr), Conv(c3, c3, 3, isdetr=isdetr), nn.Conv2d(c3, self.nc, 1)) for x in ch])
             if self.legacy
             else nn.ModuleList(
                 [nn.Sequential(
-                    nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
-                    nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                    nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1, isdetr=isdetr)),
+                    nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1, isdetr=isdetr)),
                     nn.Conv2d(c3, self.nc, 1),
                 )
                 for x in ch]
@@ -174,7 +174,7 @@ class Detect(nn.Module):
 class Segment(Detect):
     """YOLO Segment head for segmentation models."""
 
-    def __init__(self, nc=80, nm=32, npr=256, ch=()):
+    def __init__(self, nc=80, nm=32, npr=256, ch=(), isdetr=False):
         """Initialize the YOLO model attributes such as the number of masks, prototypes, and the convolution layers."""
         super().__init__(nc, ch)
         self.nm = nm  # number of masks
@@ -182,7 +182,7 @@ class Segment(Detect):
         self.proto = Proto(ch[0], self.npr, self.nm)  # protos
 
         c4 = max(ch[0] // 4, self.nm)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nm, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3, isdetr=isdetr), Conv(c4, c4, 3, isdetr=isdetr), nn.Conv2d(c4, self.nm, 1)) for x in ch)
 
     def execute(self, x):
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
@@ -199,13 +199,13 @@ class Segment(Detect):
 class OBB(Detect):
     """YOLO OBB detection head for detection with rotation models."""
 
-    def __init__(self, nc=80, ne=1, ch=()):
+    def __init__(self, nc=80, ne=1, ch=(), isdetr=False):
         """Initialize OBB with number of classes `nc` and layer channels `ch`."""
         super().__init__(nc, ch)
         self.ne = ne  # number of extra parameters
 
         c4 = max(ch[0] // 4, self.ne)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3, isdetr=isdetr), Conv(c4, c4, 3, isdetr=isdetr), nn.Conv2d(c4, self.ne, 1)) for x in ch)
 
     def execute(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
@@ -229,14 +229,14 @@ class OBB(Detect):
 class Pose(Detect):
     """YOLO Pose head for keypoints models."""
 
-    def __init__(self, nc=80, kpt_shape=(17, 3), ch=()):
+    def __init__(self, nc=80, kpt_shape=(17, 3), ch=(), isdetr=False):
         """Initialize YOLO network with default parameters and Convolutional Layers."""
-        super().__init__(nc, ch)
+        super().__init__(nc, ch, isdetr=isdetr)
         self.kpt_shape = kpt_shape  # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)
         self.nk = kpt_shape[0] * kpt_shape[1]  # number of keypoints total
 
         c4 = max(ch[0] // 4, self.nk)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nk, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3, isdetr=isdetr), Conv(c4, c4, 3, isdetr=isdetr), nn.Conv2d(c4, self.nk, 1)) for x in ch)
 
     def execute(self, x):
         """Perform execute pass through YOLO model and return predictions."""
@@ -283,11 +283,11 @@ class Classify(nn.Module):
 
     export = False  # export mode
 
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1):
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, isdetr=False):
         """Initializes YOLO classification head to transform input tensor from (b,c1,20,20) to (b,c2) shape."""
         super().__init__()
         c_ = 1280  # efficientnet_b0 size
-        self.conv = Conv(c1, c_, k, s, p, g)
+        self.conv = Conv(c1, c_, k, s, p, g, isdetr=isdetr)
         self.pool = nn.AdaptiveAvgPool2d(1)  # to x(b,c_,1,1)
         self.drop = nn.Dropout(p=0.0, inplace=True)
         self.linear = nn.Linear(c_, c2)  # to x(b,c2)
@@ -308,9 +308,9 @@ class WorldDetect(Detect):
 
     def __init__(self, nc=80, embed=512, with_bn=False, ch=(), isdetr=False):
         """Initialize YOLO detection layer with nc classes and layer channels ch."""
-        super().__init__(nc, ch)
+        super().__init__(nc, ch, isdetr=isdetr)
         c3 = max(ch[0], min(self.nc, 100))
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, embed, 1)) for x in ch)
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3, isdetr=isdetr), Conv(c3, c3, 3, isdetr=isdetr), nn.Conv2d(c3, embed, 1)) for x in ch)
         self.cv4 = nn.ModuleList(BNContrastiveHead(embed, isdetr=isdetr) if with_bn else ContrastiveHead() for _ in ch)
 
     def execute(self, x, text):
@@ -631,15 +631,15 @@ class v10Detect(Detect):
 
     end2end = True
 
-    def __init__(self, nc=80, ch=()):
+    def __init__(self, nc=80, ch=(), isdetr=False):
         """Initializes the v10Detect object with the specified number of classes and input channels."""
         super().__init__(nc, ch)
         c3 = max(ch[0], min(self.nc, 100))  # channels
         # Light cls head
         self.cv3 = nn.ModuleList(
             [nn.Sequential(
-                nn.Sequential(Conv(x, x, 3, g=x), Conv(x, c3, 1)),
-                nn.Sequential(Conv(c3, c3, 3, g=c3), Conv(c3, c3, 1)),
+                nn.Sequential(Conv(x, x, 3, g=x, isdetr=isdetr), Conv(x, c3, 1, isdetr=isdetr)),
+                nn.Sequential(Conv(c3, c3, 3, g=c3, isdetr=isdetr), Conv(c3, c3, 1, isdetr=isdetr)),
                 nn.Conv2d(c3, self.nc, 1),
             )
             for x in ch]

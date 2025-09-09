@@ -60,9 +60,9 @@ class Conv(nn.Module):
 class Conv2(Conv):
     """Simplified RepConv module with Conv fusing."""
 
-    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True):
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True, isdetr=False):
         """Initialize Conv layer with given arguments including activation."""
-        super().__init__(c1, c2, k, s, p, g=g, d=d, act=act)
+        super().__init__(c1, c2, k, s, p, g=g, d=d, act=act, isdetr=isdetr)
         self.cv2 = nn.Conv2d(c1, c2, 1, s, autopad(1, p, d), groups=g, dilation=d, bias=False)  # add 1x1 conv
 
     def execute(self, x):
@@ -90,10 +90,10 @@ class LightConv(nn.Module):
     https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
     """
 
-    def __init__(self, c1, c2, k=1, act=nn.ReLU()):
+    def __init__(self, c1, c2, k=1, act=nn.ReLU(), isdetr=False):
         """Initialize Conv layer with given arguments including activation."""
         super().__init__()
-        self.conv1 = Conv(c1, c2, 1, act=False)
+        self.conv1 = Conv(c1, c2, 1, act=False, isdetr=isdetr)
         self.conv2 = DWConv(c2, c2, k, act=act)
 
     def execute(self, x):
@@ -104,9 +104,9 @@ class LightConv(nn.Module):
 class DWConv(Conv):
     """Depth-wise convolution."""
 
-    def __init__(self, c1, c2, k=1, s=1, d=1, act=True):  # ch_in, ch_out, kernel, stride, dilation, activation
+    def __init__(self, c1, c2, k=1, s=1, d=1, act=True, isdetr=False):  # ch_in, ch_out, kernel, stride, dilation, activation
         """Initialize Depth-wise convolution with given parameters."""
-        super().__init__(c1, c2, k, s, g=math.gcd(c1, c2), d=d, act=act)
+        super().__init__(c1, c2, k, s, g=math.gcd(c1, c2), d=d, act=act, isdetr=isdetr)
 
 
 class DWConvTranspose2d(nn.ConvTranspose2d):
@@ -141,10 +141,10 @@ class ConvTranspose(nn.Module):
 class Focus(nn.Module):
     """Focus wh information into c-space."""
 
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True, isdetr=False):
         """Initializes Focus object with user defined channel, convolution, padding, group and activation values."""
         super().__init__()
-        self.conv = Conv(c1 * 4, c2, k, s, p, g, act=act)
+        self.conv = Conv(c1 * 4, c2, k, s, p, g, act=act, isdetr=isdetr)
         # self.contract = Contract(gain=2)
 
     def execute(self, x):
@@ -160,12 +160,12 @@ class Focus(nn.Module):
 class GhostConv(nn.Module):
     """Ghost Convolution https://github.com/huawei-noah/ghostnet."""
 
-    def __init__(self, c1, c2, k=1, s=1, g=1, act=True):
+    def __init__(self, c1, c2, k=1, s=1, g=1, act=True, isdetr=False):
         """Initializes Ghost Convolution module with primary and cheap operations for efficient feature learning."""
         super().__init__()
         c_ = c2 // 2  # hidden channels
-        self.cv1 = Conv(c1, c_, k, s, None, g, act=act)
-        self.cv2 = Conv(c_, c_, 5, 1, None, c_, act=act)
+        self.cv1 = Conv(c1, c_, k, s, None, g, act=act, isdetr=isdetr)
+        self.cv2 = Conv(c_, c_, 5, 1, None, c_, act=act, isdetr=isdetr)
 
     def execute(self, x):
         """Forward propagation through a Ghost Bottleneck layer with skip connection."""
@@ -193,8 +193,8 @@ class RepConv(nn.Module):
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
         self.bn = MyBatchNorm2d(num_features=c1, use_unbiased_update=isdetr) if bn and c2 == c1 and s == 1 else None
-        self.conv1 = Conv(c1, c2, k, s, p=p, g=g, act=False)
-        self.conv2 = Conv(c1, c2, 1, s, p=(p - k // 2), g=g, act=False)
+        self.conv1 = Conv(c1, c2, k, s, p=p, g=g, act=False, isdetr=isdetr)
+        self.conv2 = Conv(c1, c2, 1, s, p=(p - k // 2), g=g, act=False, isdetr=isdetr)
 
     def execute_fuse(self, x):
         """Forward process."""
