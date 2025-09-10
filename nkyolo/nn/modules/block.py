@@ -275,9 +275,9 @@ class C3(nn.Module):
 class C3x(C3):
     """C3 module with cross-convolutions."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, isdetr=False):
         """Initialize C3TR instance and set default parameters."""
-        super().__init__(c1, c2, n, shortcut, g, e)
+        super().__init__(c1, c2, n, shortcut, g, e, isdetr=isdetr)
         self.c_ = int(c2 * e)
         self.m = nn.Sequential(*(Bottleneck(self.c_, self.c_, shortcut, g, k=((1, 3), (3, 1)), e=1) for _ in range(n)))
 
@@ -291,7 +291,7 @@ class RepC3(nn.Module):
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1, isdetr=isdetr)
         self.cv2 = Conv(c1, c_, 1, 1, isdetr=isdetr)
-        self.m = nn.Sequential(*[RepConv(c_, c_) for _ in range(n)])
+        self.m = nn.Sequential(*[RepConv(c_, c_, isdetr=isdetr) for _ in range(n)])
         self.cv3 = Conv(c_, c2, 1, 1, isdetr=isdetr) if c_ != c2 else nn.Identity()
 
     def execute(self, x):
@@ -302,9 +302,9 @@ class RepC3(nn.Module):
 class C3TR(C3):
     """C3 module with TransformerBlock()."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, isdetr=False):
         """Initialize C3Ghost module with GhostBottleneck()."""
-        super().__init__(c1, c2, n, shortcut, g, e)
+        super().__init__(c1, c2, n, shortcut, g, e, isdetr=isdetr)
         c_ = int(c2 * e)
         self.m = TransformerBlock(c_, c_, 4, n)
 
@@ -312,9 +312,9 @@ class C3TR(C3):
 class C3Ghost(C3):
     """C3 module with GhostBottleneck()."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, isdetr=False):
         """Initialize 'SPP' module with various pooling sizes for spatial pyramid pooling."""
-        super().__init__(c1, c2, n, shortcut, g, e)
+        super().__init__(c1, c2, n, shortcut, g, e, isdetr=isdetr)
         c_ = int(c2 * e)  # hidden channels
         self.m = nn.Sequential(*(GhostBottleneck(c_, c_) for _ in range(n)))
 
@@ -578,19 +578,19 @@ class BNContrastiveHead(nn.Module):
 class RepBottleneck(Bottleneck):
     """Rep bottleneck."""
 
-    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5, isdetr=False):
         """Initializes a RepBottleneck module with customizable in/out channels, shortcuts, groups and expansion."""
         super().__init__(c1, c2, shortcut, g, k, e)
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = RepConv(c1, c_, k[0], 1)
+        self.cv1 = RepConv(c1, c_, k[0], 1, isdetr=isdetr)
 
 
 class RepCSP(C3):
     """Repeatable Cross Stage Partial Network (RepCSP) module for efficient feature extraction."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, isdetr=False):
         """Initializes RepCSP layer with given channels, repetitions, shortcut, groups and expansion ratio."""
-        super().__init__(c1, c2, n, shortcut, g, e)
+        super().__init__(c1, c2, n, shortcut, g, e, isdetr=isdetr)
         c_ = int(c2 * e)  # hidden channels
         self.m = nn.Sequential(*(RepBottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
 
@@ -743,12 +743,12 @@ class C3f(nn.Module):
 class C3k2(C2f):
     """Faster Implementation of CSP Bottleneck with 2 convolutions."""
 
-    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True, isdetr=False):
         """Initializes the C3k2 module, a faster CSP Bottleneck with 2 convolutions and optional C3k blocks."""
-        super().__init__(c1, c2, n, shortcut, g, e)
+        super().__init__(c1, c2, n, shortcut, g, e, isdeter=isdetr)
         blocks = []
         for _ in range(n):
-            block = C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g)
+            block = C3k(self.c, self.c, 2, shortcut, g, isdetr=isdetr) if c3k else Bottleneck(self.c, self.c, shortcut, g, isdetr=isdetr)
             blocks.append(block)
         self.m = nn.ModuleList(blocks)
 
@@ -756,12 +756,12 @@ class C3k2(C2f):
 class C3k(C3):
     """C3k is a CSP bottleneck module with customizable kernel sizes for feature extraction in neural networks."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, k=3):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, k=3, isdetr=False):
         """Initializes the C3k module with specified channels, number of layers, and configurations."""
-        super().__init__(c1, c2, n, shortcut, g, e)
+        super().__init__(c1, c2, n, shortcut, g, e, isdetr=isdetr)
         c_ = int(c2 * e)  # hidden channels
         # self.m = nn.Sequential(*(RepBottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
-        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0, isdetr=isdetr) for _ in range(n)))
 
 
 class RepVGGDW(jt.nn.Module):
@@ -874,9 +874,9 @@ class C2fCIB(C2f):
         e (float, optional): Expansion ratio for CIB modules. Defaults to 0.5.
     """
 
-    def __init__(self, c1, c2, n=1, shortcut=False, lk=False, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=False, lk=False, g=1, e=0.5, isdetr=False):
         """Initializes the module with specified parameters for channel, shortcut, local key, groups, and expansion."""
-        super().__init__(c1, c2, n, shortcut, g, e)
+        super().__init__(c1, c2, n, shortcut, g, e, isdetr=isdetr)
         self.m = nn.ModuleList([CIB(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n)])
 
 
@@ -1083,10 +1083,10 @@ class C2fPSA(C2f):
         >>> print(output.shape)
     """
 
-    def __init__(self, c1, c2, n=1, e=0.5):
+    def __init__(self, c1, c2, n=1, e=0.5, isdetr=False):
         """Initializes the C2fPSA module, a variant of C2f with PSA blocks for enhanced feature extraction."""
         assert c1 == c2
-        super().__init__(c1, c2, n=n, e=e)
+        super().__init__(c1, c2, n=n, e=e, isdetr=isdetr)
         blocks = []
         for _ in range(n):
             blocks.append(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64))

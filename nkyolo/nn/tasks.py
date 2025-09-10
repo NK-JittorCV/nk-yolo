@@ -303,10 +303,12 @@ class BaseModel(nn.Module):
 class DetectionModel(BaseModel):
     """YOLOv8 detection model."""
 
-    def __init__(self, cfg="yolov8n.yaml", ch=3, nc=None, verbose=True):  # model, input channels, number of classes
+    def __init__(self, cfg="yolov8n.yaml", ch=3, nc=None, verbose=True, isdetr=False):  # model, input channels, number of classes
         """Initialize the YOLOv8 detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
+        self.yaml["isdetr"] = isdetr;
+        # print("now Detection Model cfg = ", cfg)
         if self.yaml["backbone"][0][2] == "Silence":
             LOGGER.warning(
                 "WARNING ⚠️ YOLOv9 `Silence` module is deprecated in favor of nn.Identity. "
@@ -436,8 +438,9 @@ class PoseModel(DetectionModel):
 class ClassificationModel(BaseModel):
     """YOLOv8 classification model."""
 
-    def __init__(self, cfg="yolov8n-cls.yaml", ch=3, nc=None, verbose=True):
+    def __init__(self, cfg="yolov8n-cls.yaml", ch=3, nc=None, verbose=True, isdetr=False):
         """Init ClassificationModel with YAML, channels, number of classes, verbose flag."""
+        # print("Exist Classfication MOdel?")
         super().__init__()
         self._from_yaml(cfg, ch, nc, verbose)
 
@@ -1047,6 +1050,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                         raise ValueError(f"Activation function '{act}' not found in jittor.nn")
             else:
                 Conv.default_act = act
+        isdetr = d['isdetr']
+        if isdetr != False:
+            Conv.convisdetr = isdetr
 
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")

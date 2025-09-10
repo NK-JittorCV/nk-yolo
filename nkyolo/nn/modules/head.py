@@ -179,7 +179,7 @@ class Segment(Detect):
         super().__init__(nc, ch)
         self.nm = nm  # number of masks
         self.npr = npr  # number of protos
-        self.proto = Proto(ch[0], self.npr, self.nm)  # protos
+        self.proto = Proto(ch[0], self.npr, self.nm, isdetr=isdetr)  # protos
 
         c4 = max(ch[0] // 4, self.nm)
         self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3, isdetr=isdetr), Conv(c4, c4, 3, isdetr=isdetr), nn.Conv2d(c4, self.nm, 1)) for x in ch)
