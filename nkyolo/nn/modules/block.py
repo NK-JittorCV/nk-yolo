@@ -219,7 +219,7 @@ class C2(nn.Module):
         self.cv1 = Conv(c1, 2 * self.c, 1, 1, isdetr=isdetr)
         self.cv2 = Conv(2 * self.c, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         # self.attention = ChannelAttention(2 * self.c)  # or SpatialAttention()
-        self.m = nn.Sequential(*(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n)))
+        self.m = nn.Sequential(*(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0, isdetr=isdetr) for _ in range(n)))
 
     def execute(self, x):
         """execute pass through the CSP bottleneck with 2 convolutions."""
@@ -238,7 +238,7 @@ class C2f(nn.Module):
         self.cv2 = Conv((2 + n) * self.c, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         blocks = []
         for _ in range(n):
-            blocks.append(Bottleneck(self.c, self.c, shortcut, g, k=(3, 3), e=1.0))
+            blocks.append(Bottleneck(self.c, self.c, shortcut, g, k=(3, 3), e=1.0, isdetr=isdetr))
         self.m = nn.ModuleList(blocks)
 
     def execute(self, x):
@@ -265,7 +265,7 @@ class C3(nn.Module):
         self.cv1 = Conv(c1, c_, 1, 1, isdetr=isdetr)
         self.cv2 = Conv(c1, c_, 1, 1, isdetr=isdetr)
         self.cv3 = Conv(2 * c_, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
-        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=((1, 1), (3, 3)), e=1.0) for _ in range(n)))
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, k=((1, 1), (3, 3)), e=1.0, isdetr=isdetr) for _ in range(n)))
 
     def execute(self, x):
         """execute pass through the CSP bottleneck with 2 convolutions."""
@@ -279,7 +279,7 @@ class C3x(C3):
         """Initialize C3TR instance and set default parameters."""
         super().__init__(c1, c2, n, shortcut, g, e, isdetr=isdetr)
         self.c_ = int(c2 * e)
-        self.m = nn.Sequential(*(Bottleneck(self.c_, self.c_, shortcut, g, k=((1, 3), (3, 1)), e=1) for _ in range(n)))
+        self.m = nn.Sequential(*(Bottleneck(self.c_, self.c_, shortcut, g, k=((1, 3), (3, 1)), e=1, isdetr=isdetr) for _ in range(n)))
 
 
 class RepC3(nn.Module):
@@ -316,7 +316,7 @@ class C3Ghost(C3):
         """Initialize 'SPP' module with various pooling sizes for spatial pyramid pooling."""
         super().__init__(c1, c2, n, shortcut, g, e, isdetr=isdetr)
         c_ = int(c2 * e)  # hidden channels
-        self.m = nn.Sequential(*(GhostBottleneck(c_, c_) for _ in range(n)))
+        self.m = nn.Sequential(*(GhostBottleneck(c_, c_, isdetr=isdetr) for _ in range(n)))
 
 
 class GhostBottleneck(nn.Module):
@@ -369,7 +369,7 @@ class BottleneckCSP(nn.Module):
         self.cv4 = Conv(2 * c_, c2, 1, 1, isdetr=isdetr)
         self.bn = MyBatchNorm2d(2 * c_, use_unbiased_update=isdetr)  # applied to cat(cv2, cv3)
         self.act = nn.SiLU()
-        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)))
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0, isdetr=isdetr) for _ in range(n)))
 
     def execute(self, x):
         """Applies a CSP bottleneck with 3 convolutions."""
@@ -462,7 +462,7 @@ class C2fAttn(nn.Module):
         self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1, isdetr=isdetr)
         self.cv2 = Conv((3 + n) * self.c, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
-        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
+        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0, isdetr=isdetr) for _ in range(n))
         self.attn = MaxSigmoidAttnBlock(self.c, self.c, gc=gc, ec=ec, nh=nh)
 
     def execute(self, x, guide):
@@ -730,7 +730,7 @@ class C3f(nn.Module):
         self.cv3 = Conv((2 + n) * c_, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         blocks = []
         for _ in range(n):
-            blocks.append(Bottleneck(c_, c_, shortcut, g, k=((3, 3), (3, 3)), e=1.0))
+            blocks.append(Bottleneck(c_, c_, shortcut, g, k=((3, 3), (3, 3)), e=1.0, isdetr=isdetr))
         self.m = nn.ModuleList(blocks)
 
     def execute(self, x):
