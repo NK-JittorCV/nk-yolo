@@ -1414,7 +1414,7 @@ class A2C2f(nn.Module):
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv((1 + n) * c_, c2, 1)
 
-        self.gamma = nn.Parameter(0.01 * ji.ones(c2), requires_grad=True) if a2 and residual else None
+        self.gamma = nn.Parameter(0.01 * jt.ones(c2), requires_grad=True) if a2 and residual else None
         self.m = nn.ModuleList([
             (nn.Sequential(*[ABlock(c_, c_ // 32, mlp_ratio, area) for _ in range(2)])
             if a2
