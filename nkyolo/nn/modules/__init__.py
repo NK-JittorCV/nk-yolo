@@ -57,7 +57,8 @@ from .block import (
     SCDown,
     TorchVision,
     MSBlock, 
-    GlobalToken
+    GlobalToken,
+    A2C2f
 )
 from .conv import (
     CBAM,
@@ -161,4 +162,5 @@ __all__ = (
     "PSA",
     "TorchVision",
     "Index",
+    "A2C2f",
 )
