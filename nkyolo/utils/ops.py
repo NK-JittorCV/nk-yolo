@@ -1012,6 +1012,17 @@ def simple_nms(boxes, scores, iou_threshold):
     Returns:
         jt.Var: 保留的框的索引
     """
+    # Input validation
+    if not (hasattr(boxes, "ndim") and hasattr(boxes, "shape")):
+        raise ValueError("boxes must be a Jittor Var or array-like with .ndim and .shape attributes")
+    if not (hasattr(scores, "ndim") and hasattr(scores, "shape")):
+        raise ValueError("scores must be a Jittor Var or array-like with .ndim and .shape attributes")
+    if boxes.ndim != 2 or boxes.shape[1] != 4:
+        raise ValueError(f"boxes must be a 2D tensor with shape [N, 4], but got shape {boxes.shape}")
+    if scores.ndim != 1:
+        raise ValueError(f"scores must be a 1D tensor with shape [N], but got shape {scores.shape}")
+    if boxes.shape[0] != scores.shape[0]:
+        raise ValueError(f"boxes and scores must have the same number of elements in the first dimension, but got {boxes.shape[0]} and {scores.shape[0]}")
     if boxes.shape[0] == 0:
         return jt.array([], dtype=jt.int64)
     
