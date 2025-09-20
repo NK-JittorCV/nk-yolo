@@ -5,6 +5,7 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
 import jittor as jt
 from jittor import nn
 
@@ -842,8 +843,7 @@ def jittor_safe_load(weight, safe_only=False):
         file (str): The loaded filename
     """
     from nkyolo.utils.downloads import attempt_download_asset
-
-    check_suffix(file=weight, suffix=".pkl")
+    check_suffix(file=weight, suffix=(".pt", ".pkl"))
     file = attempt_download_asset(weight)  # search online if missing locally
     try:
         with temporary_modules(
@@ -950,7 +950,23 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
                 model.load_state_dict(model_state_dict)
         else:
             # 原有的加载逻辑（向后兼容）
-            model = (ckpt.get("ema") or ckpt["model"]).float()  # FP32 model
+            model_data = ckpt.get("ema") or ckpt["model"]
+            if isinstance(model_data, dict):
+                # 如果是权重字典（例如 .pkl 文件），需要重新构建模型
+                from nkyolo.nn.tasks import DetectionModel
+                
+                # 对于 .pkl 文件，使用默认的 YOLOv11 配置
+                if w.endswith('.pkl'):
+                    model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+                else:
+                    # 对于其他格式，使用通用配置或抛出错误
+                    raise ValueError(f"Cannot handle weight dictionary format for file: {w}")
+                
+                # 直接加载权重字典（假设是 Jittor 格式）
+                model.load_state_dict(model_data)
+            else:
+                # 如果是模型对象
+                model = model_data.float()  # FP32 model
 
         # Model compatibility updates
         model.args = args  # attach args to model
@@ -983,29 +999,88 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
 
 
 def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
-    """
-    加载单个模型权重（Jittor版本）
 
-    Args:
-        weight (str): 模型权重路径.
-        device (jt.device, optional): 加载模型的设备.
-        inplace (bool): 是否执行原地操作.
-        fuse (bool): 是否融合模型.
+    """Loads a single model weights."""
+    ckpt, weight = jittor_safe_load(weight)  # load ckpt
+    args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
+    
+    # 检查是否有保存的模型配置信息
+    if "model_yaml" in ckpt and ckpt["model_yaml"] is not None:
+        # 使用保存的yaml配置重建模型
+        from nkyolo.nn.tasks import DetectionModel, SegmentationModel, PoseModel, OBBModel, ClassificationModel
+        
+        # 根据任务类型创建相应的模型
+        task = args.get("task", "detect")
+        yaml_config = ckpt["model_yaml"]
+        
+        if task == "detect":
+            model = DetectionModel(cfg=yaml_config, verbose=False)
+        elif task == "segment":
+            model = SegmentationModel(cfg=yaml_config, verbose=False)
+        elif task == "pose":
+            model = PoseModel(cfg=yaml_config, verbose=False)
+        elif task == "obb":
+            model = OBBModel(cfg=yaml_config, verbose=False)
+        elif task == "classify":
+            model = ClassificationModel(cfg=yaml_config, verbose=False)
+        else:
+            # 默认使用DetectionModel
+            model = DetectionModel(cfg=yaml_config, verbose=False)
+        
+        # 加载权重
+        if ckpt.get("ema"):
+            model.load_state_dict(ckpt["ema"])
+        elif ckpt.get("model"):
+            model.load_state_dict(ckpt["model"])
+        
+        model = model.to(device).float()  # FP32 model
+    else:
+        # 原有的加载逻辑（向后兼容）
+        model_data = ckpt.get("ema") or ckpt["model"]
+        if isinstance(model_data, dict):
+            # 如果是权重字典，需要重新构建模型
+            from nkyolo.nn.tasks import DetectionModel
+            model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+            
+            # 转换权重字典中的 PyTorch tensor 到 Jittor，确保使用 float32
+            jittor_state_dict = {}
+            for k, v in model_data.items():
+                if hasattr(v, 'detach'):  # PyTorch tensor
+                    numpy_val = v.detach().cpu().numpy()
+                    # 确保所有浮点权重都是 float32
+                    if numpy_val.dtype in [np.float16, np.float64]:
+                        numpy_val = numpy_val.astype(np.float32)
+                    jittor_state_dict[k] = jt.array(numpy_val)
+                else:
+                    jittor_state_dict[k] = v
+            
+            model.load_state_dict(jittor_state_dict)
+        else:
+            # 如果是模型对象，需要转换 PyTorch 模型到 Jittor
+            # 直接转换权重，因为是 PyTorch 模型
+            from nkyolo.nn.tasks import DetectionModel
+            model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+            
+            # 转换 PyTorch 权重到 Jittor，确保使用 float32
+            pytorch_state_dict = model_data.state_dict()
+            jittor_state_dict = {}
+            for k, v in pytorch_state_dict.items():
+                if hasattr(v, 'detach'):  # PyTorch tensor
+                    numpy_val = v.detach().cpu().numpy()
+                    # 确保所有浮点权重都是 float32
+                    if numpy_val.dtype in [np.float16, np.float64]:
+                        numpy_val = numpy_val.astype(np.float32)
+                    jittor_state_dict[k] = jt.array(numpy_val)
+                else:
+                    jittor_state_dict[k] = v
+            
+            model.load_state_dict(jittor_state_dict)
 
-    Returns:
-        model (jt.nn.Module): 加载的模型.
-        ckpt (dict): 模型检查点字典.
-    """
-    ckpt, weight = jittor_safe_load(weight)  # 加载检查点
-    # 合并模型参数和默认参数，优先使用模型参数
-    args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}
-    # 获取FP32模型
-    model = (ckpt.get("ema") or ckpt["model"]).float()
+    # Model compatibility updates
+    model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
+    model.pt_path = weight  # attach *.pt file path to model
+    model.task = guess_model_task(model)
 
-    # 模型兼容性更新
-    model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # 将参数附加到模型
-    model.pt_path = weight  # 将*.pt文件路径附加到模型
-    model.task = getattr(model, "task", guess_model_task(model))
     if not hasattr(model, "stride"):
         model.stride = jt.array([32.0])
 
