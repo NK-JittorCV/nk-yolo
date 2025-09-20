@@ -395,7 +395,6 @@ def non_max_suppression(
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-
             # 1. 首先将scores合并到boxes中
             boxes_with_scores = jt.cat([boxes, scores.unsqueeze(1)], dim=1) 
             # 2. 调用Jittor的nms函数，传入boxes和iou阈值
