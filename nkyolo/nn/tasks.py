@@ -301,7 +301,7 @@ class BaseModel(nn.Module):
             if ch == h and cw == w:
                 c1, c2 = min(c1, cc1), min(c2, cc2)
                 model_sd[first_conv][:c1, :c2] = csd[first_conv][:c1, :c2]
-                len_updated_csd += 1
+                len_updated += 1
 
         if verbose:
             LOGGER.info(
