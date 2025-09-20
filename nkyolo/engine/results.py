@@ -181,7 +181,11 @@ class BaseTensor(SimpleClass):
             >>> print(result.data)
             tensor([1, 2, 3])
         """
-        return self.__class__(self.data[idx], self.orig_shape)
+        if 0 <= idx < self.data.shape[0]:
+            return self.__class__(self.data[idx], self.orig_shape)
+        else:
+            # 处理索引越界的情况，如返回空值或抛出更明确的错误
+            raise IndexError(f"Index {idx} out of bounds for tensor of size {self.data.shape[0]}")
 
 
 class Results(SimpleClass):
@@ -659,7 +663,7 @@ class Results(SimpleClass):
             log_string += f"{', '.join(f'{self.names[j]} {probs.data[j]:.2f}' for j in probs.top5)}, "
         if boxes:
             for c in boxes.cls.unique():
-                n = (boxes.cls == c).sum()  # detections per class
+                n = (boxes.cls == c).sum().item()  # detections per class
                 log_string += f"{n} {self.names[int(c)]}{'s' * (n > 1)}, "
         return log_string
 
