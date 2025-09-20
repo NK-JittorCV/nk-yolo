@@ -264,7 +264,7 @@ def non_max_suppression(
     labels=(),
     max_det=300,
     nc=0,  # number of classes (optional)
-    max_time_img=5,
+    max_time_img=0.05,
     max_nms=30000,
     max_wh=7680,
     in_place=True,
