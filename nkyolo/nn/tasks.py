@@ -64,6 +64,7 @@ from nkyolo.nn.modules import (
     v10Detect,
     MSBlock,
     GlobalToken,
+    A2C2f
 )
 from nkyolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from nkyolo.utils.checks import check_requirements, check_suffix, check_yaml
@@ -268,18 +269,45 @@ class BaseModel(nn.Module):
 
     def load(self, weights, verbose=True):
         """
-        Load the weights into the model.
+        Load weights into the model (Jittor version).
 
         Args:
-            weights (dict | torch.nn.Module): The pre-trained weights to be loaded.
-            verbose (bool, optional): Whether to log the transfer progress. Defaults to True.
+            weights (dict | nn.Module): Checkpoint dict or Jittor model.
+            verbose (bool): Whether to log transfer progress.
         """
-        model = weights["model"] if isinstance(weights, dict) else weights  # torchvision models are not dicts
-        csd = model.float().state_dict()  # checkpoint state_dict as FP32
-        csd = intersect_dicts(csd, self.state_dict())  # intersect
-        self.load_state_dict(csd, strict=False)  # load
+        
+        # 1. 取出权重 state_dict
+        if isinstance(weights, dict):
+            csd = weights["model"].float().state_dict()
+        else:
+            csd = weights.float().state_dict()
+
+        # 2. 过滤掉 shape 不匹配的键
+        model_sd = self.state_dict()
+        updated_csd = {
+            k: v for k, v in csd.items()
+            if k in model_sd and tuple(model_sd[k].shape) == tuple(v.shape)
+        }
+
+        # 3. 加载
+        self.load_state_dict(updated_csd)
+        len_updated = len(updated_csd)
+
+        # 4. 处理首层卷积通道数不同的情况
+        first_conv = "model.0.conv.weight"
+        if first_conv not in updated_csd and first_conv in model_sd:
+            c1, c2, h, w = model_sd[first_conv].shape
+            cc1, cc2, ch, cw = csd[first_conv].shape
+            if ch == h and cw == w:
+                c1, c2 = min(c1, cc1), min(c2, cc2)
+                model_sd[first_conv][:c1, :c2] = csd[first_conv][:c1, :c2]
+                len_updated += 1
+
         if verbose:
-            LOGGER.info(f"Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights")
+            LOGGER.info(
+                f"Transferred {len_updated}/{len(self.model.state_dict())} "
+                f"items from pretrained weights"
+            )
 
     def loss(self, batch, preds=None):
         """
@@ -815,7 +843,6 @@ def jittor_safe_load(weight, safe_only=False):
         file (str): The loaded filename
     """
     from nkyolo.utils.downloads import attempt_download_asset
-
     check_suffix(file=weight, suffix=(".pt", ".pkl"))
     file = attempt_download_asset(weight)  # search online if missing locally
     try:
@@ -860,6 +887,15 @@ def jittor_safe_load(weight, safe_only=False):
         )
         check_requirements(e.name)  # install missing module
         ckpt = jt.load(file)
+    # print('before:',ckpt)
+    def _to_numpy(obj):      # 转化torch数据类型
+        if isinstance(obj, dict):
+            return {k: _to_numpy(v) for k, v in obj.items()}
+        elif hasattr(obj, 'detach'):        # torch.Tensor
+            return obj.detach().cpu().numpy()
+        else:
+            return obj
+    ckpt = _to_numpy(ckpt)
 
     if not isinstance(ckpt, dict):
         # File is likely a YOLO instance saved with i.e. jt.save(model, "saved_model.pt")
@@ -963,6 +999,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
 
 
 def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
+
     """Loads a single model weights."""
     ckpt, weight = jittor_safe_load(weight)  # load ckpt
     args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
@@ -1043,19 +1080,26 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
     model.pt_path = weight  # attach *.pt file path to model
     model.task = guess_model_task(model)
+
     if not hasattr(model, "stride"):
-        model.stride = jt.Var([32.0])
+        model.stride = jt.array([32.0])
 
-    model = model.fuse().eval() if fuse and hasattr(model, "fuse") else model.eval()  # model in eval mode
+    # 模型转换为评估模式并移动到指定设备
+    if fuse and hasattr(model, "fuse"):
+        model = model.fuse()
+    model.eval()
+    if device is not None:
+        model.to(device)
 
-    # Module updates
+    # 模块更新
     for m in model.modules():
         if hasattr(m, "inplace"):
             m.inplace = inplace
+        # Jittor的Upsample可能有不同的参数名，这里根据实际情况调整
         elif isinstance(m, nn.Upsample) and not hasattr(m, "recompute_scale_factor"):
-            m.recompute_scale_factor = None  # torch 1.11.0 compatibility
+            m.recompute_scale_factor = None  # 兼容性处理
 
-    # Return model and ckpt
+    # 返回模型和检查点
     return model, ckpt
 
 
@@ -1144,6 +1188,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             SCDown,
             C2fCIB,
             MSBlock,
+            A2C2f
         }:
             if m in {MSBlock} and isinstance(f, list):
                 c1, c2 = ch[f[-1]], args[0]
@@ -1173,6 +1218,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2fPSA,
                 C2fCIB,
                 C2PSA,
+                A2C2f
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -1180,6 +1226,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
+            if m is A2C2f:
+                legacy = False
+                if scale in "lx":  # for L/X sizes
+                    args.extend((True, 1.2))
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in {HGStem, HGBlock}:
@@ -1210,7 +1260,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = ch[f[-1]]
         else:
             c2 = ch[f]
-
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m_.np = sum(x.numel() for x in m_.parameters())  # number params

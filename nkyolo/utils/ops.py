@@ -365,20 +365,16 @@ def non_max_suppression(
         if multi_label:
             i, j = jt.where(cls > conf_thres)
             x = jt.concat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
-        else:  # best class only
-            # 修复 Jittor max() 返回值兼容性
-            if hasattr(cls, 'argmax'):
-                # Jittor 方式：分别获取最大值和索引
-                conf = cls.max(1, keepdim=True)
-                j_result = cls.argmax(1)
-                if isinstance(j_result, tuple):
-                    j = j_result[0].unsqueeze(1)  # Jittor argmax 返回 tuple
-                else:
-                    j = j_result.unsqueeze(1)
+        else:  # 仅保留最佳类别
+            conf = cls.max(1, keepdim=True)
+            argmax_result = jt.argmax(cls, dim=1)
+            if isinstance(argmax_result, tuple):
+                j = argmax_result[0]
             else:
-                # PyTorch 方式
-                conf, j = cls.max(1, keepdim=True)
-            x = jt.concat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]
+                j = argmax_result
+            j = j.unsqueeze(1) 
+            filt = conf.view(-1) > conf_thres
+            x = jt.cat((box, conf, j.float(), mask), 1)[filt]
 
         # Filter by class
         if classes is not None:
@@ -399,12 +395,11 @@ def non_max_suppression(
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-            # 使用 NK-YOLO 的 NMS 实现
-            if hasattr(jt.ops, 'nms'):
-                i = jt.ops.nms(boxes, scores, iou_thres)  # NMS
-            else:
-                # 简单的 NMS 实现作为备选
-                i = simple_nms(boxes, scores, iou_thres)
+            # 1. 首先将scores合并到boxes中
+            boxes_with_scores = jt.cat([boxes, scores.unsqueeze(1)], dim=1) 
+            # 2. 调用Jittor的nms函数，传入boxes和iou阈值
+            i = jt.nms(boxes_with_scores, iou_thres)  # NMS
+
         i = i[:max_det]  # limit detections
 
         # # Experimental
@@ -516,7 +511,10 @@ def xyxy2xywh(x):
         y (np.ndarray | jt.Var): The bounding box coordinates in (x, y, width, height) format.
     """
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
-    y = jt.empty_like(x) if isinstance(x, jt.Var) else np.empty_like(x)  # faster than clone/copy
+    if isinstance(x, jt.Var):
+        y = jt.zeros(x.shape, dtype=x.dtype)  # 显式指定设备和类型
+    else:
+        y = np.zeros_like(x)
     y[..., 0] = (x[..., 0] + x[..., 2]) / 2  # x center
     y[..., 1] = (x[..., 1] + x[..., 3]) / 2  # y center
     y[..., 2] = x[..., 2] - x[..., 0]  # width
