@@ -15,7 +15,7 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    print("警告: PyTorch未安装，无法进行对比测试")
+    print("Warning: PyTorch is not installed, cannot perform comparison tests")
 
 from nkyolo.utils.ops import simple_nms, compute_iou_optimized
 
