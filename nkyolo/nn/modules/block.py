@@ -1579,7 +1579,7 @@ class AAttn(nn.Module):
         )
         attn = nn.bmm(q.transpose(-2, -1), k) * (self.head_dim**-0.5)
         attn = attn.softmax(dim=-1)
-        x = nn.bmm(v, attn.transpose(-2, -1))
+        x = jt.bmm(v, attn.transpose(-2, -1))
         x = x.permute(0, 3, 1, 2)
         v = v.permute(0, 3, 1, 2)
 
