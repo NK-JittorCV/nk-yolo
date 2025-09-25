@@ -110,6 +110,7 @@ class AutoBackend(nn.Module):
         nn_module = isinstance(weights, jt.nn.Module)
         (
             pt,
+            pkl,
             jit,
             onnx,
             xml,
@@ -124,7 +125,7 @@ class AutoBackend(nn.Module):
             ncnn,
             triton,
         ) = self._model_type(w)
-        fp16 &= pt or jit or onnx or xml or engine or nn_module or triton  # FP16
+        fp16 &= pt or pkl or jit or onnx or xml or engine or nn_module or triton  # FP16
         nhwc = coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs jt BCWH)
         stride = 32  # default stride
         model, metadata, task = None, None, None
@@ -136,7 +137,7 @@ class AutoBackend(nn.Module):
         #     cuda = False
 
         # Download if not local
-        if not (pt or triton or nn_module):
+        if not (pt or pkl or triton or nn_module):
             w = attempt_download_asset(w)
 
         # In-memory Pyjt model
@@ -146,7 +147,16 @@ class AutoBackend(nn.Module):
                 model = model.fuse(verbose=verbose)
             if hasattr(model, "kpt_shape"):
                 kpt_shape = model.kpt_shape  # pose-only
-            stride = max(int(model.stride.max()), 32)  # model stride
+            # 修复 Jittor 兼容性问题
+            try:
+                stride = max(int(model.stride.max().item()), 32)  # model stride
+            except:
+                # 如果 item() 方法不可用，使用数组索引
+                stride_val = model.stride.max()
+                if hasattr(stride_val, 'data'):
+                    stride = max(int(stride_val.data[0]), 32)
+                else:
+                    stride = 32  # 默认值
             names = model.module.names if hasattr(model, "module") else model.names  # get class names
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
             pt = True
@@ -160,9 +170,49 @@ class AutoBackend(nn.Module):
             )
             if hasattr(model, "kpt_shape"):
                 kpt_shape = model.kpt_shape  # pose-only
-            stride = max(int(model.stride.max()), 32)  # model stride
+            # 修复 Jittor 兼容性问题
+            try:
+                stride = max(int(model.stride.max().item()), 32)  # model stride
+            except:
+                # 如果 item() 方法不可用，使用数组索引
+                stride_val = model.stride.max()
+                if hasattr(stride_val, 'data'):
+                    stride = max(int(stride_val.data[0]), 32)
+                else:
+                    stride = 32  # 默认值
             names = model.module.names if hasattr(model, "module") else model.names  # get class names
-            model.half() if fp16 else model.float()
+            # 修复 Jittor 模型类型转换
+            if hasattr(model, 'float'):
+                model.half() if fp16 else model.float()
+            elif hasattr(model, 'float32'):
+                model.half() if fp16 else model.float32()
+            self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
+
+        # JittorPickle (.pkl)
+        elif pkl:
+            from nkyolo.nn.tasks import attempt_load_weights
+
+            model = attempt_load_weights(
+                weights if isinstance(weights, list) else w, device=device, inplace=True, fuse=fuse
+            )
+            if hasattr(model, "kpt_shape"):
+                kpt_shape = model.kpt_shape  # pose-only
+            # 修复 Jittor 兼容性问题
+            try:
+                stride = max(int(model.stride.max().item()), 32)  # model stride
+            except:
+                # 如果 item() 方法不可用，使用数组索引
+                stride_val = model.stride.max()
+                if hasattr(stride_val, 'data'):
+                    stride = max(int(stride_val.data[0]), 32)
+                else:
+                    stride = 32  # 默认值
+            names = model.module.names if hasattr(model, "module") else model.names  # get class names
+            # 修复 Jittor 模型类型转换
+            if hasattr(model, 'float'):
+                model.half() if fp16 else model.float()
+            elif hasattr(model, 'float32'):
+                model.half() if fp16 else model.float32()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
 
         # jtScript
@@ -170,7 +220,11 @@ class AutoBackend(nn.Module):
             LOGGER.info(f"Loading {w} for jtScript inference...")
             extra_files = {"config.txt": ""}  # model metadata
             model = jt.jit.load(w, _extra_files=extra_files, map_location=device)
-            model.half() if fp16 else model.float()
+            # 修复 Jittor 模型类型转换
+            if hasattr(model, 'float'):
+                model.half() if fp16 else model.float()
+            elif hasattr(model, 'float32'):
+                model.half() if fp16 else model.float32()
             if extra_files["config.txt"]:  # load metadata dict
                 metadata = json.loads(extra_files["config.txt"], object_hook=lambda x: dict(x.items()))
 
@@ -310,7 +364,7 @@ class AutoBackend(nn.Module):
             LOGGER.info(f"Loading {w} for TensorFlow GraphDef inference...")
             import tensorflow as tf
 
-            from jittoryolo.engine.exporter import gd_outputs
+            from nkyolo.engine.exporter import gd_outputs
 
             def wrap_frozen_graph(gd, inputs, outputs):
                 """Wrap frozen graphs for deployment."""
@@ -398,13 +452,13 @@ class AutoBackend(nn.Module):
         # NVIDIA Triton Inference Server
         elif triton:
             check_requirements("tritonclient[all]")
-            from jittoryolo.utils.triton import TritonRemoteModel
+            from nkyolo.utils.triton import TritonRemoteModel
 
             model = TritonRemoteModel(w)
 
         # Any other format (unsupported)
         else:
-            from jittoryolo.engine.exporter import export_formats
+            from nkyolo.engine.exporter import export_formats
 
             raise TypeError(
                 f"model='{w}' is not a supported model format. Ultralytics supports: {export_formats()['Format']}\n"
@@ -435,7 +489,7 @@ class AutoBackend(nn.Module):
         names = check_class_names(names)
 
         # Disable gradients
-        if pt:
+        if pt or pkl:
             for p in model.parameters():
                 p.requires_grad = False
 
@@ -460,8 +514,8 @@ class AutoBackend(nn.Module):
         if self.nhwc:
             im = im.permute(0, 2, 3, 1)  # jt BCHW to numpy BHWC shape(1,320,192,3)
 
-        # Pyjt
-        if self.pt or self.nn_module:
+        # Pyjt or JittorPickle
+        if self.pt or self.pkl or self.nn_module:
             y = self.model(im, augment=augment, visualize=visualize, embed=embed)
 
         # jtScript
@@ -682,6 +736,7 @@ def export_formats():
     """jittoryolo YOLO export formats."""
     x = [
         ["Pyjt", "-", ".pt", True, True],
+        ["JittorPickle", "pkl", ".pkl", True, True],
         ["jtScript", "jtscript", ".jtscript", True, True],
         ["ONNX", "onnx", ".onnx", True, True],
         ["OpenVINO", "openvino", "_openvino_model", True, False],

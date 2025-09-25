@@ -140,6 +140,99 @@ def make_divisible(x, divisor):
     return math.ceil(x / divisor) * divisor
 
 
+def compute_iou(box1, box2):
+    """
+    简单的 IoU 计算实现
+    
+    Args:
+        box1 (jt.Var): 边界框1，shape (1, 4)，格式 xyxy
+        box2 (jt.Var): 边界框2，shape (N, 4)，格式 xyxy
+    
+    Returns:
+        jt.Var: IoU 值，shape (1, N)
+    """
+    # 逐个计算IoU，避免广播问题
+    ious = []
+    
+    # 确保正确的形状和数据访问
+    if box1.ndim == 2:
+        box1_flat = box1.view(-1)  # flatten to 1D
+    else:
+        box1_flat = box1
+    
+    for i in range(box2.shape[0]):
+        box2_i = box2[i]  # shape (4,)
+        
+        # 安全的数据访问方式
+        try:
+            # 尝试使用 numpy 转换
+            box1_np = box1_flat.numpy()
+            box2_np = box2_i.numpy()
+            
+            x1 = max(float(box1_np[0]), float(box2_np[0]))
+            y1 = max(float(box1_np[1]), float(box2_np[1]))
+            x2 = min(float(box1_np[2]), float(box2_np[2]))
+            y2 = min(float(box1_np[3]), float(box2_np[3]))
+            
+            intersection = max(0, x2 - x1) * max(0, y2 - y1)
+            
+            # 计算面积
+            area1 = (float(box1_np[2]) - float(box1_np[0])) * (float(box1_np[3]) - float(box1_np[1]))
+            area2 = (float(box2_np[2]) - float(box2_np[0])) * (float(box2_np[3]) - float(box2_np[1]))
+            
+            # 计算IoU
+            union = area1 + area2 - intersection
+            iou = intersection / (union + 1e-6) if union > 0 else 0
+            ious.append(iou)
+            
+        except:
+            # 如果转换失败，使用默认值
+            ious.append(0.0)
+    
+    return jt.array(ious).unsqueeze(0)  # shape (1, N)
+
+
+def simple_nms(boxes, scores, iou_threshold):
+    """
+    简单的 NMS 实现，用于 Jittor 兼容性
+    
+    Args:
+        boxes (jt.Var): 边界框，shape (N, 4)，格式 xyxy
+        scores (jt.Var): 置信度分数，shape (N,)
+        iou_threshold (float): IoU 阈值
+    
+    Returns:
+        jt.Var: 保留的框的索引
+    """
+    if boxes.numel() == 0:
+        return jt.empty((0,), dtype=jt.int64)
+    
+    # 按分数降序排序
+    _, indices = scores.sort(descending=True)
+    
+    keep = []
+    while len(indices) > 0:
+        # 保留当前最高分数的框
+        current = indices[0]
+        keep.append(current.item())
+        
+        if len(indices) == 1:
+            break
+            
+        # 计算当前框与其余框的 IoU
+        current_box = boxes[current].unsqueeze(0)
+        other_boxes = boxes[indices[1:]]
+        
+        # 计算 IoU - 使用自定义实现
+        ious = compute_iou(current_box, other_boxes).squeeze(0)
+        
+        # 保留 IoU 小于阈值的框
+        mask = ious <= iou_threshold
+        indices = indices[1:][mask]
+    
+    return jt.array(keep, dtype=jt.int64)
+
+
 def nms_rotated(boxes, scores, threshold=0.45):
     """
     NMS for oriented bounding boxes using probiou and fast-nms.
@@ -246,7 +339,13 @@ def non_max_suppression(
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
-        x = x[xc[xi]]  # confidence
+        # 修复 Jittor 布尔索引兼容性
+        mask = xc[xi]
+        if hasattr(mask, 'where'):
+            indices = mask.where()[0]  # Jittor 方式
+            x = x[indices]
+        else:
+            x = x[mask]  # 原始方式
 
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]) and not rotated:
@@ -266,9 +365,16 @@ def non_max_suppression(
         if multi_label:
             i, j = jt.where(cls > conf_thres)
             x = jt.concat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
-        else:  # best class only
-            conf, j = cls.max(1, keepdim=True)
-            x = jt.concat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]
+        else:  # 仅保留最佳类别
+            conf = cls.max(1, keepdim=True)
+            argmax_result = jt.argmax(cls, dim=1)
+            if isinstance(argmax_result, tuple):
+                j = argmax_result[0]
+            else:
+                j = argmax_result
+            j = j.unsqueeze(1) 
+            filt = conf.view(-1) > conf_thres
+            x = jt.cat((box, conf, j.float(), mask), 1)[filt]
 
         # Filter by class
         if classes is not None:
@@ -289,7 +395,11 @@ def non_max_suppression(
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-            i = jt.ops.nms(boxes, scores, iou_thres)  # NMS
+            # 1. 首先将scores合并到boxes中
+            boxes_with_scores = jt.cat([boxes, scores.unsqueeze(1)], dim=1) 
+            # 2. 调用Jittor的nms函数，传入boxes和iou阈值
+            i = jt.nms(boxes_with_scores, iou_thres)  # NMS
+
         i = i[:max_det]  # limit detections
 
         # # Experimental
@@ -401,7 +511,10 @@ def xyxy2xywh(x):
         y (np.ndarray | jt.Var): The bounding box coordinates in (x, y, width, height) format.
     """
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
-    y = jt.empty_like(x) if isinstance(x, jt.Var) else np.empty_like(x)  # faster than clone/copy
+    if isinstance(x, jt.Var):
+        y = jt.zeros(x.shape, dtype=x.dtype)  # 显式指定设备和类型
+    else:
+        y = np.zeros_like(x)
     y[..., 0] = (x[..., 0] + x[..., 2]) / 2  # x center
     y[..., 1] = (x[..., 1] + x[..., 3]) / 2  # y center
     y[..., 2] = x[..., 2] - x[..., 0]  # width
@@ -832,3 +945,143 @@ def clean_str(s):
         (str): a string with special characters replaced by an underscore _
     """
     return re.sub(pattern="[|@#!¡·$€%&()=?¿^*;:,¨´><+]", repl="_", string=s)
+
+
+def compute_iou_optimized(box1, box2):
+    """
+    计算两个单独边界框的IoU，专门优化处理Jittor Var对象。
+    
+    Args:
+        box1 (jt.Var): 边界框1，格式为[x1, y1, x2, y2]
+        box2 (jt.Var): 边界框2，格式为[x1, y1, x2, y2]
+    
+    Returns:
+        float: IoU值
+    """
+    # 转换为numpy以避免Jittor broadcasting问题
+    if hasattr(box1, 'numpy'):
+        box1_np = box1.numpy()
+    else:
+        box1_np = np.array(box1)
+    
+    if hasattr(box2, 'numpy'):
+        box2_np = box2.numpy()
+    else:
+        box2_np = np.array(box2)
+    
+    # 确保是1D数组
+    box1_np = box1_np.flatten()
+    box2_np = box2_np.flatten()
+    
+    # 计算交集区域
+    x1 = max(box1_np[0], box2_np[0])
+    y1 = max(box1_np[1], box2_np[1])
+    x2 = min(box1_np[2], box2_np[2])
+    y2 = min(box1_np[3], box2_np[3])
+    
+    # 检查是否有交集
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    
+    # 计算交集面积
+    intersection = (x2 - x1) * (y2 - y1)
+    
+    # 计算各自面积
+    area1 = (box1_np[2] - box1_np[0]) * (box1_np[3] - box1_np[1])
+    area2 = (box2_np[2] - box2_np[0]) * (box2_np[3] - box2_np[1])
+    
+    # 计算并集面积
+    union = area1 + area2 - intersection
+    
+    # 避免除零
+    if union <= 0:
+        return 0.0
+    
+    return intersection / union
+
+
+def simple_nms(boxes, scores, iou_threshold):
+    """
+    简单的NMS实现，作为jt.ops.nms的fallback。
+    
+    Args:
+        boxes (jt.Var): 边界框，形状为[N, 4]，格式为[x1, y1, x2, y2]
+        scores (jt.Var): 置信度分数，形状为[N]
+        iou_threshold (float): IoU阈值
+    
+    Returns:
+        jt.Var: 保留的框的索引
+    """
+    # Input validation
+    if not (hasattr(boxes, "ndim") and hasattr(boxes, "shape")):
+        raise ValueError("boxes must be a Jittor Var or array-like with .ndim and .shape attributes")
+    if not (hasattr(scores, "ndim") and hasattr(scores, "shape")):
+        raise ValueError("scores must be a Jittor Var or array-like with .ndim and .shape attributes")
+    if boxes.ndim != 2 or boxes.shape[1] != 4:
+        raise ValueError(f"boxes must be a 2D tensor with shape [N, 4], but got shape {boxes.shape}")
+    if scores.ndim != 1:
+        raise ValueError(f"scores must be a 1D tensor with shape [N], but got shape {scores.shape}")
+    if boxes.shape[0] != scores.shape[0]:
+        raise ValueError(f"boxes and scores must have the same number of elements in the first dimension, but got {boxes.shape[0]} and {scores.shape[0]}")
+    if boxes.shape[0] == 0:
+        return jt.array([], dtype=jt.int64)
+    
+    # 按分数降序排序
+    if hasattr(scores, 'argsort'):
+        argsort_result = scores.argsort(descending=True)
+        # Jittor的argsort返回(indices, sorted_values)元组
+        if isinstance(argsort_result, tuple):
+            sorted_indices = argsort_result[0]  # 只取索引
+        else:
+            sorted_indices = argsort_result
+    else:
+        # fallback for older jittor versions
+        argsort_result = jt.argsort(scores, descending=True)
+        if isinstance(argsort_result, tuple):
+            sorted_indices = argsort_result[0]
+        else:
+            sorted_indices = argsort_result
+    
+    keep = []
+    
+    while sorted_indices.shape[0] > 0:
+        # 选择分数最高的框
+        current = sorted_indices[0]
+        # 安全地获取索引值
+        if hasattr(current, 'numpy'):
+            current_np = current.numpy()
+            if current_np.size == 1:
+                current_idx = int(current_np.item())
+            else:
+                current_idx = int(current_np[0])
+        else:
+            current_idx = int(current)
+        keep.append(current_idx)
+        
+        if sorted_indices.shape[0] == 1:
+            break
+        
+        # 计算当前框与剩余框的IoU
+        current_box = boxes[current_idx]
+        remaining_indices = sorted_indices[1:]
+        remaining_boxes = boxes[remaining_indices]
+        
+        # 计算IoU
+        ious = []
+        for i in range(remaining_boxes.shape[0]):
+            iou = compute_iou_optimized(current_box, remaining_boxes[i])
+            ious.append(iou)
+        
+        # 过滤掉IoU大于阈值的框
+        ious = np.array(ious)
+        mask = ious <= iou_threshold
+        
+        # 更新剩余索引
+        if np.any(mask):
+            remaining_indices_np = remaining_indices.numpy() if hasattr(remaining_indices, 'numpy') else remaining_indices
+            kept_indices = remaining_indices_np[mask]
+            sorted_indices = jt.array(kept_indices)
+        else:
+            break
+    
+    return jt.array(keep, dtype=jt.int64)
