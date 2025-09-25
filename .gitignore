@@ -179,3 +179,5 @@ calibration_*.npy
 datasets/
 
 ultralytics-pytorch/
+
+tmp
