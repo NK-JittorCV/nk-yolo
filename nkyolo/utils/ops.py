@@ -258,15 +258,15 @@ def nms_rotated(boxes, scores, threshold=0.45):
 
 def jtnms(boxes: jt.Var, scores: jt.Var, iou_threshold: float) -> jt.Var:
     """
-    Jittor 实现的非极大值抑制 (NMS)，用于去除重叠度高的检测框
-    
+    Non-Maximum Suppression (NMS) implementation in Jittor, used to remove highly overlapping detection boxes.
+
     Args:
-        boxes (jt.Var): [N, 4], 边界框坐标，格式为 (x1, y1, x2, y2)
-        scores (jt.Var): [N] 或 [N, 1]，每个边界框的置信度分数
-        iou_threshold (float): IOU 阈值，超过此阈值的框将被抑制
-        
+        boxes (jt.Var): [N, 4], bounding box coordinates in the format (x1, y1, x2, y2).
+        scores (jt.Var): [N] or [N, 1], confidence scores for each bounding box.
+        iou_threshold (float): IOU threshold; boxes with IOU above this value will be suppressed.
+
     Returns:
-        jt.Var: 保留的框索引 [M,], dtype=int32
+        jt.Var: Indices of the kept boxes [M,], dtype=int32.
     """
     # 处理空输入
     if boxes.numel() == 0:
