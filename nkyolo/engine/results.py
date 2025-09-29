@@ -181,14 +181,6 @@ class BaseTensor(SimpleClass):
             >>> print(result.data)
             tensor([1, 2, 3])
         """
-        # print("now, idx = ", idx)
-        data_len = self.data.shape[0] if hasattr(self.data, 'shape') else len(self.data)
-    
-        # 索引越界时抛出IndexError，让enumerate知道何时停止
-        if isinstance(idx, int):
-            if idx < 0 or idx >= data_len:
-                raise IndexError(f"索引 {idx} 超出范围，数据长度为 {data_len}")
-    
         return self.__class__(self.data[idx], self.orig_shape)
 
 
@@ -804,12 +796,7 @@ class Results(SimpleClass):
         is_obb = self.obb is not None
         data = self.obb if is_obb else self.boxes
         h, w = self.orig_shape if normalize else (1, 1)
-        if len(data) == 0:
-            print("No detections.")
-            return results
-        print("data len = ------------------- ", len(data))
         for i, row in enumerate(data):  # xyxy, track_id if tracking, conf, class_id
-            print("now in for, i = ", i)
             class_id, conf = int(row.cls), round(row.conf.item(), decimals)
             box = (row.xyxyxyxy if is_obb else row.xyxy).squeeze().reshape(-1, 2).tolist()
             xy = {}
