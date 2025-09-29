@@ -530,15 +530,22 @@ class BaseTrainer:
         """Get accelerator memory utilization in GB or as a fraction of total memory."""
         memory, total = 0, 0
         if self.device == "mps":
-            memory = jt.mps.driver_allocated_memory()
+            # Jittor doesn't support MPS, fallback to CPU
+            memory = 0
             if fraction:
                 return __import__("psutil").virtual_memory().percent / 100
         elif self.device == "cpu":
             memory = 0
         else:
-            memory = jt.cuda.memory_reserved()
-            if fraction:
-                total = jt.cuda.get_device_properties(self.device).total_memory
+            try:
+                # Jittor CUDA memory API
+                memory = jt.cuda.memory_allocated()
+                if fraction:
+                    # Jittor doesn't have get_device_properties, use a fallback
+                    total = 8 * 1024**3  # 假设8GB显存，实际应用中可以通过其他方式获取
+            except:
+                memory = 0
+                total = 0
         return ((memory / total) if total > 0 else 0) if fraction else (memory / 1e9)
 
     def _model_train(self):

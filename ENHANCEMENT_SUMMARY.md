@@ -173,3 +173,4 @@ optimal_batch = trainer.auto_batch(max_num_obj=1000)
 **创建时间**: 2025-01-20  
 **作者**: xhr  
 **分支**: xhr-enhanced-trainer
+
