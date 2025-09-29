@@ -109,7 +109,7 @@ class HGStem(nn.Module):
         """Initialize the SPP layer with input/output channels and specified kernel sizes for max pooling."""
         super().__init__()
         self.stem1 = Conv(c1, cm, 3, 2, act=nn.ReLU(), isdetr=isdetr)
-        self.stem2a = Conv(cm, cm // 2, 2, 1, 0, act=nn.ReLU, isdetr=isdetr)
+        self.stem2a = Conv(cm, cm // 2, 2, 1, 0, act=nn.ReLU(), isdetr=isdetr)
         self.stem2b = Conv(cm // 2, cm, 2, 1, 0, act=nn.ReLU(), isdetr=isdetr)
         self.stem3 = Conv(cm * 2, cm, 3, 2, act=nn.ReLU(), isdetr=isdetr)
         self.stem4 = Conv(cm, c2, 1, 1, act=nn.ReLU(), isdetr=isdetr)
