@@ -38,9 +38,7 @@ class TransformerEncoderLayer(nn.Module):
         #     raise ModuleNotFoundError(
         #         "TransformerEncoderLayer() requires torch>=1.9 to use nn.MultiheadAttention(batch_first=True)."
         #     )
-        print("c1 = ", c1)
         self.ma = MultiheadAttention(c1, num_heads, dropout=dropout, batch_first=True)
-        print("self.ma ok")
         # Implementation of Feedexecute model
         self.fc1 = nn.Linear(c1, cm)
         self.fc2 = nn.Linear(cm, c1)
