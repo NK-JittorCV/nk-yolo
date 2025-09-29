@@ -450,7 +450,7 @@ class RTDETRDecoder(nn.Module):
 
     def execute(self, x, batch=None):
         """Runs the execute pass of the module, returning bounding box and classification scores for the input."""
-        from nkyolo.models.utils.ops import get_cdn_group
+        from nkyolo.utils.ops import get_cdn_group
 
         # Input projection and embedding
         feats, shapes = self._get_encoder_input(x)
