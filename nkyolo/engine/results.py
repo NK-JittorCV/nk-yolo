@@ -801,9 +801,8 @@ class Results(SimpleClass):
         if len(data) == 0:
             print("No detections.")
             return results
-        print("data len = ------------------- ", len(data))
+
         for i, row in enumerate(data):  # xyxy, track_id if tracking, conf, class_id
-            print("now in for, i = ", i)
             class_id, conf = int(row.cls), round(row.conf.item(), decimals)
             box = (row.xyxyxyxy if is_obb else row.xyxy).squeeze().reshape(-1, 2).tolist()
             xy = {}
