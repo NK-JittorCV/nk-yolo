@@ -40,7 +40,6 @@ class TransformerEncoderLayer(nn.Module):
         #     )
         self.ma = MultiheadAttention(c1, num_heads, dropout=dropout, batch_first=True)
         # Implementation of Feedexecute model
-        self.fc1 = nn.Linear(c1, cm)
         self.fc2 = nn.Linear(cm, c1)
 
         self.norm1 = nn.LayerNorm(c1)
