@@ -115,7 +115,7 @@ class Detect(nn.Module):
             # See https://github.com/jittoryolo/jittoryolo/issues/7371
             grid_h = shape[2]
             grid_w = shape[3]
-            grid_size = jt.Var([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
+            grid_size = jt.Var([grid_w, grid_h, grid_w, grid_h]).reshape(1, 4, 1)
             norm = self.strides / (self.stride[0] * grid_size)
             dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
         elif self.export and self.format == "imx":
@@ -258,7 +258,7 @@ class Pose(Detect):
                 # Precompute normalization factor to increase numerical stability
                 y = kpts.view(bs, *self.kpt_shape, -1)
                 grid_h, grid_w = self.shape[2], self.shape[3]
-                grid_size = jt.Var([grid_w, grid_h], device=y.device).reshape(1, 2, 1)
+                grid_size = jt.Var([grid_w, grid_h]).reshape(1, 2, 1)
                 norm = self.strides / (self.stride[0] * grid_size)
                 a = (y[:, :, :2] * 2.0 + (self.anchors - 0.5)) * norm
             else:
@@ -337,7 +337,7 @@ class WorldDetect(Detect):
             # See https://github.com/jittoryolo/jittoryolo/issues/7371
             grid_h = shape[2]
             grid_w = shape[3]
-            grid_size = jt.Var([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
+            grid_size = jt.Var([grid_w, grid_h, grid_w, grid_h]).reshape(1, 4, 1)
             norm = self.strides / (self.stride[0] * grid_size)
             dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
         else:
@@ -415,7 +415,7 @@ class RTDETRDecoder(nn.Module):
         self.num_decoder_layers = ndl
 
         # Backbone feature projection
-        self.input_proj = nn.ModuleList(nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch)
+        self.input_proj = nn.ModuleList([nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch])
         # NOTE: simplified version but it's not consistent with .pt weights.
         # self.input_proj = nn.ModuleList(Conv(x, hd, act=False) for x in ch)
 
@@ -448,7 +448,7 @@ class RTDETRDecoder(nn.Module):
 
     def execute(self, x, batch=None):
         """Runs the execute pass of the module, returning bounding box and classification scores for the input."""
-        from jittoryolo.models.utils.ops import get_cdn_group
+        from nkyolo.models.utils.ops import get_cdn_group
 
         # Input projection and embedding
         feats, shapes = self._get_encoder_input(x)
@@ -489,22 +489,30 @@ class RTDETRDecoder(nn.Module):
         """Generates anchor bounding boxes for given shapes with specific grid size and validates them."""
         anchors = []
         for i, (h, w) in enumerate(shapes):
-            sy = jt.arange(end=h, dtype=dtype, device=device)
-            sx = jt.arange(end=w, dtype=dtype, device=device)
+            sy = jt.arange(end=h, dtype=dtype)
+            sx = jt.arange(end=w, dtype=dtype)
             grid_y, grid_x = jt.meshgrid(sy, sx)
 
             grid_xy = jt.stack([grid_x, grid_y], -1)  # (h, w, 2)
 
-            valid_WH = jt.Var([w, h], dtype=dtype, device=device)
+            valid_WH = jt.Var([w, h], dtype)
             grid_xy = (grid_xy.unsqueeze(0) + 0.5) / valid_WH  # (1, h, w, 2)
-            wh = jt.ones_like(grid_xy, dtype=dtype, device=device) * grid_size * (2.0**i)
+            wh = jt.ones_like(grid_xy).astype(dtype) * grid_size * (2.0**i)
 
             anchors.append(jt.concat([grid_xy, wh], -1).view(-1, h * w, 4))  # (1, h*w, 4)
 
         anchors = jt.concat(anchors, 1)  # (1, h*w*nl, 4)
-        valid_mask = ((anchors > eps) & (anchors < 1 - eps)).all(-1, keepdim=True)  # 1, h*w*nl, 1
+        valid_mask = ((anchors > eps) & (anchors < 1 - eps)).all(-1)  # 1, h*w*nl, 1
+        valid_mask = valid_mask.unsqueeze(-1) 
+        # valid_mask = jt.reduce(
+        #     ((anchors > eps) & (anchors < 1 - eps)),  # 输入张量
+        #     op="all",  # 运算类型：逻辑与
+        #     dim=-1,    # 目标维度
+        #     keepdims=True  # 保留维度（Jittor 中是 keepdims，复数形式）
+        # )
         anchors = jt.log(anchors / (1 - anchors))
-        anchors = anchors.masked_fill(~valid_mask, float("inf"))
+        # anchors = anchors.masked_fill(~valid_mask, float("inf"))
+        anchors = anchors.masked_fill(jt.logical_not(valid_mask), float("inf"))
         return anchors, valid_mask
 
     def _get_encoder_input(self, x):
@@ -529,14 +537,24 @@ class RTDETRDecoder(nn.Module):
         """Generates and prepares the input required for the decoder from the provided features and shapes."""
         bs = feats.shape[0]
         # Prepare input for decoder
-        anchors, valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
+        anchors, valid_mask = self._generate_anchors(shapes, dtype=feats.dtype)
         features = self.enc_output(valid_mask * feats)  # bs, h*w, 256
 
         enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)
 
         # Query selection
         # (bs, num_queries)
-        topk_ind = jt.topk(enc_outputs_scores.max(-1).values, self.num_queries, dim=1).indices.view(-1)
+        # topk_ind = jt.topk(enc_outputs_scores.max(-1).values, self.num_queries, dim=1).indices.view(-1)
+        # 第一步：对最后一维取最大值
+        mmax_vals = enc_outputs_scores.max(-1)
+
+        # 第二步：将 max_vals 传入 topk
+        # topk_ind = jt.topk(mmax_vals, self.num_queries, dim=1).indices.view(-1)
+        # 第一步：获取 topk 的返回值（元组：(values, indices)）
+        topk_vals, topk_indices = jt.topk(mmax_vals, self.num_queries, dim=1)
+
+        # 第二步：用索引获取 indices 并变形
+        topk_ind = topk_indices.view(-1)
 
         # (bs, num_queries)
         batch_ind = jt.arange(end=bs, dtype=topk_ind.dtype).unsqueeze(-1).repeat(1, self.num_queries).view(-1)

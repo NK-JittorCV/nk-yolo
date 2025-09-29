@@ -181,6 +181,7 @@ class BaseTensor(SimpleClass):
             >>> print(result.data)
             tensor([1, 2, 3])
         """
+
         if 0 <= idx < self.data.shape[0]:
             return self.__class__(self.data[idx], self.orig_shape)
         else:
@@ -797,6 +798,10 @@ class Results(SimpleClass):
         is_obb = self.obb is not None
         data = self.obb if is_obb else self.boxes
         h, w = self.orig_shape if normalize else (1, 1)
+        if len(data) == 0:
+            print("No detections.")
+            return results
+
         for i, row in enumerate(data):  # xyxy, track_id if tracking, conf, class_id
             class_id, conf = int(row.cls), round(row.conf.item(), decimals)
             box = (row.xyxyxyxy if is_obb else row.xyxy).squeeze().reshape(-1, 2).tolist()

@@ -254,6 +254,73 @@ def nms_rotated(boxes, scores, threshold=0.45):
     return sorted_idx[pick]
 
 
+
+def jtnms(boxes: jt.Var, scores: jt.Var, iou_threshold: float) -> jt.Var:
+    """
+    Non-Maximum Suppression (NMS) implementation in Jittor, used to remove highly overlapping detection boxes.
+
+    Args:
+        boxes (jt.Var): [N, 4], bounding box coordinates in the format (x1, y1, x2, y2).
+        scores (jt.Var): [N] or [N, 1], confidence scores for each bounding box.
+        iou_threshold (float): IOU threshold; boxes with IOU above this value will be suppressed.
+
+    Returns:
+        jt.Var: Indices of the kept boxes [M,], dtype=int32.
+    """
+    # 处理空输入
+    if boxes.numel() == 0:
+        return jt.array([], dtype='int32')
+    
+    # 确保 scores 是 [N] 形状
+    if scores.ndim == 2:
+        scores = scores.squeeze(1)  # [N, 1] -> [N]
+    
+    # 按 scores 降序排序并获取排序索引
+    _, order = jt.argsort(scores, descending=True)
+    boxes = boxes[order]  # 排序后的 boxes
+    keep = jt.zeros(boxes.shape[0], dtype='bool')  # 用于标记保留的框
+    num_keep = 0  # 已保留的框数量
+    
+    # 预先计算所有框的面积，避免重复计算
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    
+    for i in range(boxes.shape[0]):
+        # 如果当前框已被标记为抑制，则跳过
+        if keep[i]:
+            continue
+            
+        # 保留当前框
+        keep[i] = True
+        num_keep += 1
+        
+        # 计算当前框与剩余所有框的IOU
+        # 当前框坐标
+        x1, y1, x2, y2 = boxes[i]
+        
+        # 剩余框与当前框的交集坐标
+        xx1 = jt.maximum(x1, boxes[i+1:, 0])
+        yy1 = jt.maximum(y1, boxes[i+1:, 1])
+        xx2 = jt.minimum(x2, boxes[i+1:, 2])
+        yy2 = jt.minimum(y2, boxes[i+1:, 3])
+        
+        # 计算交集面积
+        w = jt.maximum(0.0, xx2 - xx1)
+        h = jt.maximum(0.0, yy2 - yy1)
+        inter = w * h
+        
+        # 计算并集面积和IOU
+        union = areas[i] + areas[i+1:] - inter
+        iou = inter / jt.maximum(union, 1e-9)  # 防止除零
+        
+        # 抑制IOU超过阈值的框
+        overlap_mask = iou > iou_threshold
+        keep[i+1:][overlap_mask] = False
+    
+    # 获取保留的索引并映射回原始顺序
+    keep_indices = jt.where(keep)[0]
+    return order[keep_indices].astype('int32')
+
+
 def non_max_suppression(
     prediction,
     conf_thres=0.25,
@@ -365,6 +432,7 @@ def non_max_suppression(
         if multi_label:
             i, j = jt.where(cls > conf_thres)
             x = jt.concat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
+
         else:  # 仅保留最佳类别
             conf = cls.max(1, keepdim=True)
             argmax_result = jt.argmax(cls, dim=1)
@@ -399,7 +467,6 @@ def non_max_suppression(
             boxes_with_scores = jt.cat([boxes, scores.unsqueeze(1)], dim=1) 
             # 2. 调用Jittor的nms函数，传入boxes和iou阈值
             i = jt.nms(boxes_with_scores, iou_thres)  # NMS
-
         i = i[:max_det]  # limit detections
 
         # # Experimental

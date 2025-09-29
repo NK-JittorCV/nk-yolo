@@ -116,9 +116,9 @@ class HGStem(nn.Module):
 
     def execute(self, x):
         x = self.stem1(x)
-        x = jt.pad(x, [0, 1, 0, 1])
+        x = jt.nn.pad(x, [0, 1, 0, 1])
         x2 = self.stem2a(x)
-        x2 = jt.pad(x2, [0, 1, 0, 1])
+        x2 = jt.nn.pad(x2, [0, 1, 0, 1])
         x2 = self.stem2b(x2)
         x1 = self.pool(x)
         x = jt.concat([x1, x2], dim=1)

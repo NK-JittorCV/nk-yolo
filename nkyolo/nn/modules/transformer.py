@@ -8,6 +8,8 @@ from jittor.init import constant_,xavier_uniform_
 
 from .conv import Conv
 from .utils import _get_clones, inverse_sigmoid
+from .attentionblock import MultiheadAttention
+from nkyolo.nn.modules.utils import multi_scale_deformable_attn_jittor
 
 __all__ = (
     "TransformerEncoderLayer",
@@ -36,9 +38,8 @@ class TransformerEncoderLayer(nn.Module):
         #     raise ModuleNotFoundError(
         #         "TransformerEncoderLayer() requires torch>=1.9 to use nn.MultiheadAttention(batch_first=True)."
         #     )
-        self.ma = nn.MultiheadAttention(c1, num_heads, dropout=dropout, batch_first=True)
+        self.ma = MultiheadAttention(c1, num_heads, dropout=dropout, batch_first=True)
         # Implementation of Feedexecute model
-        self.fc1 = nn.Linear(c1, cm)
         self.fc2 = nn.Linear(cm, c1)
 
         self.norm1 = nn.LayerNorm(c1)
@@ -94,7 +95,7 @@ class AIFI(TransformerEncoderLayer):
         c, h, w = x.shape[1:]
         pos_embed = self.build_2d_sincos_position_embedding(w, h, c)
         # Flatten [B, C, H, W] to [B, HxW, C]
-        x = super().execute(x.flatten(2).permute(0, 2, 1), pos=pos_embed.to(device=x.device, dtype=x.dtype))
+        x = super().execute(x.flatten(2).permute(0, 2, 1), pos=pos_embed.to(dtype=x.dtype))
         return x.permute(0, 2, 1).view([-1, c, h, w]).contiguous()
 
     @staticmethod
@@ -124,7 +125,7 @@ class TransformerLayer(nn.Module):
         self.q = nn.Linear(c, c, bias=False)
         self.k = nn.Linear(c, c, bias=False)
         self.v = nn.Linear(c, c, bias=False)
-        self.ma = nn.MultiheadAttention(embed_dim=c, num_heads=num_heads)
+        self.ma = MultiheadAttention(embed_dim=c, num_heads=num_heads)
         self.fc1 = nn.Linear(c, c, bias=False)
         self.fc2 = nn.Linear(c, c, bias=False)
 
@@ -179,7 +180,7 @@ class MLP(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.ModuleList([nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim])])
         self.sigmoid = sigmoid
         self.act = act()
 
@@ -247,7 +248,7 @@ class MSDeformAttn(nn.Module):
 
     def _reset_parameters(self):
         """Reset module parameters."""
-        constant_(self.sampling_offsets.weight.data, 0.0)
+        nn.init.constant_(self.sampling_offsets.weight, 0.0)
         thetas = jt.arange(self.n_heads, dtype=jt.float32) * (2.0 * math.pi / self.n_heads)
         grid_init = jt.stack([thetas.cos(), thetas.sin()], -1)
         grid_init = (
@@ -259,12 +260,12 @@ class MSDeformAttn(nn.Module):
             grid_init[:, :, i, :] *= i + 1
         with jt.no_grad():
             self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
-        constant_(self.attention_weights.weight.data, 0.0)
-        constant_(self.attention_weights.bias.data, 0.0)
-        xavier_uniform_(self.value_proj.weight.data)
-        constant_(self.value_proj.bias.data, 0.0)
-        xavier_uniform_(self.output_proj.weight.data)
-        constant_(self.output_proj.bias.data, 0.0)
+        nn.init.constant_(self.attention_weights.weight, 0.0)
+        nn.init.constant_(self.attention_weights.bias, 0.0)
+        nn.init.xavier_uniform_(self.value_proj.weight)
+        nn.init.constant_(self.value_proj.bias, 0.0)
+        nn.init.xavier_uniform_(self.output_proj.weight)
+        nn.init.constant_(self.output_proj.bias, 0.0)
 
     def execute(self, query, refer_bbox, value, value_shapes, value_mask=None):
         """
@@ -297,7 +298,7 @@ class MSDeformAttn(nn.Module):
         # N, Len_q, n_heads, n_levels, n_points, 2
         num_points = refer_bbox.shape[-1]
         if num_points == 2:
-            offset_normalizer = jt.Var(value_shapes, dtype=query.dtype, device=query.device).flip(-1)
+            offset_normalizer = jt.Var(value_shapes, dtype=query.dtype).flip(-1)
             add = sampling_offsets / offset_normalizer[None, None, None, :, None, :]
             sampling_locations = refer_bbox[:, :, None, :, None, :] + add
         elif num_points == 4:
@@ -305,7 +306,7 @@ class MSDeformAttn(nn.Module):
             sampling_locations = refer_bbox[:, :, None, :, None, :2] + add
         else:
             raise ValueError(f"Last dim of reference_points must be 2 or 4, but got {num_points}.")
-        output = multi_scale_deformable_attn_pytorch(value, value_shapes, sampling_locations, attention_weights)
+        output = multi_scale_deformable_attn_jittor(value, value_shapes, sampling_locations, attention_weights)
         return self.output_proj(output)
 
 
@@ -322,7 +323,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         super().__init__()
 
         # Self attention
-        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
+        self.self_attn = MultiheadAttention(d_model, n_heads, dropout=dropout)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
 
