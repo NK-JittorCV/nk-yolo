@@ -408,8 +408,8 @@ class ResNetLayer(nn.Module):
                 Conv(c1, c2, k=7, s=2, p=3, act=True, isdetr=isdetr), nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
             )
         else:
-            blocks = [ResNetBlock(c1, c2, s, e=e)]
-            blocks.extend([ResNetBlock(e * c2, c2, 1, e=e) for _ in range(n - 1)])
+            blocks = [ResNetBlock(c1, c2, s, e=e, isdetr=isdetr)]
+            blocks.extend([ResNetBlock(e * c2, c2, 1, e=e, isdetr=isdetr) for _ in range(n - 1)])
             self.layer = nn.Sequential(*blocks)
 
     def execute(self, x):
@@ -463,7 +463,7 @@ class C2fAttn(nn.Module):
         self.cv1 = Conv(c1, 2 * self.c, 1, 1, isdetr=isdetr)
         self.cv2 = Conv((3 + n) * self.c, c2, 1, isdetr=isdetr)  # optional act=FReLU(c2)
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0, isdetr=isdetr) for _ in range(n))
-        self.attn = MaxSigmoidAttnBlock(self.c, self.c, gc=gc, ec=ec, nh=nh)
+        self.attn = MaxSigmoidAttnBlock(self.c, self.c, gc=gc, ec=ec, nh=nh, isdetr=isdetr)
 
     def execute(self, x, guide):
         """execute pass through C2f layer."""
