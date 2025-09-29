@@ -506,12 +506,6 @@ class RTDETRDecoder(nn.Module):
         anchors = jt.concat(anchors, 1)  # (1, h*w*nl, 4)
         valid_mask = ((anchors > eps) & (anchors < 1 - eps)).all(-1)  # 1, h*w*nl, 1
         valid_mask = valid_mask.unsqueeze(-1) 
-        # valid_mask = jt.reduce(
-        #     ((anchors > eps) & (anchors < 1 - eps)),  # 输入张量
-        #     op="all",  # 运算类型：逻辑与
-        #     dim=-1,    # 目标维度
-        #     keepdims=True  # 保留维度（Jittor 中是 keepdims，复数形式）
-        # )
         anchors = jt.log(anchors / (1 - anchors))
         # anchors = anchors.masked_fill(~valid_mask, float("inf"))
         anchors = anchors.masked_fill(jt.logical_not(valid_mask), float("inf"))
