@@ -254,7 +254,6 @@ def nms_rotated(boxes, scores, threshold=0.45):
     return sorted_idx[pick]
 
 
-# import jittor as jt
 
 def jtnms(boxes: jt.Var, scores: jt.Var, iou_threshold: float) -> jt.Var:
     """
