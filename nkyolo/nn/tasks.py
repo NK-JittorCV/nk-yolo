@@ -5,6 +5,7 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
 import jittor as jt
 from jittor import nn
 from nkyolo.nn.modules.batchnormblock import MyBatchNorm2d
@@ -64,6 +65,7 @@ from nkyolo.nn.modules import (
     v10Detect,
     MSBlock,
     GlobalToken,
+    A2C2f
 )
 from nkyolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from nkyolo.utils.checks import check_requirements, check_suffix, check_yaml
@@ -268,18 +270,45 @@ class BaseModel(nn.Module):
 
     def load(self, weights, verbose=True):
         """
-        Load the weights into the model.
+        Load weights into the model (Jittor version).
 
         Args:
-            weights (dict | torch.nn.Module): The pre-trained weights to be loaded.
-            verbose (bool, optional): Whether to log the transfer progress. Defaults to True.
+            weights (dict | nn.Module): Checkpoint dict or Jittor model.
+            verbose (bool): Whether to log transfer progress.
         """
-        model = weights["model"] if isinstance(weights, dict) else weights  # torchvision models are not dicts
-        csd = model.float().state_dict()  # checkpoint state_dict as FP32
-        csd = intersect_dicts(csd, self.state_dict())  # intersect
-        self.load_state_dict(csd, strict=False)  # load
+        
+        # 1. 取出权重 state_dict
+        if isinstance(weights, dict):
+            csd = weights["model"].float().state_dict()
+        else:
+            csd = weights.float().state_dict()
+
+        # 2. 过滤掉 shape 不匹配的键
+        model_sd = self.state_dict()
+        updated_csd = {
+            k: v for k, v in csd.items()
+            if k in model_sd and tuple(model_sd[k].shape) == tuple(v.shape)
+        }
+
+        # 3. 加载
+        self.load_state_dict(updated_csd)
+        len_updated = len(updated_csd)
+
+        # 4. 处理首层卷积通道数不同的情况
+        first_conv = "model.0.conv.weight"
+        if first_conv not in updated_csd and first_conv in model_sd:
+            c1, c2, h, w = model_sd[first_conv].shape
+            cc1, cc2, ch, cw = csd[first_conv].shape
+            if ch == h and cw == w:
+                c1, c2 = min(c1, cc1), min(c2, cc2)
+                model_sd[first_conv][:c1, :c2] = csd[first_conv][:c1, :c2]
+                len_updated += 1
+
         if verbose:
-            LOGGER.info(f"Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights")
+            LOGGER.info(
+                f"Transferred {len_updated}/{len(self.model.state_dict())} "
+                f"items from pretrained weights"
+            )
 
     def loss(self, batch, preds=None):
         """
@@ -818,8 +847,7 @@ def jittor_safe_load(weight, safe_only=False):
         file (str): The loaded filename
     """
     from nkyolo.utils.downloads import attempt_download_asset
-
-    check_suffix(file=weight, suffix=".pt")
+    check_suffix(file=weight, suffix=(".pt", ".pkl"))
     file = attempt_download_asset(weight)  # search online if missing locally
     try:
         with temporary_modules(
@@ -863,6 +891,15 @@ def jittor_safe_load(weight, safe_only=False):
         )
         check_requirements(e.name)  # install missing module
         ckpt = jt.load(file)
+    # print('before:',ckpt)
+    def _to_numpy(obj):      # 转化torch数据类型
+        if isinstance(obj, dict):
+            return {k: _to_numpy(v) for k, v in obj.items()}
+        elif hasattr(obj, 'detach'):        # torch.Tensor
+            return obj.detach().cpu().numpy()
+        else:
+            return obj
+    ckpt = _to_numpy(ckpt)
 
     if not isinstance(ckpt, dict):
         # File is likely a YOLO instance saved with i.e. jt.save(model, "saved_model.pt")
@@ -919,7 +956,23 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
                 model.load_state_dict(model_state_dict)
         else:
             # 原有的加载逻辑（向后兼容）
-            model = (ckpt.get("ema") or ckpt["model"]).float()  # FP32 model
+            model_data = ckpt.get("ema") or ckpt["model"]
+            if isinstance(model_data, dict):
+                # 如果是权重字典（例如 .pkl 文件），需要重新构建模型
+                from nkyolo.nn.tasks import DetectionModel
+                
+                # 对于 .pkl 文件，使用默认的 YOLOv11 配置
+                if w.endswith('.pkl'):
+                    model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+                else:
+                    # 对于其他格式，使用通用配置或抛出错误
+                    raise ValueError(f"Cannot handle weight dictionary format for file: {w}")
+                
+                # 直接加载权重字典（假设是 Jittor 格式）
+                model.load_state_dict(model_data)
+            else:
+                # 如果是模型对象
+                model = model_data.float()  # FP32 model
 
         # Model compatibility updates
         model.args = args  # attach args to model
@@ -952,6 +1005,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
 
 
 def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
+
     """Loads a single model weights."""
     ckpt, weight = jittor_safe_load(weight)  # load ckpt
     args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
@@ -990,25 +1044,70 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
         model = model.to(device).float()  # FP32 model
     else:
         # 原有的加载逻辑（向后兼容）
-        model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
+        model_data = ckpt.get("ema") or ckpt["model"]
+        if isinstance(model_data, dict):
+            # 如果是权重字典，需要重新构建模型
+            from nkyolo.nn.tasks import DetectionModel
+            model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+            
+            # 转换权重字典中的 PyTorch tensor 到 Jittor，确保使用 float32
+            jittor_state_dict = {}
+            for k, v in model_data.items():
+                if hasattr(v, 'detach'):  # PyTorch tensor
+                    numpy_val = v.detach().cpu().numpy()
+                    # 确保所有浮点权重都是 float32
+                    if numpy_val.dtype in [np.float16, np.float64]:
+                        numpy_val = numpy_val.astype(np.float32)
+                    jittor_state_dict[k] = jt.array(numpy_val)
+                else:
+                    jittor_state_dict[k] = v
+            
+            model.load_state_dict(jittor_state_dict)
+        else:
+            # 如果是模型对象，需要转换 PyTorch 模型到 Jittor
+            # 直接转换权重，因为是 PyTorch 模型
+            from nkyolo.nn.tasks import DetectionModel
+            model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
+            
+            # 转换 PyTorch 权重到 Jittor，确保使用 float32
+            pytorch_state_dict = model_data.state_dict()
+            jittor_state_dict = {}
+            for k, v in pytorch_state_dict.items():
+                if hasattr(v, 'detach'):  # PyTorch tensor
+                    numpy_val = v.detach().cpu().numpy()
+                    # 确保所有浮点权重都是 float32
+                    if numpy_val.dtype in [np.float16, np.float64]:
+                        numpy_val = numpy_val.astype(np.float32)
+                    jittor_state_dict[k] = jt.array(numpy_val)
+                else:
+                    jittor_state_dict[k] = v
+            
+            model.load_state_dict(jittor_state_dict)
 
     # Model compatibility updates
     model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
     model.pt_path = weight  # attach *.pt file path to model
     model.task = guess_model_task(model)
+
     if not hasattr(model, "stride"):
-        model.stride = jt.Var([32.0])
+        model.stride = jt.array([32.0])
 
-    model = model.fuse().eval() if fuse and hasattr(model, "fuse") else model.eval()  # model in eval mode
+    # 模型转换为评估模式并移动到指定设备
+    if fuse and hasattr(model, "fuse"):
+        model = model.fuse()
+    model.eval()
+    if device is not None:
+        model.to(device)
 
-    # Module updates
+    # 模块更新
     for m in model.modules():
         if hasattr(m, "inplace"):
             m.inplace = inplace
+        # Jittor的Upsample可能有不同的参数名，这里根据实际情况调整
         elif isinstance(m, nn.Upsample) and not hasattr(m, "recompute_scale_factor"):
-            m.recompute_scale_factor = None  # torch 1.11.0 compatibility
+            m.recompute_scale_factor = None  # 兼容性处理
 
-    # Return model and ckpt
+    # 返回模型和检查点
     return model, ckpt
 
 
@@ -1100,6 +1199,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             SCDown,
             C2fCIB,
             MSBlock,
+            A2C2f
         }:
             if m in {MSBlock} and isinstance(f, list):
                 c1, c2 = ch[f[-1]], args[0]
@@ -1129,6 +1229,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2fPSA,
                 C2fCIB,
                 C2PSA,
+                A2C2f
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -1136,6 +1237,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
+            if m is A2C2f:
+                legacy = False
+                if scale in "lx":  # for L/X sizes
+                    args.extend((True, 1.2))
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in {HGStem, HGBlock}:
@@ -1166,7 +1271,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = ch[f[-1]]
         else:
             c2 = ch[f]
-
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m_.np = sum(x.numel() for x in m_.parameters())  # number params
