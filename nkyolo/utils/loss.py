@@ -190,12 +190,47 @@ class v8DetectionLoss:
             for idx, val in enumerate(unique_values):
                 counts[idx] = (i == val).sum()
             counts = counts.to(dtype=jt.int32)
-            out = jt.zeros((batch_size, jt.max(counts).item(), ne - 1), dtype=jt.float32)
+            max_count = jt.max(counts).item()
+            
+            # 构建每个batch的数据列表
+            batch_data = []
             for j in range(batch_size):
                 matches = i == j
-                n = matches.sum()
-                if n:
-                    out[j, :n] = targets[matches, 1:]
+                n = matches.sum().item()
+                if n > 0:
+                    # 使用 where() 方法获取索引以兼容 Jittor
+                    if hasattr(matches, 'where'):
+                        indices = matches.where()[0]
+                        selected_rows = targets[indices]  # 先选择行
+                        selected = selected_rows[:, 1:]  # 再去掉第一列
+                    else:
+                        mask_indices = jt.nonzero(matches).squeeze()
+                        selected_rows = targets[mask_indices]
+                        selected = selected_rows[:, 1:]
+                    
+                    # 确保形状正确
+                    if len(selected.shape) == 1:
+                        # 如果只有一行，需要添加维度
+                        selected = selected.unsqueeze(0)
+                    
+                    # 获取实际行数
+                    actual_n = selected.shape[0]
+                    
+                    # 填充到max_count长度
+                    if actual_n < max_count:
+                        padding = jt.zeros((max_count - actual_n, ne - 1), dtype=jt.float32)
+                        selected = jt.concat([selected, padding], dim=0)
+                    elif actual_n > max_count:
+                        # 如果超过，截断（不应该发生，但为了安全）
+                        selected = selected[:max_count]
+                else:
+                    selected = jt.zeros((max_count, ne - 1), dtype=jt.float32)
+                
+                # 确保最终形状是 (max_count, ne-1)
+                assert selected.shape[0] == max_count, f"Shape mismatch: {selected.shape[0]} vs {max_count}"
+                batch_data.append(selected.unsqueeze(0))
+            
+            out = jt.concat(batch_data, dim=0)
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
         return out
 
@@ -639,14 +674,48 @@ class v8OBBLoss(v8DetectionLoss):
             i = targets[:, 0]  # image index
             _, counts = i.unique(return_counts=True)
             counts = counts.to(dtype=jt.int32)
-            out = jt.zeros((batch_size, counts.max().item(), 6), dtype=jt.float32)
+            max_count = counts.max().item()
+            
+            # 构建每个batch的数据列表
+            batch_data = []
             for j in range(batch_size):
                 matches = i == j
-                n = matches.sum()
-                if n:
-                    bboxes = targets[matches, 2:]
+                n = matches.sum().item()
+                if n > 0:
+                    # 使用 where() 方法获取索引以兼容 Jittor
+                    if hasattr(matches, 'where'):
+                        indices = matches.where()[0]
+                        selected = targets[indices]  # 选择匹配的行
+                    else:
+                        mask_indices = jt.nonzero(matches).squeeze()
+                        selected = targets[mask_indices]
+                    
+                    # 确保形状正确
+                    if len(selected.shape) == 1:
+                        selected = selected.unsqueeze(0)
+                    
+                    bboxes = selected[:, 2:]  # bbox 数据
                     bboxes[..., :4].mul_(scale_tensor)
-                    out[j, :n] = jt.concat([targets[matches, 1:2], bboxes], dim=-1)
+                    combined = jt.concat([selected[:, 1:2], bboxes], dim=-1)
+                    
+                    # 获取实际行数
+                    actual_n = combined.shape[0]
+                    
+                    # 填充到max_count长度
+                    if actual_n < max_count:
+                        padding = jt.zeros((max_count - actual_n, 6), dtype=jt.float32)
+                        combined = jt.concat([combined, padding], dim=0)
+                    elif actual_n > max_count:
+                        # 如果超过，截断（不应该发生，但为了安全）
+                        combined = combined[:max_count]
+                else:
+                    combined = jt.zeros((max_count, 6), dtype=jt.float32)
+                
+                # 确保最终形状是 (max_count, 6)
+                assert combined.shape[0] == max_count, f"Shape mismatch: {combined.shape[0]} vs {max_count}"
+                batch_data.append(combined.unsqueeze(0))
+            
+            out = jt.concat(batch_data, dim=0)
         return out
 
     def __call__(self, preds, batch):
