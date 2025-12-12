@@ -178,6 +178,26 @@ class v8DetectionLoss:
         self.bbox_loss = BboxLoss(m.reg_max)
         self.proj = jt.arange(m.reg_max, dtype=jt.float32)
 
+    # def preprocess(self, targets, batch_size, scale_tensor):
+    #     """Preprocesses the target counts and matches with the input batch size to output a tensor."""
+    #     nl, ne = targets.shape
+    #     if nl == 0:
+    #         out = jt.zeros((batch_size, 0, ne - 1), dtype=jt.float32)
+    #     else:
+    #         i = targets[:, 0]  # image index
+    #         unique_values = i.unique()
+    #         counts = jt.zeros_like(unique_values)
+    #         for idx, val in enumerate(unique_values):
+    #             counts[idx] = (i == val).sum()
+    #         counts = counts.to(dtype=jt.int32)
+    #         out = jt.zeros((batch_size, jt.max(counts).item(), ne - 1), dtype=jt.float32)
+    #         for j in range(batch_size):
+    #             matches = i == j
+    #             n = matches.sum()
+    #             if n:
+    #                 out[j, :n] = targets[matches, 1:]
+    #         out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
+    #     return out
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
         nl, ne = targets.shape
@@ -185,17 +205,26 @@ class v8DetectionLoss:
             out = jt.zeros((batch_size, 0, ne - 1), dtype=jt.float32)
         else:
             i = targets[:, 0]  # image index
-            unique_values = i.unique()
-            counts = jt.zeros_like(unique_values)
-            for idx, val in enumerate(unique_values):
-                counts[idx] = (i == val).sum()
-            counts = counts.to(dtype=jt.int32)
-            out = jt.zeros((batch_size, jt.max(counts).item(), ne - 1), dtype=jt.float32)
+            
+            # --- ✅ 修复开始：更稳健的 Max Count 计算逻辑 ---
+            # 避免使用 unique() 和复杂的 Var 索引，直接遍历 batch_size 统计
+            max_n = 0
+            for j in range(batch_size):
+                # 使用 .item() 获取标量值，断开不必要的计算图依赖，防止 Segfault
+                n = (i == j).sum().item() 
+                if n > max_n:
+                    max_n = n
+            # ---------------------------------------------
+
+            out = jt.zeros((batch_size, max_n, ne - 1), dtype=jt.float32)
+            
             for j in range(batch_size):
                 matches = i == j
-                n = matches.sum()
-                if n:
+                # 再次使用 .item() 确保切片索引是 Python 整数
+                n = matches.sum().item() 
+                if n > 0:
                     out[j, :n] = targets[matches, 1:]
+                    
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
         return out
 
