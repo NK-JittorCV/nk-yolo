@@ -47,7 +47,7 @@ class FocalLoss(nn.Module):
     @staticmethod
     def execute(pred, label, gamma=1.5, alpha=0.25):
         """Calculates and updates confusion matrix for object detection/classification tasks."""
-        loss = nn.binary_cross_entropy_with_logits(pred, label, reduction="none")
+        loss = nn.binary_cross_entropy_with_logits(pred, label)
         # TF implementation https://github.com/tensorflow/addons/blob/v0.7.1/tensorflow_addons/losses/focal_loss.py
         pred_prob = pred.sigmoid()  # prob from logits
         p_t = label * pred_prob + (1 - label) * (1 - pred_prob)
