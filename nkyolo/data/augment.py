@@ -439,8 +439,10 @@ class BaseMixTransform:
             >>> indexes = transform.get_indexes()
             >>> print(indexes)  # [3, 18, 7, 2]
         """
+        if len(self.dataset) == 0:
+            raise ValueError("Dataset is empty, cannot get random index.")
         return random.randint(0, len(self.dataset) - 1)
-
+        
     def _update_label_text(self, labels):
         """
         Updates label text and class IDs for mixed labels in image augmentation.
