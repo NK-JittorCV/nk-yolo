@@ -146,13 +146,13 @@ class TaskAlignedAssigner(nn.Module):
 
 
         # (b, max_num_obj, topk, h*w) -> (b, max_num_obj, h*w)
-        count_tensor = jt.zeros(metrics.shape, dtype=jt.int8)
-        ones = jt.ones_like(topk_idxs[:, :, :1]).astype(jt.int8)
+        count_tensor = jt.zeros(metrics.shape, dtype=jt.int32)
+        ones = jt.ones_like(topk_idxs[:, :, :1]).astype(jt.int32)
 
         for k in range(self.topk):
             # Expand topk_idxs for each value of k and add 1 at the specified positions
             count_tensor = jt.scatter(count_tensor, -1, topk_idxs[:, :, k : k + 1], ones, reduce='add')
-        # count_tensor.scatter_add_(-1, topk_idxs, jt.ones_like(topk_idxs, dtype=jt.int8, device=topk_idxs.device))
+        # count_tensor.scatter_add_(-1, topk_idxs, jt.ones_like(topk_idxs, dtype=jt.int32, device=topk_idxs.device))
         # Filter invalid bboxes
         count_tensor.masked_fill_(count_tensor > 1, 0)
 

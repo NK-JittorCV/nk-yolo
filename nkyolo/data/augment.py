@@ -441,8 +441,8 @@ class BaseMixTransform:
         """
         if len(self.dataset) == 0:
             raise ValueError("Dataset is empty, cannot get random index.")
-        return random.randint(0, len(self.dataset) - 1)
-        
+        return random.randint(0, len(self.dataset) - 1)        
+
     def _update_label_text(self, labels):
         """
         Updates label text and class IDs for mixed labels in image augmentation.
@@ -1625,7 +1625,7 @@ class LetterBox:
         >>> updated_instances = result["instances"]
     """
 
-    def __init__(self, new_shape=(640, 640), auto=False, scale_fill=False, scaleup=True, center=True, stride=32, padding_value=114, interpolation=cv2.INTER_LINEAR):
+    def __init__(self, new_shape=(640, 640), auto=False, scaleup=True, center=True, stride=32, padding_value=114, interpolation=cv2.INTER_LINEAR):
         """
         Initialize LetterBox object for resizing and padding images.
 
@@ -1635,7 +1635,6 @@ class LetterBox:
         Args:
             new_shape (Tuple[int, int]): Target size (height, width) for the resized image.
             auto (bool): If True, use minimum rectangle to resize. If False, use new_shape directly.
-            scaleFill (bool): If True, stretch the image to new_shape without padding.
             scaleup (bool): If True, allow scaling up. If False, only scale down.
             center (bool): If True, center the placed image. If False, place image in top-left corner.
             stride (int): Stride of the model (e.g., 32 for YOLOv5).
@@ -1653,7 +1652,6 @@ class LetterBox:
         """
         self.new_shape = new_shape
         self.auto = auto
-        self.scale_fill = scale_fill
         self.scaleup = scaleup
         self.stride = stride
         self.center = center  # Put the image in the middle or top-left

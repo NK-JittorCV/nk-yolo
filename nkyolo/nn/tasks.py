@@ -278,9 +278,9 @@ class BaseModel(nn.Module):
         
         # 1. 取出权重 state_dict
         if isinstance(weights, dict):
-            csd = weights["model"].float().state_dict()
+            csd = weights["model"].state_dict()
         else:
-            csd = weights.float().state_dict()
+            csd = weights.state_dict()
 
         # 2. 过滤掉 shape 不匹配的键
         model_sd = self.state_dict()
