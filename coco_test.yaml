@@ -2,7 +2,7 @@
 # Using actual COCO data path
 
 # Dataset info
-path: /home/ubuntu/fishworld/project/data/coco  # dataset root dir
+path: ""  # dataset root dir
 train: train2017  # train images (relative to 'path') 
 val: val2017      # val images (relative to 'path')
 test: test2017    # test images (optional)
