@@ -441,7 +441,7 @@ class BaseMixTransform:
         """
         if len(self.dataset) == 0:
             raise ValueError("Dataset is empty, cannot get random index.")
-        return random.randint(0, len(self.dataset) - 1)
+        return random.randint(0, len(self.dataset) - 1)        
 
     def _update_label_text(self, labels):
         """
