@@ -15,29 +15,6 @@ from .tal import bbox2dist
 def fix_manual_bce_with_logits(logits, labels):
     return jt.maximum(logits, 0.0) - logits * labels + jt.log(1.0 + jt.exp(-jt.abs(logits)))
 
-# class VarifocalLoss(nn.Module):
-#     """
-#     Varifocal loss by Zhang et al.
-
-#     https://arxiv.org/abs/2008.13367.
-#     """
-
-#     def __init__(self):
-#         """Initialize the VarifocalLoss class."""
-#         super().__init__()
-
-#     @staticmethod
-#     def execute(pred_score, gt_score, label, alpha=0.75, gamma=2.0):
-#         """Computes varfocal loss."""
-#         weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score * label
-#         with autocast(enabled=False):
-#             loss = (
-#                 (fix_manual_bce_with_logits(pred_score.float(), gt_score.float()) * weight)
-#                 .sum()
-#                 # .mean(1)
-#                 # .sum()
-#             )
-#         return loss
 
 class VarifocalLoss(nn.Module):
     def __init__(self):
@@ -45,33 +22,11 @@ class VarifocalLoss(nn.Module):
 
     def execute(self, pred_score, gt_score, label, alpha=0.75, gamma=2.0):
         """Computes varfocal loss."""
-        # 1. 拆解计算步骤，确保每一步都有明确的变量
-        # pred_score = pred_score.float32().clone()
-        # gt_score = gt_score.float32().clone()
-        # label = label.float32().clone()
-        print("now pred_score = , ", pred_score.numpy())
         prob = pred_score.sigmoid()
-        print("now prob = , ", prob.numpy())
-        print("now, gt score = ", gt_score.numpy())
         weight = alpha * prob.pow(gamma) * (1 - label) + gt_score * label
-        print("initial w = ", weight.numpy())
-        # print("type of weight:", type(weight[0][0]))
-        print("here i use this function")
-        # 2. 移除 autocast (它是导致 1e-33 垃圾值的元凶)
-        # 3. 确保输入是 float32
         loss_ele = fix_manual_bce_with_logits(pred_score.float(), gt_score.float())
-        print("now, loss = ", loss_ele.numpy())
-        
-        # 4. 加权
         loss_weighted = loss_ele * weight
-        print("------------")
-        print("now, weight = ", weight.numpy())
-        print("now, loss = ", loss_ele.numpy())
-        
-        # 5. 绝对不要用 mean(1)！直接 sum()
-        # 原因：mean(1) 会除以 Anchor 数量，导致 Loss 变成极小值
-        print("weighted loss = ", loss_weighted.sum().numpy())
-        return loss_weighted.sum()
+        return loss_weighted.mean(1).sum()
 
 
 class FocalLoss(nn.Module):
