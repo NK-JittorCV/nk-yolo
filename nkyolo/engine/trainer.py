@@ -89,15 +89,26 @@ class BaseTrainer:
 
     def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
         """
-        Initializes the BaseTrainer class.
+        Initialize the BaseTrainer class.
 
         Args:
-            cfg (str, optional): Path to a configuration file. Defaults to DEFAULT_CFG.
-            overrides (dict, optional): Configuration overrides. Defaults to None.
+            cfg (str, optional): Path to a configuration file.
+            overrides (dict, optional): Configuration overrides.
+            _callbacks (list, optional): List of callback functions.
         """
+        # HUB session handling (placeholder for future implementation)
+        self.hub_session = overrides.pop("session", None) if overrides else None
+        
         self.args = get_cfg(cfg, overrides)
         self.check_resume(overrides)
         self.device = select_device(self.args.device, self.args.batch)
+        
+        # Update device string for consistent logging
+        if "cuda" in str(self.device):
+            self.args.device = os.getenv("CUDA_VISIBLE_DEVICES", str(self.device))
+        else:
+            self.args.device = str(self.device)
+            
         self.validator = None
         self.metrics = None
         self.plots = {}
@@ -242,6 +253,7 @@ class BaseTrainer:
         )
         always_freeze_names = [".dfl"]  # always freeze these layers
         freeze_layer_names = [f"model.{x}." for x in freeze_list] + always_freeze_names
+        self.freeze_layer_names = freeze_layer_names
         for k, v in self.model.named_parameters():
             # v.register_hook(lambda x: jt.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
             if any(x in k for x in freeze_layer_names):
@@ -306,12 +318,7 @@ class BaseTrainer:
 
         # Batch size
         if self.batch_size < 1 and RANK == -1:  # single-GPU only, estimate best batch size
-            self.args.batch = self.batch_size = check_train_batch_size(
-                model=self.model,
-                imgsz=self.args.imgsz,
-                amp=self.amp,
-                batch=self.batch_size,
-            )
+            self.args.batch = self.batch_size = self.auto_batch()
 
         # Dataloaders
         batch_size = self.batch_size // max(world_size, 1)
@@ -378,7 +385,7 @@ class BaseTrainer:
                 warnings.simplefilter("ignore")  # suppress 'Detected lr_scheduler.step() before optimizer.step()'
                 self.scheduler.step()
 
-            self.model.train()
+            self._model_train()
             if RANK != -1:
                 self.train_loader.sampler.set_epoch(epoch)
             pbar = enumerate(self.train_loader)
@@ -464,6 +471,7 @@ class BaseTrainer:
 
                 # Validation
                 if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
+                    self._clear_memory(threshold=0.5)  # prevent VRAM spike
                     self.metrics, self.fitness = self.validate()
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
@@ -486,7 +494,7 @@ class BaseTrainer:
                 self.scheduler.last_epoch = self.epoch  # do not move
                 self.stop |= epoch >= self.epochs  # stop if exceeded epochs
             self.run_callbacks("on_fit_epoch_end")
-            self._clear_memory()
+            self._clear_memory(0.5)  # clear if memory utilization > 50%
 
             # Early Stopping
             if RANK != -1:  # if DDP training
@@ -508,18 +516,53 @@ class BaseTrainer:
         self._clear_memory()
         self.run_callbacks("teardown")
 
-    def _get_memory(self):
-        """Get accelerator memory utilization in GB."""
+    def auto_batch(self, max_num_obj=0):
+        """Calculate optimal batch size based on model and device memory constraints."""
+        return check_train_batch_size(
+            model=self.model,
+            imgsz=self.args.imgsz,
+            amp=self.amp,
+            batch=self.batch_size,
+            max_num_obj=max_num_obj,
+        )  # returns batch size
+
+    def _get_memory(self, fraction=False):
+        """Get accelerator memory utilization in GB or as a fraction of total memory."""
+        memory, total = 0, 0
         if self.device == "mps":
-            memory = jt.mps.driver_allocated_memory()
+            # Jittor doesn't support MPS, fallback to CPU
+            memory = 0
+            if fraction:
+                return __import__("psutil").virtual_memory().percent / 100
         elif self.device == "cpu":
             memory = 0
         else:
-            memory = jt.cuda.memory_reserved()
-        return memory / 1e9
+            try:
+                # Jittor CUDA memory API
+                memory = jt.cuda.memory_allocated()
+                if fraction:
+                    # Jittor doesn't have get_device_properties, use a fallback
+                    total = 8 * 1024**3  # 假设8GB显存，实际应用中可以通过其他方式获取
+            except:
+                memory = 0
+                total = 0
+        return ((memory / total) if total > 0 else 0) if fraction else (memory / 1e9)
 
-    def _clear_memory(self):
-        """Clear accelerator memory on different platforms."""
+    def _model_train(self):
+        """Set model in training mode."""
+        self.model.train()
+        # Freeze BN stat for frozen layers
+        if hasattr(self, 'freeze_layer_names'):
+            for n, m in self.model.named_modules():
+                if any(filter(lambda f: f in n, self.freeze_layer_names)) and isinstance(m, nn.BatchNorm2d):
+                    m.eval()
+
+    def _clear_memory(self, threshold: float = None):
+        """Clear accelerator memory by calling garbage collector and emptying cache."""
+        if threshold:
+            assert 0 <= threshold <= 1, "Threshold must be between 0 and 1."
+            if self._get_memory(fraction=True) <= threshold:
+                return
         gc.collect()
         if self.device == "mps":
             jt.mps.empty_cache()

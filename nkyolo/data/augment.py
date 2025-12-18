@@ -4,7 +4,7 @@
 import math
 import random
 from copy import deepcopy
-from typing import Tuple, Union
+from typing import Tuple, Union, Any
 
 import cv2
 import numpy as np
@@ -439,7 +439,9 @@ class BaseMixTransform:
             >>> indexes = transform.get_indexes()
             >>> print(indexes)  # [3, 18, 7, 2]
         """
-        raise NotImplementedError
+        if len(self.dataset) == 0:
+            raise ValueError("Dataset is empty, cannot get random index.")
+        return random.randint(0, len(self.dataset) - 1)        
 
     def _update_label_text(self, labels):
         """
@@ -540,6 +542,10 @@ class Mosaic(BaseMixTransform):
         self.imgsz = imgsz
         self.border = (-imgsz // 2, -imgsz // 2)  # width, height
         self.n = n
+        if hasattr(self.dataset, 'cache'):
+            self.buffer_enabled = self.dataset.cache != "ram"
+        else :
+            self.buffer_enabled = 0
 
     def get_indexes(self, buffer=True):
         """
@@ -561,7 +567,7 @@ class Mosaic(BaseMixTransform):
             >>> indexes = mosaic.get_indexes()
             >>> print(len(indexes))  # Output: 3
         """
-        if buffer:  # select images from buffer
+        if self.buffer_enabled:  # select images from buffer
             return random.choices(list(self.dataset.buffer), k=self.n - 1)
         else:  # select any images
             return [random.randint(0, len(self.dataset) - 1) for _ in range(self.n - 1)]
@@ -947,6 +953,122 @@ class MixUp(BaseMixTransform):
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
         return labels
 
+class CutMix(BaseMixTransform):
+    """
+    Apply CutMix augmentation to image datasets as described in the paper https://arxiv.org/abs/1905.04899.
+
+    CutMix combines two images by replacing a random rectangular region of one image with the corresponding region from another image,
+    and adjusts the labels proportionally to the area of the mixed region.
+
+    Attributes:
+        dataset (Any): The dataset to which CutMix augmentation will be applied.
+        pre_transform (Callable | None): Optional transform to apply before CutMix.
+        p (float): Probability of applying CutMix augmentation.
+        beta (float): Beta distribution parameter for sampling the mixing ratio.
+        num_areas (int): Number of areas to try to cut and mix.
+
+    Methods:
+        _mix_transform: Apply CutMix augmentation to the input labels.
+        _rand_bbox: Generate random bounding box coordinates for the cut region.
+
+    Examples:
+        >>> from ultralytics.data.augment import CutMix
+        >>> dataset = YourDataset(...)  # Your image dataset
+        >>> cutmix = CutMix(dataset, p=0.5)
+        >>> augmented_labels = cutmix(original_labels)
+    """
+
+    def __init__(self, dataset, pre_transform=None, p: float = 0.0, beta: float = 1.0, num_areas: int = 3) -> None:
+        """
+        Initialize the CutMix augmentation object.
+
+        Args:
+            dataset (Any): The dataset to which CutMix augmentation will be applied.
+            pre_transform (Callable | None): Optional transform to apply before CutMix.
+            p (float): Probability of applying CutMix augmentation.
+            beta (float): Beta distribution parameter for sampling the mixing ratio.
+            num_areas (int): Number of areas to try to cut and mix.
+        """
+        super().__init__(dataset=dataset, pre_transform=pre_transform, p=p)
+        self.beta = beta
+        self.num_areas = num_areas
+
+    def _rand_bbox(self, width: int, height: int) -> tuple[int, int, int, int]:
+        """
+        Generate random bounding box coordinates for the cut region.
+
+        Args:
+            width (int): Width of the image.
+            height (int): Height of the image.
+
+        Returns:
+            (tuple[int]): (x1, y1, x2, y2) coordinates of the bounding box.
+        """
+        # Sample mixing ratio from Beta distribution
+        lam = np.random.beta(self.beta, self.beta)
+
+        cut_ratio = np.sqrt(1.0 - lam)
+        cut_w = int(width * cut_ratio)
+        cut_h = int(height * cut_ratio)
+
+        # Random center
+        cx = np.random.randint(width)
+        cy = np.random.randint(height)
+
+        # Bounding box coordinates
+        x1 = np.clip(cx - cut_w // 2, 0, width)
+        y1 = np.clip(cy - cut_h // 2, 0, height)
+        x2 = np.clip(cx + cut_w // 2, 0, width)
+        y2 = np.clip(cy + cut_h // 2, 0, height)
+
+        return x1, y1, x2, y2
+
+    def _mix_transform(self, labels: dict[str, Any]) -> dict[str, Any]:
+        """
+        Apply CutMix augmentation to the input labels.
+
+        Args:
+            labels (dict[str, Any]): A dictionary containing the original image and label information.
+
+        Returns:
+            (dict[str, Any]): A dictionary containing the mixed image and adjusted labels.
+
+        Examples:
+            >>> cutter = CutMix(dataset)
+            >>> mixed_labels = cutter._mix_transform(labels)
+        """
+        # Get a random second image
+        h, w = labels["img"].shape[:2]
+
+        cut_areas = np.asarray([self._rand_bbox(w, h) for _ in range(self.num_areas)], dtype=np.float32)
+        ioa1 = bbox_ioa(cut_areas, labels["instances"].bboxes)  # (self.num_areas, num_boxes)
+        idx = np.nonzero(ioa1.sum(axis=1) <= 0)[0]
+        if len(idx) == 0:
+            return labels
+
+        labels2 = labels.pop("mix_labels")[0]
+        area = cut_areas[np.random.choice(idx)]  # randomly select one
+        ioa2 = bbox_ioa(area[None], labels2["instances"].bboxes).squeeze(0)
+        indexes2 = np.nonzero(ioa2 >= (0.01 if len(labels["instances"].segments) else 0.1))[0]
+        if len(indexes2) == 0:
+            return labels
+
+        instances2 = labels2["instances"][indexes2]
+        instances2.convert_bbox("xyxy")
+        instances2.denormalize(w, h)
+
+        # Apply CutMix
+        x1, y1, x2, y2 = area.astype(np.int32)
+        labels["img"][y1:y2, x1:x2] = labels2["img"][y1:y2, x1:x2]
+
+        # Restrain instances2 to the random bounding border
+        instances2.add_padding(-x1, -y1)
+        instances2.clip(x2 - x1, y2 - y1)
+        instances2.add_padding(x1, y1)
+
+        labels["cls"] = np.concatenate([labels["cls"], labels2["cls"][indexes2]], axis=0)
+        labels["instances"] = Instances.concatenate([labels["instances"], instances2], axis=0)
+        return labels
 
 class RandomPerspective:
     """
@@ -1074,6 +1196,8 @@ class RandomPerspective:
                 img = cv2.warpPerspective(img, M, dsize=self.size, borderValue=(114, 114, 114))
             else:  # affine
                 img = cv2.warpAffine(img, M[:2], dsize=self.size, borderValue=(114, 114, 114))
+            if img.ndim == 2:
+                img = img[..., None]
         return img, M, s
 
     def apply_bboxes(self, bboxes, M):
@@ -1363,20 +1487,23 @@ class RandomHSV:
             >>> augmented_img = labels["img"]
         """
         img = labels["img"]
+        if img.shape[-1] !=3:
+            return labels
         if self.hgain or self.sgain or self.vgain:
-            r = np.random.uniform(-1, 1, 3) * [self.hgain, self.sgain, self.vgain] + 1  # random gains
-            hue, sat, val = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2HSV))
             dtype = img.dtype  # uint8
 
+            r = np.random.uniform(-1, 1, 3) * [self.hgain, self.sgain, self.vgain]  # random gains
             x = np.arange(0, 256, dtype=r.dtype)
-            lut_hue = ((x * r[0]) % 180).astype(dtype)
-            lut_sat = np.clip(x * r[1], 0, 255).astype(dtype)
-            lut_val = np.clip(x * r[2], 0, 255).astype(dtype)
+            # lut_hue = ((x * (r[0] + 1)) % 180).astype(dtype)   # original hue implementation
+            lut_hue = ((x + r[0] * 180) % 180).astype(dtype)
+            lut_sat = np.clip(x * (r[1] + 1), 0, 255).astype(dtype)
+            lut_val = np.clip(x * (r[2] + 1), 0, 255).astype(dtype)
+            lut_sat[0] = 0  # prevent pure white changing color, introduced in ultralytics 8.3.79
 
+            hue, sat, val = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2HSV))
             im_hsv = cv2.merge((cv2.LUT(hue, lut_hue), cv2.LUT(sat, lut_sat), cv2.LUT(val, lut_val)))
             cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR, dst=img)  # no return needed
         return labels
-
 
 class RandomFlip:
     """
@@ -1457,14 +1584,15 @@ class RandomFlip:
         h = 1 if instances.normalized else h
         w = 1 if instances.normalized else w
 
-        # Flip up-down
+        # WARNING: two separate if and calls to random.random() intentional for reproducibility with older versions
         if self.direction == "vertical" and random.random() < self.p:
             img = np.flipud(img)
             instances.flipud(h)
+            if self.flip_idx is not None and instances.keypoints is not None:
+                instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
         if self.direction == "horizontal" and random.random() < self.p:
             img = np.fliplr(img)
             instances.fliplr(w)
-            # For keypoints
             if self.flip_idx is not None and instances.keypoints is not None:
                 instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
         labels["img"] = np.ascontiguousarray(img)
@@ -1497,7 +1625,7 @@ class LetterBox:
         >>> updated_instances = result["instances"]
     """
 
-    def __init__(self, new_shape=(640, 640), auto=False, scaleFill=False, scaleup=True, center=True, stride=32):
+    def __init__(self, new_shape=(640, 640), auto=False, scaleup=True, center=True, stride=32, padding_value=114, interpolation=cv2.INTER_LINEAR):
         """
         Initialize LetterBox object for resizing and padding images.
 
@@ -1507,7 +1635,6 @@ class LetterBox:
         Args:
             new_shape (Tuple[int, int]): Target size (height, width) for the resized image.
             auto (bool): If True, use minimum rectangle to resize. If False, use new_shape directly.
-            scaleFill (bool): If True, stretch the image to new_shape without padding.
             scaleup (bool): If True, allow scaling up. If False, only scale down.
             center (bool): If True, center the placed image. If False, place image in top-left corner.
             stride (int): Stride of the model (e.g., 32 for YOLOv5).
@@ -1525,10 +1652,11 @@ class LetterBox:
         """
         self.new_shape = new_shape
         self.auto = auto
-        self.scaleFill = scaleFill
         self.scaleup = scaleup
         self.stride = stride
         self.center = center  # Put the image in the middle or top-left
+        self.padding_value = padding_value
+        self.interpolation = interpolation
 
     def __call__(self, labels=None, image=None):
         """
@@ -1582,16 +1710,26 @@ class LetterBox:
 
         if shape[::-1] != new_unpad:  # resize
             img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+            if img.ndim == 2:
+                img = img[..., None]
+
         top, bottom = int(round(dh - 0.1)) if self.center else 0, int(round(dh + 0.1))
         left, right = int(round(dw - 0.1)) if self.center else 0, int(round(dw + 0.1))
-        img = cv2.copyMakeBorder(
-            img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
-        )  # add border
+        h, w, c = img.shape
+        if c == 3:
+            img = cv2.copyMakeBorder(
+                img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(self.padding_value,) * 3
+            )
+        else:  # multispectral
+            pad_img = np.full((h + top + bottom, w + left + right, c), fill_value=self.padding_value, dtype=img.dtype)
+            pad_img[top : top + h, left : left + w] = img
+            img = pad_img
+
         if labels.get("ratio_pad"):
             labels["ratio_pad"] = (labels["ratio_pad"], (left, top))  # for evaluation
 
         if len(labels):
-            labels = self._update_labels(labels, ratio, dw, dh)
+            labels = self._update_labels(labels, ratio, left, top)
             labels["img"] = img
             labels["resized_shape"] = new_shape
             return labels
@@ -1698,6 +1836,8 @@ class CopyPaste(BaseMixTransform):
     def _transform(self, labels1, labels2={}):
         """Applies Copy-Paste augmentation to combine objects from another image into the current image."""
         im = labels1["img"]
+        if "mosaic_border" not in labels1:
+            im = im.copy()  # avoid modifying original non-mosaic image
         cls = labels1["cls"]
         h, w = im.shape[:2]
         instances = labels1.pop("instances")
@@ -1720,6 +1860,8 @@ class CopyPaste(BaseMixTransform):
             cv2.drawContours(im_new, instances2.segments[[j]].astype(np.int32), -1, (1, 1, 1), cv2.FILLED)
 
         result = labels2.get("img", cv2.flip(im, 1))  # augment segments
+        if result.ndim == 2:  # cv2.flip would eliminate the last dimension for grayscale images
+            result = result[..., None]
         i = im_new.astype(bool)
         im[i] = result[i]
 
@@ -1857,6 +1999,9 @@ class Albumentations:
                 if self.contains_spatial
                 else A.Compose(T)
             )
+            if hasattr(self.transform, "set_random_seed"):
+                # Required for deterministic transforms in albumentations>=1.4.21
+                self.transform.set_random_seed(jittor.random.get_seed())
             LOGGER.info(prefix + ", ".join(f"{x}".replace("always_apply=False, ", "") for x in T if x.p))
         except ImportError:  # package not installed, skip
             pass
@@ -1897,10 +2042,13 @@ class Albumentations:
         if self.transform is None or random.random() > self.p:
             return labels
 
+        im = labels["img"]
+        if im.shape[2] != 3:  # Only apply Albumentation on 3-channel images
+            return labels
+
         if self.contains_spatial:
             cls = labels["cls"]
             if len(cls):
-                im = labels["img"]
                 labels["instances"].convert_bbox("xywh")
                 labels["instances"].normalize(*im.shape[:2][::-1])
                 bboxes = labels["instances"].bboxes
@@ -2049,10 +2197,12 @@ class Format:
                 )
             labels["masks"] = masks
         labels["img"] = self._format_img(img)
-        labels["cls"] = jt.array(cls) if nl else jt.zeros(nl)
+        labels["cls"] = jt.array(cls) if nl else jt.zeros((nl, 1))
         labels["bboxes"] = jt.array(instances.bboxes) if nl else jt.zeros((nl, 4))
         if self.return_keypoint:
-            labels["keypoints"] = jt.array(instances.keypoints)
+            labels["keypoints"] = (
+                jt.empty((0, 3)) if instances.keypoints is None else jt.array(instances.keypoints)
+            )
             if self.normalize:
                 labels["keypoints"][..., 0] /= w
                 labels["keypoints"][..., 1] /= h
@@ -2096,8 +2246,8 @@ class Format:
         if len(img.shape) < 3:
             img = np.expand_dims(img, -1)
         img = img.transpose(2, 0, 1)
-        img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr else img)
-        img = jt.float32(img)
+        img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr and img.shape[0] == 3 else img)
+        img = jt.array(img)
         return img
 
     def _format_segments(self, instances, cls, w, h):
@@ -2132,6 +2282,103 @@ class Format:
 
         return masks, instances, cls
 
+class LoadVisualPrompt:
+    """Create visual prompts from bounding boxes or masks for model input."""
+
+    def __init__(self, scale_factor: float = 1 / 8) -> None:
+        """
+        Initialize the LoadVisualPrompt with a scale factor.
+
+        Args:
+            scale_factor (float): Factor to scale the input image dimensions.
+        """
+        self.scale_factor = scale_factor
+
+    def make_mask(self, boxes: jt.Var, h: int, w: int) -> jt.Var:
+        """
+        Create binary masks from bounding boxes.
+
+        Args:
+            boxes (jt.Var): Bounding boxes in xyxy format, shape: (N, 4).
+            h (int): Height of the mask.
+            w (int): Width of the mask.
+
+        Returns:
+            (jt.Var): Binary masks with shape (N, h, w).
+        """
+        x1, y1, x2, y2 = jt.chunk(boxes[:, :, None], 4, 1)  # x1 shape(n,1,1)
+        r = jt.arange(w)[None, None, :]  # rows shape(1,1,w)
+        c = jt.arange(h)[None, :, None]  # cols shape(1,h,1)
+
+        return (r >= x1) * (r < x2) * (c >= y1) * (c < y2)
+
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        """
+        Process labels to create visual prompts.
+
+        Args:
+            labels (dict[str, Any]): Dictionary containing image data and annotations.
+
+        Returns:
+            (dict[str, Any]): Updated labels with visual prompts added.
+        """
+        imgsz = labels["img"].shape[1:]
+        bboxes, masks = None, None
+        if "bboxes" in labels:
+            bboxes = labels["bboxes"]
+            bboxes = xywh2xyxy(bboxes) * jt.array(imgsz)[[1, 0, 1, 0]]  # denormalize boxes
+
+        cls = labels["cls"].squeeze(-1).to(jt.int32)
+        visuals = self.get_visuals(cls, imgsz, bboxes=bboxes, masks=masks)
+        labels["visuals"] = visuals
+        return labels
+
+    def get_visuals(
+        self,
+        category: int | np.ndarray | jt.Var,
+        shape: tuple[int, int],
+        bboxes: np.ndarray | jt.Var = None,
+        masks: np.ndarray | jt.Var = None,
+    ) -> jt.Var:
+        """
+        Generate visual masks based on bounding boxes or masks.
+
+        Args:
+            category (int | np.ndarray | jt.Var): The category labels for the objects.
+            shape (tuple[int, int]): The shape of the image (height, width).
+            bboxes (np.ndarray | jt.Var, optional): Bounding boxes for the objects, xyxy format.
+            masks (np.ndarray | jt.Var, optional): Masks for the objects.
+
+        Returns:
+            (jt.Var): A tensor containing the visual masks for each category.
+
+        Raises:
+            ValueError: If neither bboxes nor masks are provided.
+        """
+        masksz = (int(shape[0] * self.scale_factor), int(shape[1] * self.scale_factor))
+        if bboxes is not None:
+            if isinstance(bboxes, np.ndarray):
+                bboxes = jt.array(bboxes)
+            bboxes *= self.scale_factor
+            masks = self.make_mask(bboxes, *masksz).float()
+        elif masks is not None:
+            if isinstance(masks, np.ndarray):
+                masks = jt.array(masks)  # (N, H, W)
+            masks = F.interpolate(masks.unsqueeze(1), masksz, mode="nearest").squeeze(1).float()
+        else:
+            raise ValueError("LoadVisualPrompt must have bboxes or masks in the label")
+        if not isinstance(category, jt.Var):
+            category = jt.Var(category, dtype=jt.int32)
+        cls_unique, inverse_indices = jt.unique(category, return_inverse=True)
+        # NOTE: `cls` indices from RandomLoadText should be continuous.
+        # if len(cls_unique):
+        #     assert len(cls_unique) == cls_unique[-1] + 1, (
+        #         f"Expected a continuous range of class indices, but got {cls_unique}"
+        #     )
+        visuals = jt.zeros(cls_unique.shape[0], *masksz)
+        for idx, mask in zip(inverse_indices, masks):
+            visuals[idx] = jt.logical_or(visuals[idx], mask)
+        return visuals
 
 class RandomLoadText:
     """
@@ -2239,7 +2486,7 @@ class RandomLoadText:
         neg_labels = random.sample(neg_labels, k=neg_samples)
 
         sampled_labels = pos_labels + neg_labels
-        random.shuffle(sampled_labels)
+        # random.shuffle(sampled_labels)
 
         label2ids = {label: i for i, label in enumerate(sampled_labels)}
         valid_idx = np.zeros(len(labels["instances"]), dtype=bool)
@@ -2265,7 +2512,8 @@ class RandomLoadText:
             num_padding = self.max_samples - valid_labels
             if num_padding > 0:
                 texts += [self.padding_value] * num_padding
-
+        
+        assert len(texts) == self.max_samples
         labels["texts"] = texts
         return labels
 
@@ -2318,9 +2566,9 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
     flip_idx = dataset.data.get("flip_idx", [])  # for keypoints augmentation
     if dataset.use_keypoints:
         kpt_shape = dataset.data.get("kpt_shape", None)
-        if len(flip_idx) == 0 and hyp.fliplr > 0.0:
-            hyp.fliplr = 0.0
-            LOGGER.warning("WARNING ⚠️ No 'flip_idx' array defined in data.yaml, setting augmentation 'fliplr=0.0'")
+        if len(flip_idx) == 0 and (hyp.fliplr > 0.0 or hyp.flipud > 0.0):
+            hyp.fliplr = hyp.flipud = 0.0  # both fliplr and flipud require flip_idx
+            LOGGER.warning("WARNING ⚠️ No 'flip_idx' array defined in data.yaml, disabling 'fliplr' and 'flipud' augmentations.")
         elif flip_idx and (len(flip_idx) != kpt_shape[0]):
             raise ValueError(f"data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}")
 
@@ -2328,161 +2576,13 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         [
             pre_transform,
             MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
+            CutMix(dataset, pre_transform=pre_transform, p=hyp.cutmix),
             Albumentations(p=1.0),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-            RandomFlip(direction="vertical", p=hyp.flipud),
+            RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
         ]
     )  # transforms
-
-
-# Classification augmentations -----------------------------------------------------------------------------------------
-def classify_transforms(
-    size=224,
-    mean=DEFAULT_MEAN,
-    std=DEFAULT_STD,
-    interpolation="BILINEAR",
-    crop_fraction: float = DEFAULT_CROP_FRACTION,
-):
-    """
-    Creates a composition of image transforms for classification tasks.
-
-    This function generates a sequence of torchvision transforms suitable for preprocessing images
-    for classification models during evaluation or inference. The transforms include resizing,
-    center cropping, conversion to tensor, and normalization.
-
-    Args:
-        size (int | tuple): The target size for the transformed image. If an int, it defines the shortest edge. If a
-            tuple, it defines (height, width).
-        mean (tuple): Mean values for each RGB channel used in normalization.
-        std (tuple): Standard deviation values for each RGB channel used in normalization.
-        interpolation (str): Interpolation method of either 'NEAREST', 'BILINEAR' or 'BICUBIC'.
-        crop_fraction (float): Fraction of the image to be cropped.
-
-    Returns:
-        (torchvision.transforms.Compose): A composition of torchvision transforms.
-
-    Examples:
-        >>> transforms = classify_transforms(size=224)
-        >>> img = Image.open("path/to/image.jpg")
-        >>> transformed_img = transforms(img)
-    """
-    import jittor.transform as T  # scope for faster 'import nkyolo'
-
-    if isinstance(size, (tuple, list)):
-        assert len(size) == 2, f"'size' tuples must be length 2, not length {len(size)}"
-        scale_size = tuple(math.floor(x / crop_fraction) for x in size)
-    else:
-        scale_size = math.floor(size / crop_fraction)
-        scale_size = (scale_size, scale_size)
-
-    # Aspect ratio is preserved, crops center within image, no borders are added, image is lost
-    if scale_size[0] == scale_size[1]:
-        # Simple case, use torchvision built-in Resize with the shortest edge mode (scalar size arg)
-        tfl = [T.Resize(scale_size[0], interpolation=getattr(T.InterpolationMode, interpolation))]
-    else:
-        # Resize the shortest edge to matching target dim for non-square target
-        tfl = [T.Resize(scale_size)]
-    tfl.extend(
-        [
-            T.CenterCrop(size),
-            T.ToTensor(),
-            T.ImageNormalize(mean=jt.array(mean), std=jt.array(std)),
-        ]
-    )
-    return T.Compose(tfl)
-
-
-# NOTE: keep this class for backward compatibility
-class ClassifyLetterBox:
-    """
-    A class for resizing and padding images for classification tasks.
-
-    This class is designed to be part of a transformation pipeline, e.g., T.Compose([LetterBox(size), ToTensor()]).
-    It resizes and pads images to a specified size while maintaining the original aspect ratio.
-
-    Attributes:
-        h (int): Target height of the image.
-        w (int): Target width of the image.
-        auto (bool): If True, automatically calculates the short side using stride.
-        stride (int): The stride value, used when 'auto' is True.
-
-    Methods:
-        __call__: Applies the letterbox transformation to an input image.
-
-    Examples:
-        >>> transform = ClassifyLetterBox(size=(640, 640), auto=False, stride=32)
-        >>> img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-        >>> result = transform(img)
-        >>> print(result.shape)
-        (640, 640, 3)
-    """
-
-    def __init__(self, size=(640, 640), auto=False, stride=32):
-        """
-        Initializes the ClassifyLetterBox object for image preprocessing.
-
-        This class is designed to be part of a transformation pipeline for image classification tasks. It resizes and
-        pads images to a specified size while maintaining the original aspect ratio.
-
-        Args:
-            size (int | Tuple[int, int]): Target size for the letterboxed image. If an int, a square image of
-                (size, size) is created. If a tuple, it should be (height, width).
-            auto (bool): If True, automatically calculates the short side based on stride. Default is False.
-            stride (int): The stride value, used when 'auto' is True. Default is 32.
-
-        Attributes:
-            h (int): Target height of the letterboxed image.
-            w (int): Target width of the letterboxed image.
-            auto (bool): Flag indicating whether to automatically calculate short side.
-            stride (int): Stride value for automatic short side calculation.
-
-        Examples:
-            >>> transform = ClassifyLetterBox(size=224)
-            >>> img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-            >>> result = transform(img)
-            >>> print(result.shape)
-            (224, 224, 3)
-        """
-        super().__init__()
-        self.h, self.w = (size, size) if isinstance(size, int) else size
-        self.auto = auto  # pass max size integer, automatically solve for short side using stride
-        self.stride = stride  # used with auto
-
-    def __call__(self, im):
-        """
-        Resizes and pads an image using the letterbox method.
-
-        This method resizes the input image to fit within the specified dimensions while maintaining its aspect ratio,
-        then pads the resized image to match the target size.
-
-        Args:
-            im (numpy.ndarray): Input image as a numpy array with shape (H, W, C).
-
-        Returns:
-            (numpy.ndarray): Resized and padded image as a numpy array with shape (hs, ws, 3), where hs and ws are
-                the target height and width respectively.
-
-        Examples:
-            >>> letterbox = ClassifyLetterBox(size=(640, 640))
-            >>> image = np.random.randint(0, 255, (720, 1280, 3), dtype=np.uint8)
-            >>> resized_image = letterbox(image)
-            >>> print(resized_image.shape)
-            (640, 640, 3)
-        """
-        imh, imw = im.shape[:2]
-        r = min(self.h / imh, self.w / imw)  # ratio of new/old dimensions
-        h, w = round(imh * r), round(imw * r)  # resized image dimensions
-
-        # Calculate padding dimensions
-        hs, ws = (math.ceil(x / self.stride) * self.stride for x in (h, w)) if self.auto else (self.h, self.w)
-        top, left = round((hs - h) / 2 - 0.1), round((ws - w) / 2 - 0.1)
-
-        # Create padded image
-        im_out = np.full((hs, ws, 3), 114, dtype=im.dtype)
-        im_out[top : top + h, left : left + w] = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-        return im_out
-
 
 # NOTE: keep this class for backward compatibility
 class CenterCrop:
@@ -2562,7 +2662,7 @@ class CenterCrop:
 # NOTE: keep this class for backward compatibility
 class ToTensor:
     """
-    Converts an image from a numpy array to a PyTorch tensor.
+    Converts an image from a numpy array to a jittor Var.
 
     This class is designed to be part of a transformation pipeline, e.g., T.Compose([LetterBox(size), ToTensor()]).
 
@@ -2586,10 +2686,10 @@ class ToTensor:
 
     def __init__(self, half=False):
         """
-        Initializes the ToTensor object for converting images to PyTorch tensors.
+        Initializes the ToTensor object for converting images to jittor Var.
 
         This class is designed to be used as part of a transformation pipeline for image preprocessing in the
-        NK-YOLO framework. It converts numpy arrays or PIL Images to PyTorch tensors, with an option
+        NK-YOLO framework. It converts numpy arrays or PIL Images to jittor Var, with an option
         for half-precision (float16) conversion.
 
         Args:
@@ -2607,9 +2707,9 @@ class ToTensor:
 
     def __call__(self, im):
         """
-        Transforms an image from a numpy array to a PyTorch tensor.
+        Transforms an image from a numpy array to a jittor Var.
 
-        This method converts the input image from a numpy array to a PyTorch tensor, applying optional
+        This method converts the input image from a numpy array to a jittor Var, applying optional
         half-precision conversion and normalization. The image is transposed from HWC to CHW format and
         the color channels are reversed from BGR to RGB.
 
@@ -2617,7 +2717,7 @@ class ToTensor:
             im (numpy.ndarray): Input image as a numpy array with shape (H, W, C) in BGR order.
 
         Returns:
-            (torch.Tensor): The transformed image as a PyTorch tensor in float32 or float16, normalized
+            (jittor.Var): The transformed image as a PyTorch tensor in float32 or float16, normalized
                 to [0, 1] with shape (C, H, W) in RGB order.
 
         Examples:
@@ -2628,6 +2728,6 @@ class ToTensor:
             torch.Size([3, 640, 640]) torch.float16
         """
         im = np.ascontiguousarray(im.transpose((2, 0, 1))[::-1])  # HWC to CHW -> BGR to RGB -> contiguous
-        im = jt.array(im)  # to torch
+        im = jt.array(im)  # to jittor
         im /= 255.0  # 0-255 to 0.0-1.0
         return im
