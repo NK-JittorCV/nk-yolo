@@ -139,7 +139,12 @@ class KeypointLoss(nn.Module):
         d = (pred_kpts[..., 0] - gt_kpts[..., 0]).pow(2) + (pred_kpts[..., 1] - gt_kpts[..., 1]).pow(2)
         kpt_loss_factor = kpt_mask.shape[1] / (jt.sum(kpt_mask != 0, dim=1) + 1e-9)
         # e = d / (2 * (area * self.sigmas) ** 2 + 1e-9)  # from formula
-        e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)  # from cocoeval
+
+        sigmas_sq = (2 * self.sigmas).pow(2).view(1, -1)
+        area_val = (area + 1e-9).view(-1, 1)
+
+        # e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)  # from cocoeval
+        e = d / (sigmas_sq * area_val * 2)
         return (kpt_loss_factor.view(-1, 1) * ((1 - jt.exp(-e)) * kpt_mask)).mean()
 
 
@@ -158,6 +163,7 @@ class v8DetectionLoss:
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss()
+        # self.bce = nn.BCEWithLogitsLoss(reduction='none')
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -277,11 +283,14 @@ class v8DetectionLoss:
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        target_scores_sum = jt.maximum(target_scores.sum(), 1.0)
+        print("target_scores_sum:", target_scores_sum)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # loss_cls_allqwq = fix_manual_bce_with_logits(pred_scores, target_scores.to(dtype))
+        loss[1] = fix_manual_bce_with_logits(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
 
         # Bbox loss
         if (fg_mask > 0).sum():
@@ -294,7 +303,8 @@ class v8DetectionLoss:
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
 
-        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
+        # return loss.sum(), loss.detach()
 
 
 class v8SegmentationLoss(v8DetectionLoss):
