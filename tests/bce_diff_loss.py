@@ -3,7 +3,6 @@ import torch
 import numpy as np
 
 def manual_bce_jt(pred, label):
-    # 手动实现 Element-wise BCE
     return jt.maximum(pred, 0.0) - pred * label + jt.log(1.0 + jt.exp(-jt.abs(pred)))
 
 def test_bce_behavior():
@@ -13,22 +12,18 @@ def test_bce_behavior():
     pred_np = np.random.randn(B, C).astype(np.float32)
     label_np = np.random.rand(B, C).astype(np.float32) # Soft labels
 
-    # 1. PyTorch (reduction='none') -> Sum
     pt_pred = torch.from_numpy(pred_np)
     pt_label = torch.from_numpy(label_np)
     pt_bce = torch.nn.BCEWithLogitsLoss(reduction='none')
     pt_loss = pt_bce(pt_pred, pt_label).sum()
     print(f"PyTorch (Sum): {pt_loss.item():.4f}")
 
-    # 2. Jittor (self.bce 默认行为)
     jt_pred = jt.array(pred_np)
     jt_label = jt.array(label_np)
-    jt_bce_layer = jt.nn.BCEWithLogitsLoss() # 默认 reduction='mean'
+    jt_bce_layer = jt.nn.BCEWithLogitsLoss() 
     jt_loss_default = jt_bce_layer(jt_pred, jt_label).sum()
-    # 注意：这里虽然调用了 sum()，但 jt_bce_layer 内部已经做了一次 mean，所以是对一个标量求和
     print(f"Jittor (Default Class): {jt_loss_default.item():.4f} <--- 错误根源 (太小)")
 
-    # 3. Jittor (手动 Element-wise)
     jt_loss_manual = manual_bce_jt(jt_pred, jt_label).sum()
     print(f"Jittor (Manual Fix):    {jt_loss_manual.item():.4f} <--- 期望值")
 

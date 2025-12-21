@@ -108,7 +108,7 @@ def mock_pose_model(is_pt, nc=80, reg_max=16, kpt_shape=(17,3)):
 # v8SegmentationLoss
 # =========================
 def test_v8_segmentation_loss():
-    import traceback  # 新增引用
+    import traceback 
     set_seed()
     name = "v8SegmentationLoss"
 
@@ -176,7 +176,6 @@ def test_v8_segmentation_loss():
             print(f"\n--- Seg Try {i} ---")
             print("[NK preds]\n" + _describe_preds(candidates_nk[i]))
             
-            # 运行测试
             nk_loss(candidates_nk[i], batch_nk)
             print("  >>> Jittor Loss Forward Success")
             
@@ -205,7 +204,7 @@ def test_v8_pose_loss():
     nk_loss = Nkv8PoseLoss(model_nk)
     pt_loss = Ptv8PoseLoss(model_pt)
 
-    # monkeypatch：跳过 NK 内部复杂 kpt loss
+
     def _safe_kpt(*args, **kwargs):
         return jt.float32(0.0), jt.float32(0.0)
     nk_loss.calculate_keypoints_loss = _safe_kpt

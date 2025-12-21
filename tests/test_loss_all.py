@@ -183,9 +183,6 @@ def compare_tensor(name, a_nk, a_pt, atol=1e-5, rtol=5e-5, verbose=False):
     return passed
 
 def _to_total_loss(x):
-    """
-    统一将 Jittor/PyTorch 的返回值转换为标量求和，以便比较 Total Loss 数值。
-    """
     if hasattr(x, "numpy"): 
         if x.ndim > 0: return x.sum()
         return x
@@ -194,23 +191,6 @@ def _to_total_loss(x):
         return x
     return x
 
-# def _to_total_loss(x):
-#     """
-#     Align scalar-vs-vector returns:
-#       - if tensor/var shape (3,), sum() -> scalar total
-#       - else return as-is
-#     """
-#     if isinstance(x, torch.Tensor):
-#         if x.ndim == 1 and x.numel() == 3:
-#             return x.sum()
-#         return x
-#     if hasattr(x, "shape"):
-#         try:
-#             if len(x.shape) == 1 and int(x.numel()) == 3:
-#                 return x.sum()
-#         except Exception:
-#             pass
-#     return x
 
 
 def _skip(name, reason: str):
@@ -625,12 +605,10 @@ def test_v8_segmentation_loss():
     if Ptv8SegLoss is None or Nkv8SegLoss is None:
         return _skip("v8SegmentationLoss", "对应类未找到（PT或NK）")
 
-    # 配置参数
     nc, reg_max = 80, 16
     nm, npr = 32, 32
     stride = (8, 16, 32)
 
-    # 初始化模型
     model_jt = _mock_seg_model(is_pt=False, nc=nc, reg_max=reg_max, nm=nm, npr=npr, stride=stride)
     model_pt = _mock_seg_model(is_pt=True,  nc=nc, reg_max=reg_max, nm=nm, npr=npr, stride=stride)
 
@@ -640,7 +618,6 @@ def test_v8_segmentation_loss():
     if nk_loss is None: return _fail("v8SegmentationLoss", f"初始化失败(NK): {err_nk}")
     if pt_loss is None: return _fail("v8SegmentationLoss", f"初始化失败(PT): {err_pt}")
 
-    # 构造数据
     b = 2
     ch_det = nc + reg_max * 4
     feats_np = [
@@ -680,11 +657,8 @@ def test_v8_segmentation_loss():
             loss_nk, items_nk = nk_loss(preds_nk_candidates[i], batch_jt)
             loss_pt, items_pt = pt_loss(preds_pt_candidates[i], batch_pt)
             
-            # 1. 比较总 Loss (由于使用了 sum(), 值很大，使用相对误差比较)
-            # 阈值设为 1e-4 (0.01%)
             ok_total = compare_loss("Seg_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=10.0) 
             
-            # 2. 比较分项 Loss
             items_nk_np = items_nk.detach().numpy()
             items_pt_np = items_pt.detach().cpu().numpy()
             
@@ -693,7 +667,6 @@ def test_v8_segmentation_loss():
             print(f"  Items PT: {items_pt_np}")
             print(f"  Items Diff: {diff}")
             
-            # 使用相对误差判断: Diff / (Base + epsilon)
             rel_diff = diff / (np.abs(items_pt_np) + 1e-9)
             print(f"  Max Rel Diff: {np.max(rel_diff):.8f}")
 
@@ -770,10 +743,8 @@ def test_v8_pose_loss():
             loss_nk, items_nk = nk_loss(preds_nk_candidates[i], batch_jt)
             loss_pt, items_pt = pt_loss(preds_pt_candidates[i], batch_pt)
 
-            # 1. 比较总 Loss (放宽阈值以适应 Sum 的量级)
             ok_total = compare_loss("Pose_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=5.0)
             
-            # 2. 比较 Items
             items_nk_np = items_nk.detach().numpy()
             items_pt_np = items_pt.detach().cpu().numpy()
             diff = np.abs(items_nk_np - items_pt_np)
@@ -782,7 +753,6 @@ def test_v8_pose_loss():
             print(f"  Items PT: {items_pt_np}")
             print(f"  Items Diff: {diff}")
             
-            # 使用相对误差判断
             rel_diff = diff / (np.abs(items_pt_np) + 1e-9)
             print(f"  Max Rel Diff: {np.max(rel_diff):.8f}")
             
@@ -1031,29 +1001,21 @@ def test_v8_obb_loss_aligned():
 
     nc, reg_max = 80, 16
     stride = (8, 16, 32)
-
-    # 1. 初始化模型
     model_jt = _mock_obb_model(is_pt=False, nc=nc, reg_max=reg_max, stride=stride)
     model_pt = _mock_obb_model(is_pt=True,  nc=nc, reg_max=reg_max, stride=stride)
 
     nk_loss, _ = _try_instantiate(Nkv8OBBLoss, model_jt)
     pt_loss, _ = _try_instantiate(Ptv8OBBLoss, model_pt)
-
-    # =========================================================
-    # 2. Mock Assigner (强制正样本一致)
-    # =========================================================
+    
     def mock_assigner_forward(pred_scores, pred_bboxes, anchor_points, gt_labels, gt_bboxes, mask_gt):
         bs, n_anchors = pred_scores.shape[0], pred_scores.shape[1]
         
-        # 构造 target_bboxes (复制 GT 或者 pred)
         target_bboxes = jt.zeros_like(pred_bboxes)
-        target_bboxes[:, 10, :] = 50.0  # 随便给点值
+        target_bboxes[:, 10, :] = 50.0  
         
-        # 构造 target_scores (One-hot)
         target_scores = jt.zeros_like(pred_scores)
-        target_scores[:, 10, 1] = 1.0   # 第1类是正样本
+        target_scores[:, 10, 1] = 1.0   
         
-        # 构造 fg_mask
         fg_mask = jt.zeros((bs, n_anchors), dtype=bool) 
         fg_mask[:, 10] = True
         
@@ -1076,14 +1038,10 @@ def test_v8_obb_loss_aligned():
         return None, target_bboxes, target_scores, fg_mask, None
         
     pt_loss.assigner = pt_mock_assigner_forward
-
-    # =========================================================
-    # 3. 构造输入数据 (已修复)
-    # =========================================================
+    
     b = 2
     ch_det = nc + reg_max * 4
     
-    # ✅ 修复：正确构造金字塔特征图
     feats_np = [
         np.random.randn(b, ch_det, 80, 80).astype(np.float32),
         np.random.randn(b, ch_det, 40, 40).astype(np.float32),
@@ -1097,8 +1055,7 @@ def test_v8_obb_loss_aligned():
     batch_jt = {"batch_idx": jt.array(batch_idx).int32(), "cls": jt.array(cls).int32(), "bboxes": jt.array(obb).float32()}
     batch_pt = {"batch_idx": torch.from_numpy(batch_idx).long(), "cls": torch.from_numpy(cls).long(), "bboxes": torch.from_numpy(obb).float()}
 
-    # OBB 需要 pred_angle，形状必须匹配 sum(H*W)
-    total_anchors = 80*80 + 40*40 + 20*20 # 8400
+    total_anchors = 80*80 + 40*40 + 20*20 
     pred_angle_np = np.random.randn(b, 1, total_anchors).astype(np.float32)
 
     preds_nk = ([jt.array(f) for f in feats_np], jt.array(pred_angle_np))
@@ -1108,7 +1065,6 @@ def test_v8_obb_loss_aligned():
         loss_nk, items_nk = nk_loss(preds_nk, batch_jt)
         loss_pt, items_pt = pt_loss(preds_pt, batch_pt)
 
-        # 4. 验证
         ok_total = compare_loss("OBB_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=5.0)
         
         items_nk_np = items_nk.detach().numpy()
@@ -1118,13 +1074,8 @@ def test_v8_obb_loss_aligned():
         print(f"  Items NK: {items_nk_np}")
         print(f"  Items PT: {items_pt_np}")
         print(f"  Diff:     {diff}")
-        
-        # OBB IoU 误差较大，放宽阈值
-        
         rel_diff = diff / (np.abs(items_pt_np) + 1e-9)
         print(f"  Max Rel Diff: {np.max(rel_diff):.8f}")
-
-        # 允许 0.01% 的相对误差，或者 Cls Loss 允许更大的绝对误差
         if np.max(rel_diff) > 1e-4:
              print("  ✗ Items Loss 差异较大 (Rel Diff > 0.01%)")
              return False
