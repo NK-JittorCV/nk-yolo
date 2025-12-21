@@ -153,7 +153,7 @@ class v8DetectionLoss:
 
     def __init__(self, model, tal_topk=10):  # model must be de-paralleled
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
-        params = model.parameters()  # parameters() 返回列表
+        params = model.parameters()  
         if params:
             device = "cuda" if jt.flags.use_cuda else "cpu"
         else:
@@ -190,36 +190,29 @@ class v8DetectionLoss:
             counts = counts.to(dtype=jt.int32)
             max_count = jt.max(counts).item()
             
-            # 构建每个batch的数据列表
             batch_data = []
             for j in range(batch_size):
                 matches = i == j
                 n = matches.sum().item()
                 if n > 0:
-                    # 使用 where() 方法获取索引以兼容 Jittor
                     if hasattr(matches, 'where'):
                         indices = matches.where()[0]
-                        selected_rows = targets[indices]  # 先选择行
-                        selected = selected_rows[:, 1:]  # 再去掉第一列
+                        selected_rows = targets[indices]  
+                        selected = selected_rows[:, 1:] 
                     else:
                         mask_indices = jt.nonzero(matches).squeeze()
                         selected_rows = targets[mask_indices]
                         selected = selected_rows[:, 1:]
                     
-                    # 确保形状正确
                     if len(selected.shape) == 1:
-                        # 如果只有一行，需要添加维度
                         selected = selected.unsqueeze(0)
                     
-                    # 获取实际行数
                     actual_n = selected.shape[0]
                     
-                    # 填充到max_count长度
                     if actual_n < max_count:
                         padding = jt.zeros((max_count - actual_n, ne - 1), dtype=jt.float32)
                         selected = jt.concat([selected, padding], dim=0)
                     elif actual_n > max_count:
-                        # 如果超过，截断（不应该发生，但为了安全）
                         selected = selected[:max_count]
                 else:
                     selected = jt.zeros((max_count, ne - 1), dtype=jt.float32)
@@ -276,7 +269,7 @@ class v8DetectionLoss:
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
-            (pred_bboxes.detach() * stride_tensor).to(dtype),   
+            (pred_bboxes.detach() * stride_tensor).cast(dtype),   
             anchor_points * stride_tensor,
             gt_labels,
             gt_bboxes,
@@ -284,13 +277,13 @@ class v8DetectionLoss:
         )
 
         target_scores_sum = jt.maximum(target_scores.sum(), 1.0)
-        print("target_scores_sum:", target_scores_sum)
+        # print("target_scores_sum:", target_scores_sum)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         # loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
         # loss_cls_allqwq = fix_manual_bce_with_logits(pred_scores, target_scores.to(dtype))
-        loss[1] = fix_manual_bce_with_logits(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
+        loss[1] = fix_manual_bce_with_logits(pred_scores, target_scores.cast(dtype)).sum() / target_scores_sum
 
         # Bbox loss
         if (fg_mask > 0).sum():
@@ -313,7 +306,8 @@ class v8SegmentationLoss(v8DetectionLoss):
     def __init__(self, model):  # model must be de-paralleled
         """Initializes the v8SegmentationLoss class, taking a de-paralleled model as argument."""
         super().__init__(model)
-        self.overlap = model.args.overlap_mask
+        # self.overlap = model.args.overlap_mask
+        self.overlap = bool(getattr(model.args, "overlap_mask", False))
 
     def __call__(self, preds, batch):
         """Calculate and return the loss for the YOLO model."""
@@ -330,7 +324,8 @@ class v8SegmentationLoss(v8DetectionLoss):
         pred_masks = pred_masks.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
-        imgsz = jt.Var(feats[0].shape[2:], dtype=dtype) * self.stride[0]  # image size (h,w)
+        # imgsz = jt.Var(feats[0].shape[2:], dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = jt.array(list(feats[0].shape[2:]), dtype=dtype) * self.stride[0]
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
@@ -355,18 +350,21 @@ class v8SegmentationLoss(v8DetectionLoss):
 
         _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
             pred_scores.detach().sigmoid(),
-            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            (pred_bboxes.detach() * stride_tensor).cast(gt_bboxes.dtype),
             anchor_points * stride_tensor,
             gt_labels,
             gt_bboxes,
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        # target_scores_sum = max(target_scores.sum(), 1)
+        target_scores_sum = jt.maximum(target_scores.sum(), 1.0)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[2] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # loss[2] = self.bce(pred_scores, target_scores.cast(dtype)).sum() / target_scores_sum  # BCE
+        _loss_bce = jt.maximum(pred_scores, 0.0) - pred_scores * target_scores.cast(dtype) + jt.log(1.0 + jt.exp(-jt.abs(pred_scores)))
+        loss[2] = _loss_bce.sum() / target_scores_sum
 
         if fg_mask.sum():
             # Bbox loss
@@ -397,7 +395,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         loss[2] *= self.hyp.cls  # cls gain
         loss[3] *= self.hyp.dfl  # dfl gain
 
-        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
     @staticmethod
     def single_mask_loss(
@@ -420,10 +418,22 @@ class v8SegmentationLoss(v8DetectionLoss):
             The function uses the equation pred_mask = torch.einsum('in,nhw->ihw', pred, proto) to produce the
             predicted masks from the prototype masks and predicted mask coefficients.
         """
-        pred_mask = jt.matmul(pred.unsqueeze(1), proto.unsqueeze(0))  # (n, 32) @ (32, 80, 80) -> (n, 80, 80)
+        # pred_mask = jt.matmul(pred.unsqueeze(1), proto.unsqueeze(0))  # (n, 32) @ (32, 80, 80) -> (n, 80, 80)
 
-        loss = jt.nn.binary_cross_entropy_with_logits(pred_mask, gt_mask, reduction="none")
-        return (crop_mask(loss, xyxy).mean(dim=(1, 2)) / area).sum()
+        # loss = jt.nn.binary_cross_entropy_with_logits(pred_mask, gt_mask, reduction="none")
+
+        n, c = pred.shape
+        h, w = proto.shape[-2:]
+        
+        
+        pred_mask = jt.matmul(pred, proto.view(c, -1)).view(n, h, w)
+
+        loss = jt.maximum(pred_mask, 0.0) - pred_mask * gt_mask + jt.log(1.0 + jt.exp(-jt.abs(pred_mask)))
+
+
+        return (crop_mask(loss, xyxy).mean(dims=(1, 2)) / area).sum()
+        
+        # return (crop_mask(loss, xyxy).mean(dim=(1, 2)) / area).sum()
 
     def calculate_segmentation_loss(
         self,
@@ -469,7 +479,8 @@ class v8SegmentationLoss(v8DetectionLoss):
         marea = xyxy2xywh(target_bboxes_normalized)[..., 2:].prod(2)
 
         # Normalize to mask size
-        mxyxy = target_bboxes_normalized * jt.Var([mask_w, mask_h, mask_w, mask_h])
+        # mxyxy = target_bboxes_normalized * jt.Var([mask_w, mask_h, mask_w, mask_h])
+        mxyxy = target_bboxes_normalized * jt.array([mask_w, mask_h, mask_w, mask_h])
 
         for i, single_i in enumerate(zip(fg_mask, target_gt_idx, pred_masks, proto, mxyxy, marea, masks)):
             fg_mask_i, target_gt_idx_i, pred_masks_i, proto_i, mxyxy_i, marea_i, masks_i = single_i
@@ -519,7 +530,8 @@ class v8PoseLoss(v8DetectionLoss):
         pred_kpts = pred_kpts.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
-        imgsz = jt.Var(feats[0].shape[2:], dtype=dtype) * self.stride[0]  # image size (h,w)
+        # imgsz = jt.Var(feats[0].shape[2:], dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = jt.array(list(feats[0].shape[2:]), dtype=dtype) * self.stride[0]
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
@@ -533,22 +545,27 @@ class v8PoseLoss(v8DetectionLoss):
 
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
-        pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(batch_size, -1, *self.kpt_shape))  # (b, h*w, 17, 3)
+        # pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(batch_size, -1, *self.kpt_shape))  # (b, h*w, 17, 3)
+        pred_kpts = pred_kpts.reshape(batch_size, pred_kpts.shape[1], self.kpt_shape[0], self.kpt_shape[1])
+        pred_kpts = self.kpts_decode(anchor_points, pred_kpts)
 
         _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
             pred_scores.detach().sigmoid(),
-            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            (pred_bboxes.detach() * stride_tensor).cast(gt_bboxes.dtype),
             anchor_points * stride_tensor,
             gt_labels,
             gt_bboxes,
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        # target_scores_sum = max(target_scores.sum(), 1)
+        target_scores_sum = jt.maximum(target_scores.sum(), 1.0)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[3] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # loss[3] = self.bce(pred_scores, target_scores.cast(dtype)).sum() / target_scores_sum  # BCE
+        _loss_bce = jt.maximum(pred_scores, 0.0) - pred_scores * target_scores.cast(dtype) + jt.log(1.0 + jt.exp(-jt.abs(pred_scores)))
+        loss[3] = _loss_bce.sum() / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():
@@ -570,10 +587,10 @@ class v8PoseLoss(v8DetectionLoss):
         loss[3] *= self.hyp.cls  # cls gain
         loss[4] *= self.hyp.dfl  # dfl gain
 
-        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
-    @staticmethod
-    def kpts_decode(anchor_points, pred_kpts):
+    # @staticmethod
+    def kpts_decode(self, anchor_points, pred_kpts):
         """Decodes predicted keypoints to image coordinates."""
         y = pred_kpts.clone()
         y[..., :2] *= 2.0
@@ -609,7 +626,12 @@ class v8PoseLoss(v8DetectionLoss):
         batch_size = len(masks)
 
         # Find the maximum number of keypoints in a single image
-        max_kpts = jt.unique(batch_idx, return_counts=True)[1].max()
+        # max_kpts = jt.unique(batch_idx, return_counts=True)[1].max()
+        unique_vals = jt.unique(batch_idx)
+        counts = jt.zeros_like(unique_vals)
+        for i, val in enumerate(unique_vals):
+             counts[i] = (batch_idx == val).sum()
+        max_kpts = counts.max().item()
 
         # Create a tensor to hold batched keypoints
         batched_keypoints = jt.zeros(
@@ -678,42 +700,36 @@ class v8OBBLoss(v8DetectionLoss):
             counts = counts.to(dtype=jt.int32)
             max_count = counts.max().item()
             
-            # 构建每个batch的数据列表
             batch_data = []
             for j in range(batch_size):
                 matches = i == j
                 n = matches.sum().item()
                 if n > 0:
-                    # 使用 where() 方法获取索引以兼容 Jittor
+                    
                     if hasattr(matches, 'where'):
                         indices = matches.where()[0]
-                        selected = targets[indices]  # 选择匹配的行
+                        selected = targets[indices]  
                     else:
                         mask_indices = jt.nonzero(matches).squeeze()
                         selected = targets[mask_indices]
                     
-                    # 确保形状正确
                     if len(selected.shape) == 1:
                         selected = selected.unsqueeze(0)
                     
-                    bboxes = selected[:, 2:]  # bbox 数据
+                    bboxes = selected[:, 2:]  
                     bboxes[..., :4].mul_(scale_tensor)
                     combined = jt.concat([selected[:, 1:2], bboxes], dim=-1)
                     
-                    # 获取实际行数
                     actual_n = combined.shape[0]
                     
-                    # 填充到max_count长度
                     if actual_n < max_count:
                         padding = jt.zeros((max_count - actual_n, 6), dtype=jt.float32)
                         combined = jt.concat([combined, padding], dim=0)
                     elif actual_n > max_count:
-                        # 如果超过，截断（不应该发生，但为了安全）
                         combined = combined[:max_count]
                 else:
                     combined = jt.zeros((max_count, 6), dtype=jt.float32)
                 
-                # 确保最终形状是 (max_count, 6)
                 assert combined.shape[0] == max_count, f"Shape mismatch: {combined.shape[0]} vs {max_count}"
                 batch_data.append(combined.unsqueeze(0))
             
@@ -735,7 +751,9 @@ class v8OBBLoss(v8DetectionLoss):
         pred_angle = pred_angle.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
-        imgsz = jt.Var(feats[0].shape[2:] , dtype=dtype) * self.stride[0]  # image size (h,w)
+        # imgsz = jt.Var(feats[0].shape[2:] , dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = jt.array(list(feats[0].shape[2:]), dtype=dtype) * self.stride[0]
+
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # targets
@@ -765,18 +783,19 @@ class v8OBBLoss(v8DetectionLoss):
         bboxes_for_assigner[..., :4] *= stride_tensor
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             pred_scores.detach().sigmoid(),
-            bboxes_for_assigner.type(gt_bboxes.dtype),
+            bboxes_for_assigner.cast(gt_bboxes.dtype),
             anchor_points * stride_tensor,
             gt_labels,
             gt_bboxes,
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        # target_scores_sum = max(target_scores.sum(), 1)
+        target_scores_sum = jt.maximum(target_scores.sum(), 1.0)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[1] = self.bce(pred_scores, target_scores.cast(dtype)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():
@@ -807,15 +826,15 @@ class v8OBBLoss(v8DetectionLoss):
         """
         if self.use_dfl:
             b, a, c = pred_dist.shape  # batch, anchors, channels
-            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.cast(pred_dist.dtype))
         return jt.concat((dist2rbox(pred_dist, pred_angle, anchor_points), pred_angle), dim=-1)
 
 
 class E2EDetectLoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model, **kwargs):  # 接受多余的关键字参数例如 'reduction'
-        params = model.parameters()  # parameters() 返回列表
+    def __init__(self, model, **kwargs):
+        params = model.parameters()
         if params:
             if hasattr(params[0], "is_cuda"):
                 device = "cuda" if params[0].is_cuda else "cpu"
