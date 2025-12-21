@@ -795,7 +795,9 @@ class v8OBBLoss(v8DetectionLoss):
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.cast(dtype)).sum() / target_scores_sum  # BCE
+        # loss[1] = self.bce(pred_scores, target_scores.cast(dtype)).sum() / target_scores_sum  # BCE
+        _loss_bce = jt.maximum(pred_scores, 0.0) - pred_scores * target_scores.cast(dtype) + jt.log(1.0 + jt.exp(-jt.abs(pred_scores)))
+        loss[1] = _loss_bce.sum() / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():
@@ -810,7 +812,7 @@ class v8OBBLoss(v8DetectionLoss):
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
 
-        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
     def bbox_decode(self, anchor_points, pred_dist, pred_angle):
         """

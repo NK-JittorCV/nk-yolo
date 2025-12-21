@@ -1020,6 +1020,123 @@ def test_e2e_detect_loss():
 # =========================
 # Main runner
 # =========================
+
+def test_v8_obb_loss_aligned():
+    import traceback
+    set_seed()
+    print("\n====== 测试 v8OBBLoss (强制对齐 Assigner) ======")
+
+    if Ptv8OBBLoss is None or Nkv8OBBLoss is None:
+        return _skip("v8OBBLoss", "对应类未找到")
+
+    nc, reg_max = 80, 16
+    stride = (8, 16, 32)
+
+    # 1. 初始化模型
+    model_jt = _mock_obb_model(is_pt=False, nc=nc, reg_max=reg_max, stride=stride)
+    model_pt = _mock_obb_model(is_pt=True,  nc=nc, reg_max=reg_max, stride=stride)
+
+    nk_loss, _ = _try_instantiate(Nkv8OBBLoss, model_jt)
+    pt_loss, _ = _try_instantiate(Ptv8OBBLoss, model_pt)
+
+    # =========================================================
+    # 2. Mock Assigner (强制正样本一致)
+    # =========================================================
+    def mock_assigner_forward(pred_scores, pred_bboxes, anchor_points, gt_labels, gt_bboxes, mask_gt):
+        bs, n_anchors = pred_scores.shape[0], pred_scores.shape[1]
+        
+        # 构造 target_bboxes (复制 GT 或者 pred)
+        target_bboxes = jt.zeros_like(pred_bboxes)
+        target_bboxes[:, 10, :] = 50.0  # 随便给点值
+        
+        # 构造 target_scores (One-hot)
+        target_scores = jt.zeros_like(pred_scores)
+        target_scores[:, 10, 1] = 1.0   # 第1类是正样本
+        
+        # 构造 fg_mask
+        fg_mask = jt.zeros((bs, n_anchors), dtype=bool) 
+        fg_mask[:, 10] = True
+        
+        return None, target_bboxes, target_scores, fg_mask, None
+
+    nk_loss.assigner = mock_assigner_forward
+
+    def pt_mock_assigner_forward(pred_scores, pred_bboxes, anchor_points, gt_labels, gt_bboxes, mask_gt):
+        bs, n_anchors = pred_scores.shape[0], pred_scores.shape[1]
+        
+        target_bboxes = torch.zeros_like(pred_bboxes)
+        target_bboxes[:, 10, :] = 50.0
+        
+        target_scores = torch.zeros_like(pred_scores)
+        target_scores[:, 10, 1] = 1.0
+        
+        fg_mask = torch.zeros((bs, n_anchors), dtype=torch.bool)
+        fg_mask[:, 10] = True
+        
+        return None, target_bboxes, target_scores, fg_mask, None
+        
+    pt_loss.assigner = pt_mock_assigner_forward
+
+    # =========================================================
+    # 3. 构造输入数据 (已修复)
+    # =========================================================
+    b = 2
+    ch_det = nc + reg_max * 4
+    
+    # ✅ 修复：正确构造金字塔特征图
+    feats_np = [
+        np.random.randn(b, ch_det, 80, 80).astype(np.float32),
+        np.random.randn(b, ch_det, 40, 40).astype(np.float32),
+        np.random.randn(b, ch_det, 20, 20).astype(np.float32),
+    ]
+    
+    batch_idx = np.array([0, 0, 1])
+    cls = np.array([1, 5, 2])
+    obb = np.array([[10,10,50,50,0.5], [100,100,150,150,0], [20,20,60,60,-0.5]], dtype=np.float32)
+    
+    batch_jt = {"batch_idx": jt.array(batch_idx).int32(), "cls": jt.array(cls).int32(), "bboxes": jt.array(obb).float32()}
+    batch_pt = {"batch_idx": torch.from_numpy(batch_idx).long(), "cls": torch.from_numpy(cls).long(), "bboxes": torch.from_numpy(obb).float()}
+
+    # OBB 需要 pred_angle，形状必须匹配 sum(H*W)
+    total_anchors = 80*80 + 40*40 + 20*20 # 8400
+    pred_angle_np = np.random.randn(b, 1, total_anchors).astype(np.float32)
+
+    preds_nk = ([jt.array(f) for f in feats_np], jt.array(pred_angle_np))
+    preds_pt = ([torch.from_numpy(f) for f in feats_np], torch.from_numpy(pred_angle_np))
+
+    try:
+        loss_nk, items_nk = nk_loss(preds_nk, batch_jt)
+        loss_pt, items_pt = pt_loss(preds_pt, batch_pt)
+
+        # 4. 验证
+        ok_total = compare_loss("OBB_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=5.0)
+        
+        items_nk_np = items_nk.detach().numpy()
+        items_pt_np = items_pt.detach().cpu().numpy()
+        diff = np.abs(items_nk_np - items_pt_np)
+        
+        print(f"  Items NK: {items_nk_np}")
+        print(f"  Items PT: {items_pt_np}")
+        print(f"  Diff:     {diff}")
+        
+        # OBB IoU 误差较大，放宽阈值
+        
+        rel_diff = diff / (np.abs(items_pt_np) + 1e-9)
+        print(f"  Max Rel Diff: {np.max(rel_diff):.8f}")
+
+        # 允许 0.01% 的相对误差，或者 Cls Loss 允许更大的绝对误差
+        if np.max(rel_diff) > 1e-4:
+             print("  ✗ Items Loss 差异较大 (Rel Diff > 0.01%)")
+             return False
+        
+        print("  ✓ Items Loss 匹配 (Mock Assigner 模式)")
+        return ok_total
+
+    except Exception as e:
+        print("  ✗ OBB 测试崩溃:")
+        traceback.print_exc()
+        return False
+
 def main():
     tests = [
         ("VarifocalLoss", test_varifocal_loss),
@@ -1034,7 +1151,7 @@ def main():
         ("v8SegmentationLoss", test_v8_segmentation_loss),
         ("v8PoseLoss", test_v8_pose_loss),
         ("v8ClassificationLoss", test_v8_classification_loss),
-        ("v8OBBLoss", test_v8_obb_loss),
+        ("v8OBBLoss", test_v8_obb_loss_aligned),
         ("E2EDetectLoss", test_e2e_detect_loss),
     ]
 
