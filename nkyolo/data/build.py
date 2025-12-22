@@ -29,34 +29,44 @@ from nkyolo.utils.checks import check_file
 class InfiniteDataset(Dataset):
     """Dataset wrapper that repeats forever."""
     
-    def __init__(self, dataset):
-        """Initialize infinite dataset wrapper."""
+    def __init__(self, dataset, batch_size=1, shuffle=False, drop_last=False, 
+                 num_workers=0, buffer_size=512):
+        """Initialize infinite dataset wrapper.
+        
+        Args:
+            dataset: Original dataset to wrap.
+            batch_size (int): Batch size for data loading.
+            shuffle (bool): Whether to shuffle data.
+            drop_last (bool): Whether to drop last incomplete batch.
+            num_workers (int): Number of worker threads.
+            buffer_size (int): Buffer size for Jittor RingBuffer.
+        """
         super().__init__()
         self.dataset = dataset
         
-        # Set basic dataset attributes
+        # Set dataset attributes with correct values from the start
         self.set_attrs(
             total_len=len(dataset),
-            batch_size=1,
-            shuffle=False,
-            drop_last=False,
-            num_workers=0,
-            buffer_size=1
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            num_workers=num_workers,
+            buffer_size=buffer_size
         )
         
         # Forward all attributes from the original dataset that we don't explicitly define
         self.__dict__.update({k: v for k, v in dataset.__dict__.items() if not hasattr(self, k)})
         
-        # Set collate function directly 
+        # Set collate function directly if available
         if hasattr(dataset, 'collate_fn'):
             self.collate_fn = dataset.collate_fn
 
     def __getitem__(self, index):
-        """Get item at index from dataset."""
+        """Get item at index, cycling through dataset if index exceeds length."""
         return self.dataset[index % len(self.dataset)]
 
-    # 新增：覆盖默认的collate_batch方法，使用自定义collate_fn
     def collate_batch(self, batch):
+        """Collate batch using custom collate function."""
         return self.collate_fn(batch)
 
 
@@ -64,10 +74,10 @@ def collate_fn(batch):
     """Collates data samples into batches.
     
     Args:
-        batch: List of samples from dataset
+        batch (list): List of sample dictionaries from the dataset.
         
     Returns:
-        Dictionary with batched data
+        dict: Dictionary with batched data, or None if batch is empty.
     """
     n = len(batch)
     if n == 0:
@@ -116,16 +126,26 @@ def collate_fn(batch):
     return out
 
 class InfiniteDataLoader:
-    """
-    DataLoader wrapper for infinite iteration.
-    """
+    """DataLoader wrapper for infinite iteration over a dataset."""
+    
     def __init__(self, dataset, batch_size, shuffle=False, num_workers=0,
                  pin_memory=False, worker_init_fn=None, drop_last=False,
-                 buffer_size=512, collate_fn=None):  # 默认 buffer_size 为 512
-        """Initialize InfiniteDataLoader."""
-        # Store original dataset
+                 buffer_size=512, collate_fn=None):
+        """Initialize InfiniteDataLoader.
+        
+        Args:
+            dataset: The dataset to wrap.
+            batch_size (int): Number of samples per batch.
+            shuffle (bool): Whether to shuffle the dataset.
+            num_workers (int): Number of worker threads.
+            pin_memory (bool): Whether to pin memory.
+            worker_init_fn (callable, optional): Function to initialize worker threads.
+            drop_last (bool): Whether to drop last incomplete batch.
+            buffer_size (int): Buffer size for Jittor RingBuffer.
+            collate_fn (callable, optional): Function to collate batches.
+        """
         self.original_dataset = dataset
-        self.dataset = dataset  # 为了兼容性，保持dataset属性
+        self.dataset = dataset
         
         # Use dataset's collate_fn if available, otherwise use provided or default
         if collate_fn is None and hasattr(dataset, 'collate_fn'):
@@ -139,6 +159,8 @@ class InfiniteDataLoader:
         self.collate_fn = collate_fn
         self.shuffle = shuffle
         self.drop_last = drop_last
+        # Store buffer_size for use in __iter__
+        self.buffer_size = buffer_size
         
         # Calculate number of batches
         self.num_batches = len(dataset) // batch_size
@@ -151,22 +173,21 @@ class InfiniteDataLoader:
 
     def __iter__(self):
         """Return self as iterator."""
-        # Create a new dataset for this iteration
-        self.dataset = InfiniteDataset(self.original_dataset)
+        dataset_len = len(self.original_dataset)
+        final_buffer_size = max(self.buffer_size, dataset_len)
         
-        # Set dataset attributes
-        self.dataset.set_attrs(
+        self.dataset = InfiniteDataset(
+            self.original_dataset,
             batch_size=self.batch_size,
             shuffle=self.shuffle,
             drop_last=self.drop_last,
             num_workers=self.num_workers,
-            buffer_size=512
+            buffer_size=final_buffer_size
         )
         
         if self.collate_fn:
             self.dataset.collate_fn = self.collate_fn
         
-        # Create iterator
         self.iterator = self.dataset.__iter__()
         return self
 
@@ -184,15 +205,33 @@ class InfiniteDataLoader:
 
 
 def seed_worker(worker_id):  # noqa
-    """Set dataloader worker seed."""
-    # Use Python's random and numpy instead of torch/jittor specific RNG
+    """Set random seed for dataloader worker.
+    
+    Args:
+        worker_id (int): The worker process/thread ID.
+    """
+    # Use Python's random and numpy instead of Jittor-specific RNG
     seed = int(random.random() * 2**32)  # Generate random seed
     np.random.seed(seed + worker_id)
     random.seed(seed + worker_id)
 
 
 def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, stride=32, multi_modal=False):
-    """Build YOLO Dataset."""
+    """Build YOLO Dataset.
+    
+    Args:
+        cfg: Configuration object with dataset and augmentation parameters.
+        img_path (str): Path to directory containing images.
+        batch (int): Batch size for the dataset.
+        data (dict): Data dictionary containing dataset configuration.
+        mode (str): Dataset mode, either "train" or "val".
+        rect (bool): Whether to use rectangular training.
+        stride (int): Model stride for ensuring image dimensions are divisible.
+        multi_modal (bool): Whether to use multi-modal data.
+    
+    Returns:
+        YOLODataset: Configured YOLO dataset instance.
+    """
     return YOLODataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
@@ -212,10 +251,25 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     )
 
 
-def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size=512):  # 修改默认 buffer_size 为 512
-    """Return an InfiniteDataLoader for training or validation set."""
+def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size=None):
+    """Return an InfiniteDataLoader for training or validation set.
+    
+    Args:
+        dataset: The dataset to load data from.
+        batch (int): Batch size for data loading.
+        workers (int): Number of worker threads.
+        shuffle (bool): Whether to shuffle dataset. Only applied if rank == -1.
+        rank (int): Process rank for distributed training. -1 for single process.
+        buffer_size (int, optional): Buffer size for Jittor RingBuffer. If None, uses large fixed value.
+    
+    Returns:
+        InfiniteDataLoader: Configured data loader.
+    """
     batch = min(batch, len(dataset))
-    workers = min(os.cpu_count() or 1, workers)  # Limit workers
+    workers = min(os.cpu_count() or 1, workers)
+    
+    if buffer_size is None:
+        buffer_size = 100000000  # Fixed very large value (100 million) to avoid buffer overflow
     
     loader = InfiniteDataLoader(
         dataset=dataset,
@@ -225,15 +279,26 @@ def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size
         pin_memory=PIN_MEMORY,
         worker_init_fn=seed_worker,
         drop_last=False,
-        buffer_size=buffer_size  # 使用更新后的 buffer_size
+        buffer_size=buffer_size
     )
     
     return loader
 
 
 def check_source(source):
-    """Check source type and return corresponding flag values."""
+    """Check source type and return corresponding flag values.
+    
+    Args:
+        source: Input source (str, Path, int, LOADERS, list, PIL.Image, np.ndarray, or jt.Var).
+    
+    Returns:
+        tuple: (source, webcam, screenshot, from_img, in_memory, tensor) flags.
+    
+    Raises:
+        TypeError: If source type is not supported.
+    """
     webcam, screenshot, from_img, in_memory, tensor = False, False, False, False, False
+    
     if isinstance(source, (str, int, Path)):  # int for local usb camera
         source = str(source)
         is_file = Path(source).suffix[1:] in (IMG_FORMATS | VID_FORMATS)
@@ -258,17 +323,16 @@ def check_source(source):
 
 
 def load_inference_source(source=None, batch=1, vid_stride=1, buffer=False):
-    """
-    Loads an inference source for object detection and applies necessary transformations.
-
+    """Loads an inference source for object detection and applies necessary transformations.
+    
     Args:
-        source (str, Path, Tensor, PIL.Image, np.ndarray): The input source for inference.
-        batch (int, optional): Batch size for dataloaders. Default is 1.
-        vid_stride (int, optional): The frame interval for video sources. Default is 1.
-        buffer (bool, optional): Determined whether stream frames will be buffered. Default is False.
-
+        source: Input source (str, Path, jt.Var, PIL.Image, np.ndarray, LOADERS, optional).
+        batch (int): Batch size for dataloaders.
+        vid_stride (int): Frame interval for video sources.
+        buffer (bool): Whether stream frames will be buffered.
+    
     Returns:
-        dataset (Dataset): A dataset object for the specified input source.
+        Dataset: Dataset object for the specified input source.
     """
     source, stream, screenshot, from_img, in_memory, tensor = check_source(source)
     source_type = source.source_type if in_memory else SourceTypes(stream, screenshot, from_img, tensor)
