@@ -1,21 +1,15 @@
 # NK-YOLO 🚀, AGPL-3.0 license
 # Refer to https://github.com/ultralytics/ultralytics/blob/main/ultralytics/nn/autobackend.py
 
-import ast
 import json
-import platform
-import zipfile
-from collections import OrderedDict, namedtuple
 from pathlib import Path
 
-import cv2
 import numpy as np
 import jittor as jt
 import jittor.nn as nn
-from PIL import Image
 
-from nkyolo.utils import ARM64, IS_JETSON, IS_RASPBERRYPI, LINUX, LOGGER, ROOT, yaml_load
-from nkyolo.utils.checks import check_requirements, check_suffix, check_version, check_yaml
+from nkyolo.utils import LOGGER, ROOT, yaml_load
+from nkyolo.utils.checks import check_suffix, check_yaml
 from nkyolo.utils.downloads import attempt_download_asset, is_url
 
 
@@ -54,7 +48,7 @@ def default_class_names(data=None):
 
 class AutoBackend(nn.Module):
     """
-    Handles dynamic backend selection for running inference using Ultralytics YOLO models.
+    Handles dynamic backend selection for running inference using NK-YOLO models with Jittor support.
 
     The AutoBackend class is designed to provide an abstraction layer for various inference engines. It supports a wide
     range of formats, each with specific naming conventions as outlined below:
@@ -62,22 +56,15 @@ class AutoBackend(nn.Module):
         Supported Formats and Naming Conventions:
             | Format                | File Suffix      |
             |-----------------------|------------------|
-            | Pyjt               | *.pt             |
-            | jtScript           | *.jtscript    |
-            | ONNX Runtime          | *.onnx           |
-            | ONNX OpenCV DNN       | *.onnx (dnn=True)|
-            | OpenVINO              | *openvino_model/ |
-            | CoreML                | *.mlpackage      |
-            | TensorRT              | *.engine         |
-            | TensorFlow SavedModel | *_saved_model    |
-            | TensorFlow GraphDef   | *.pb             |
-            | TensorFlow Lite       | *.tflite         |
-            | TensorFlow Edge TPU   | *_edgetpu.tflite |
-            | PaddlePaddle          | *_paddle_model   |
-            | NCNN                  | *_ncnn_model     |
+            | Jittor                | *.pt             |
+            | JittorPickle          | *.pkl            |
+            | jtScript              | *.jtscript      |
+            | PyTorch               | *.pt             |
+            
+        TODO: Support for other formats (ONNX, OpenVINO, TensorRT, CoreML, TensorFlow, PaddlePaddle, NCNN) is planned.
 
     This class offers dynamic backend switching capabilities based on the input model format, making it easier to deploy
-    models across various platforms.
+    models across various platforms. Primary backend is Jittor for optimal performance.
     """
 
     @jt.no_grad()
@@ -93,14 +80,14 @@ class AutoBackend(nn.Module):
         verbose=True,
     ):
         """
-        Initialize the AutoBackend for inference.
+        Initialize the AutoBackend for inference with Jittor support.
 
         Args:
-            weights (str): Path to the model weights file. Defaults to 'yolov8n.pt'.
-            device (jt.device): Device to run the model on. Defaults to CPU.
-            dnn (bool): Use OpenCV DNN module for ONNX inference. Defaults to False.
+            weights (str): Path to the model weights file. Defaults to 'yolo11n.pt'. Supports Jittor (.pt, .pkl) formats.
+            device (jt.device): Jittor device to run the model on. Defaults to jt.cpu.
+            dnn (bool): Not currently supported. Reserved for future ONNX OpenCV DNN support.
             data (str | Path | optional): Path to the additional data.yaml file containing class names. Optional.
-            fp16 (bool): Enable half-precision inference. Supported only on specific backends. Defaults to False.
+            fp16 (bool): Enable half-precision inference. Supported on Jittor. Defaults to False.
             batch (int): Batch-size to assume for inference.
             fuse (bool): Fuse Conv2D + BatchNorm layers for optimization. Defaults to True.
             verbose (bool): Enable verbose logging. Defaults to True.
@@ -125,22 +112,17 @@ class AutoBackend(nn.Module):
             ncnn,
             triton,
         ) = self._model_type(w)
-        fp16 &= pt or pkl or jit or onnx or xml or engine or nn_module or triton  # FP16
-        nhwc = coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs jt BCWH)
+        # Only pt, pkl, jit are supported; others are for format detection only
+        fp16 &= pt or pkl or jit or nn_module  # FP16
+        nhwc = False  # Jittor uses BCHW format
         stride = 32  # default stride
         model, metadata, task = None, None, None
 
-        # Set device
-        # cuda = jt.cuda.is_available() and device.type != "cpu"  # use CUDA
-        # if cuda and not any([nn_module, pt, jit, engine, onnx]):  # GPU dataloader formats
-        #     device = jt.device("cpu")
-        #     cuda = False
-
         # Download if not local
-        if not (pt or pkl or triton or nn_module):
+        if not (pt or pkl or jit or nn_module):
             w = attempt_download_asset(w)
 
-        # In-memory Pyjt model
+        # In-memory Jittor model
         if nn_module:
             model = weights
             if fuse:
@@ -161,7 +143,7 @@ class AutoBackend(nn.Module):
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
             pt = True
 
-        # Pyjt
+        # Jittor (.pt)
         elif pt:
             from nkyolo.nn.tasks import attempt_load_weights
 
@@ -228,240 +210,19 @@ class AutoBackend(nn.Module):
             if extra_files["config.txt"]:  # load metadata dict
                 metadata = json.loads(extra_files["config.txt"], object_hook=lambda x: dict(x.items()))
 
-        # ONNX OpenCV DNN
-        elif dnn:
-            LOGGER.info(f"Loading {w} for ONNX OpenCV DNN inference...")
-            check_requirements("opencv-python>=4.5.4")
-            net = cv2.dnn.readNetFromONNX(w)
-
-        # ONNX Runtime
-        elif onnx:
-            LOGGER.info(f"Loading {w} for ONNX Runtime inference...")
-            check_requirements(("onnx", "onnxruntime-gpu" if cuda else "onnxruntime"))
-            if IS_RASPBERRYPI or IS_JETSON:
-                # Fix 'numpy.linalg._umath_linalg' has no attribute '_ilp64' for TF SavedModel on RPi and Jetson
-                check_requirements("numpy==1.23.5")
-            import onnxruntime
-
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
-            session = onnxruntime.InferenceSession(w, providers=providers)
-            output_names = [x.name for x in session.get_outputs()]
-            metadata = session.get_modelmeta().custom_metadata_map
-
-        # OpenVINO
-        elif xml:
-            LOGGER.info(f"Loading {w} for OpenVINO inference...")
-            check_requirements("openvino>=2024.0.0")
-            import openvino as ov
-
-            core = ov.Core()
-            w = Path(w)
-            if not w.is_file():  # if not *.xml
-                w = next(w.glob("*.xml"))  # get *.xml file from *_openvino_model dir
-            ov_model = core.read_model(model=str(w), weights=w.with_suffix(".bin"))
-            if ov_model.get_parameters()[0].get_layout().empty:
-                ov_model.get_parameters()[0].set_layout(ov.Layout("NCHW"))
-
-            # OpenVINO inference modes are 'LATENCY', 'THROUGHPUT' (not recommended), or 'CUMULATIVE_THROUGHPUT'
-            inference_mode = "CUMULATIVE_THROUGHPUT" if batch > 1 else "LATENCY"
-            LOGGER.info(f"Using OpenVINO {inference_mode} mode for batch={batch} inference...")
-            ov_compiled_model = core.compile_model(
-                ov_model,
-                device_name="AUTO",  # AUTO selects best available device, do not modify
-                config={"PERFORMANCE_HINT": inference_mode},
+        # TODO: Other format support (ONNX, OpenVINO, TensorRT, CoreML, TensorFlow, PaddlePaddle, NCNN, Triton)
+        elif dnn or onnx or xml or engine or coreml or saved_model or pb or tflite or edgetpu or tfjs or paddle or ncnn or triton:
+            raise NotImplementedError(
+                f"Model format '{w}' is not yet supported. Currently only Jittor (.pt, .pkl) and jtScript (.jtscript) formats are supported. "
+                "TODO: Add support for other formats."
             )
-            input_name = ov_compiled_model.input().get_any_name()
-            metadata = w.parent / "metadata.yaml"
-
-        # TensorRT
-        elif engine:
-            LOGGER.info(f"Loading {w} for TensorRT inference...")
-            try:
-                import tensorrt as trt  # noqa https://developer.nvidia.com/nvidia-tensorrt-download
-            except ImportError:
-                if LINUX:
-                    check_requirements("tensorrt>7.0.0,!=10.1.0")
-                import tensorrt as trt  # noqa
-            check_version(trt.__version__, ">=7.0.0", hard=True)
-            check_version(trt.__version__, "!=10.1.0", msg="https://github.com/jittoryolo/jittoryolo/pull/14239")
-            if device.type == "cpu":
-                device = jt.device("cuda:0")
-            Binding = namedtuple("Binding", ("name", "dtype", "shape", "data", "ptr"))
-            logger = trt.Logger(trt.Logger.INFO)
-            # Read file
-            with open(w, "rb") as f, trt.Runtime(logger) as runtime:
-                try:
-                    meta_len = int.from_bytes(f.read(4), byteorder="little")  # read metadata length
-                    metadata = json.loads(f.read(meta_len).decode("utf-8"))  # read metadata
-                except UnicodeDecodeError:
-                    f.seek(0)  # engine file may lack embedded Ultralytics metadata
-                model = runtime.deserialize_cuda_engine(f.read())  # read engine
-
-            # Model context
-            try:
-                context = model.create_execution_context()
-            except Exception as e:  # model is None
-                LOGGER.error(f"ERROR: TensorRT model exported with a different version than {trt.__version__}\n")
-                raise e
-
-            bindings = OrderedDict()
-            output_names = []
-            fp16 = False  # default updated below
-            dynamic = False
-            is_trt10 = not hasattr(model, "num_bindings")
-            num = range(model.num_io_tensors) if is_trt10 else range(model.num_bindings)
-            for i in num:
-                if is_trt10:
-                    name = model.get_tensor_name(i)
-                    dtype = trt.nptype(model.get_tensor_dtype(name))
-                    is_input = model.get_tensor_mode(name) == trt.TensorIOMode.INPUT
-                    if is_input:
-                        if -1 in tuple(model.get_tensor_shape(name)):
-                            dynamic = True
-                            context.set_input_shape(name, tuple(model.get_tensor_profile_shape(name, 0)[1]))
-                        if dtype == np.float16:
-                            fp16 = True
-                    else:
-                        output_names.append(name)
-                    shape = tuple(context.get_tensor_shape(name))
-                else:  # TensorRT < 10.0
-                    name = model.get_binding_name(i)
-                    dtype = trt.nptype(model.get_binding_dtype(i))
-                    is_input = model.binding_is_input(i)
-                    if model.binding_is_input(i):
-                        if -1 in tuple(model.get_binding_shape(i)):  # dynamic
-                            dynamic = True
-                            context.set_binding_shape(i, tuple(model.get_profile_shape(0, i)[1]))
-                        if dtype == np.float16:
-                            fp16 = True
-                    else:
-                        output_names.append(name)
-                    shape = tuple(context.get_binding_shape(i))
-                im = jt.from_numpy(np.empty(shape, dtype=dtype)).to(device)
-                bindings[name] = Binding(name, dtype, shape, im, int(im.data_ptr()))
-            binding_addrs = OrderedDict((n, d.ptr) for n, d in bindings.items())
-            batch_size = bindings["images"].shape[0]  # if dynamic, this is instead max batch size
-
-        # CoreML
-        elif coreml:
-            LOGGER.info(f"Loading {w} for CoreML inference...")
-            import coremltools as ct
-
-            model = ct.models.MLModel(w)
-            metadata = dict(model.user_defined_metadata)
-
-        # TF SavedModel
-        elif saved_model:
-            LOGGER.info(f"Loading {w} for TensorFlow SavedModel inference...")
-            import tensorflow as tf
-
-            keras = False  # assume TF1 saved_model
-            model = tf.keras.models.load_model(w) if keras else tf.saved_model.load(w)
-            metadata = Path(w) / "metadata.yaml"
-
-        # TF GraphDef
-        elif pb:  # https://www.tensorflow.org/guide/migrate#a_graphpb_or_graphpbtxt
-            LOGGER.info(f"Loading {w} for TensorFlow GraphDef inference...")
-            import tensorflow as tf
-
-            from nkyolo.engine.exporter import gd_outputs
-
-            def wrap_frozen_graph(gd, inputs, outputs):
-                """Wrap frozen graphs for deployment."""
-                x = tf.compat.v1.wrap_function(lambda: tf.compat.v1.import_graph_def(gd, name=""), [])  # wrapped
-                ge = x.graph.as_graph_element
-                return x.prune(tf.nest.map_structure(ge, inputs), tf.nest.map_structure(ge, outputs))
-
-            gd = tf.Graph().as_graph_def()  # TF GraphDef
-            with open(w, "rb") as f:
-                gd.ParseFromString(f.read())
-            frozen_func = wrap_frozen_graph(gd, inputs="x:0", outputs=gd_outputs(gd))
-            try:  # find metadata in SavedModel alongside GraphDef
-                metadata = next(Path(w).resolve().parent.rglob(f"{Path(w).stem}_saved_model*/metadata.yaml"))
-            except StopIteration:
-                pass
-
-        # TFLite or TFLite Edge TPU
-        elif tflite or edgetpu:  # https://www.tensorflow.org/lite/guide/python#install_tensorflow_lite_for_python
-            try:  # https://coral.ai/docs/edgetpu/tflite-python/#update-existing-tf-lite-code-for-the-edge-tpu
-                from tflite_runtime.interpreter import Interpreter, load_delegate
-            except ImportError:
-                import tensorflow as tf
-
-                Interpreter, load_delegate = tf.lite.Interpreter, tf.lite.experimental.load_delegate
-            if edgetpu:  # TF Edge TPU https://coral.ai/software/#edgetpu-runtime
-                device = device[3:] if str(device).startswith("tpu") else ":0"
-                LOGGER.info(f"Loading {w} on device {device[1:]} for TensorFlow Lite Edge TPU inference...")
-                delegate = {"Linux": "libedgetpu.so.1", "Darwin": "libedgetpu.1.dylib", "Windows": "edgetpu.dll"}[
-                    platform.system()
-                ]
-                interpreter = Interpreter(
-                    model_path=w,
-                    experimental_delegates=[load_delegate(delegate, options={"device": device})],
-                )
-            else:  # TFLite
-                LOGGER.info(f"Loading {w} for TensorFlow Lite inference...")
-                interpreter = Interpreter(model_path=w)  # load TFLite model
-            interpreter.allocate_tensors()  # allocate
-            input_details = interpreter.get_input_details()  # inputs
-            output_details = interpreter.get_output_details()  # outputs
-            # Load metadata
-            try:
-                with zipfile.ZipFile(w, "r") as model:
-                    meta_file = model.namelist()[0]
-                    metadata = ast.literal_eval(model.read(meta_file).decode("utf-8"))
-            except zipfile.BadZipFile:
-                pass
-
-        # TF.js
-        elif tfjs:
-            raise NotImplementedError("YOLOv8 TF.js inference is not currently supported.")
-
-        # PaddlePaddle
-        elif paddle:
-            LOGGER.info(f"Loading {w} for PaddlePaddle inference...")
-            check_requirements("paddlepaddle-gpu" if cuda else "paddlepaddle")
-            import paddle.inference as pdi  # noqa
-
-            w = Path(w)
-            if not w.is_file():  # if not *.pdmodel
-                w = next(w.rglob("*.pdmodel"))  # get *.pdmodel file from *_paddle_model dir
-            config = pdi.Config(str(w), str(w.with_suffix(".pdiparams")))
-            if cuda:
-                config.enable_use_gpu(memory_pool_init_size_mb=2048, device_id=0)
-            predictor = pdi.create_predictor(config)
-            input_handle = predictor.get_input_handle(predictor.get_input_names()[0])
-            output_names = predictor.get_output_names()
-            metadata = w.parents[1] / "metadata.yaml"
-
-        # NCNN
-        elif ncnn:
-            LOGGER.info(f"Loading {w} for NCNN inference...")
-            check_requirements("git+https://github.com/Tencent/ncnn.git" if ARM64 else "ncnn")  # requires NCNN
-            import ncnn as pyncnn
-
-            net = pyncnn.Net()
-            net.opt.use_vulkan_compute = cuda
-            w = Path(w)
-            if not w.is_file():  # if not *.param
-                w = next(w.glob("*.param"))  # get *.param file from *_ncnn_model dir
-            net.load_param(str(w))
-            net.load_model(str(w.with_suffix(".bin")))
-            metadata = w.parent / "metadata.yaml"
-
-        # NVIDIA Triton Inference Server
-        elif triton:
-            check_requirements("tritonclient[all]")
-            from nkyolo.utils.triton import TritonRemoteModel
-
-            model = TritonRemoteModel(w)
 
         # Any other format (unsupported)
         else:
             from nkyolo.engine.exporter import export_formats
 
             raise TypeError(
-                f"model='{w}' is not a supported model format. Ultralytics supports: {export_formats()['Format']}\n"
+                f"model='{w}' is not a supported model format. NK-YOLO supports: {export_formats()['Format']}\n"
                 f"See https://docs.jittoryolo.com/modes/predict for help."
             )
 
@@ -480,7 +241,7 @@ class AutoBackend(nn.Module):
             imgsz = metadata["imgsz"]
             names = metadata["names"]
             kpt_shape = metadata.get("kpt_shape")
-        elif not (pt or triton or nn_module):
+        elif not (pt or pkl or jit or nn_module):
             LOGGER.warning(f"WARNING ⚠️ Metadata not found for 'model={weights}'")
 
         # Check names
@@ -508,13 +269,12 @@ class AutoBackend(nn.Module):
         Returns:
             (tuple): Tuple containing the raw output tensor, and processed output for visualization (if visualize=True)
         """
-        b, ch, h, w = im.shape  # batch, channel, height, width
         if self.fp16 and im.dtype != jt.float16:
             im = im.half()  # to FP16
         if self.nhwc:
             im = im.permute(0, 2, 3, 1)  # jt BCHW to numpy BHWC shape(1,320,192,3)
 
-        # Pyjt or JittorPickle
+        # Jittor (.pt), JittorPickle (.pkl), or in-memory Jittor model
         if self.pt or self.pkl or self.nn_module:
             y = self.model(im, augment=augment, visualize=visualize, embed=embed)
 
@@ -522,149 +282,12 @@ class AutoBackend(nn.Module):
         elif self.jit:
             y = self.model(im)
 
-        # ONNX OpenCV DNN
-        elif self.dnn:
-            im = im.cpu().numpy()  # jt to numpy
-            self.net.setInput(im)
-            y = self.net.forward()
-
-        # ONNX Runtime
-        elif self.onnx:
-            im = im.cpu().numpy()  # jt to numpy
-            y = self.session.run(self.output_names, {self.session.get_inputs()[0].name: im})
-
-        # OpenVINO
-        elif self.xml:
-            im = im.cpu().numpy()  # FP32
-
-            if self.inference_mode in {"THROUGHPUT", "CUMULATIVE_THROUGHPUT"}:  # optimized for larger batch-sizes
-                n = im.shape[0]  # number of images in batch
-                results = [None] * n  # preallocate list with None to match the number of images
-
-                def callback(request, userdata):
-                    """Places result in preallocated list using userdata index."""
-                    results[userdata] = request.results
-
-                # Create AsyncInferQueue, set the callback and start asynchronous inference for each input image
-                async_queue = self.ov.runtime.AsyncInferQueue(self.ov_compiled_model)
-                async_queue.set_callback(callback)
-                for i in range(n):
-                    # Start async inference with userdata=i to specify the position in results list
-                    async_queue.start_async(inputs={self.input_name: im[i : i + 1]}, userdata=i)  # keep image as BCHW
-                async_queue.wait_all()  # wait for all inference requests to complete
-                y = np.concatenate([list(r.values())[0] for r in results])
-
-            else:  # inference_mode = "LATENCY", optimized for fastest first result at batch-size 1
-                y = list(self.ov_compiled_model(im).values())
-
-        # TensorRT
-        elif self.engine:
-            if self.dynamic and im.shape != self.bindings["images"].shape:
-                if self.is_trt10:
-                    self.context.set_input_shape("images", im.shape)
-                    self.bindings["images"] = self.bindings["images"]._replace(shape=im.shape)
-                    for name in self.output_names:
-                        self.bindings[name].data.resize_(tuple(self.context.get_tensor_shape(name)))
-                else:
-                    i = self.model.get_binding_index("images")
-                    self.context.set_binding_shape(i, im.shape)
-                    self.bindings["images"] = self.bindings["images"]._replace(shape=im.shape)
-                    for name in self.output_names:
-                        i = self.model.get_binding_index(name)
-                        self.bindings[name].data.resize_(tuple(self.context.get_binding_shape(i)))
-
-            s = self.bindings["images"].shape
-            assert im.shape == s, f"input size {im.shape} {'>' if self.dynamic else 'not equal to'} max model size {s}"
-            self.binding_addrs["images"] = int(im.data_ptr())
-            self.context.execute_v2(list(self.binding_addrs.values()))
-            y = [self.bindings[x].data for x in sorted(self.output_names)]
-
-        # CoreML
-        elif self.coreml:
-            im = im[0].cpu().numpy()
-            im_pil = Image.fromarray((im * 255).astype("uint8"))
-            # im = im.resize((192, 320), Image.BILINEAR)
-            y = self.model.predict({"image": im_pil})  # coordinates are xywh normalized
-            if "confidence" in y:
-                raise TypeError(
-                    "Ultralytics only supports inference of non-pipelined CoreML models exported with "
-                    f"'nms=False', but 'model={w}' has an NMS pipeline created by an 'nms=True' export."
-                )
-                # TODO: CoreML NMS inference handling
-                # from jittoryolo.utils.ops import xywh2xyxy
-                # box = xywh2xyxy(y['coordinates'] * [[w, h, w, h]])  # xyxy pixels
-                # conf, cls = y['confidence'].max(1), y['confidence'].argmax(1).astype(np.float32)
-                # y = np.concatenate((box, conf.reshape(-1, 1), cls.reshape(-1, 1)), 1)
-            elif len(y) == 1:  # classification model
-                y = list(y.values())
-            elif len(y) == 2:  # segmentation model
-                y = list(reversed(y.values()))  # reversed for segmentation models (pred, proto)
-
-        # PaddlePaddle
-        elif self.paddle:
-            im = im.cpu().numpy().astype(np.float32)
-            self.input_handle.copy_from_cpu(im)
-            self.predictor.run()
-            y = [self.predictor.get_output_handle(x).copy_to_cpu() for x in self.output_names]
-
-        # NCNN
-        elif self.ncnn:
-            mat_in = self.pyncnn.Mat(im[0].cpu().numpy())
-            with self.net.create_extractor() as ex:
-                ex.input(self.net.input_names()[0], mat_in)
-                # WARNING: 'output_names' sorted as a temporary fix for https://github.com/pnnx/pnnx/issues/130
-                y = [np.array(ex.extract(x)[1])[None] for x in sorted(self.net.output_names())]
-
-        # NVIDIA Triton Inference Server
-        elif self.triton:
-            im = im.cpu().numpy()  # jt to numpy
-            y = self.model(im)
-
-        # TensorFlow (SavedModel, GraphDef, Lite, Edge TPU)
+        # TODO: Other format support
         else:
-            im = im.cpu().numpy()
-            if self.saved_model:  # SavedModel
-                y = self.model(im, training=False) if self.keras else self.model(im)
-                if not isinstance(y, list):
-                    y = [y]
-            elif self.pb:  # GraphDef
-                y = self.frozen_func(x=self.tf.constant(im))
-            else:  # Lite or Edge TPU
-                details = self.input_details[0]
-                is_int = details["dtype"] in {np.int8, np.int16}  # is TFLite quantized int8 or int16 model
-                if is_int:
-                    scale, zero_point = details["quantization"]
-                    im = (im / scale + zero_point).astype(details["dtype"])  # de-scale
-                self.interpreter.set_tensor(details["index"], im)
-                self.interpreter.invoke()
-                y = []
-                for output in self.output_details:
-                    x = self.interpreter.get_tensor(output["index"])
-                    if is_int:
-                        scale, zero_point = output["quantization"]
-                        x = (x.astype(np.float32) - zero_point) * scale  # re-scale
-                    if x.ndim == 3:  # if task is not classification, excluding masks (ndim=4) as well
-                        # Denormalize xywh by image size. See https://github.com/jittoryolo/jittoryolo/pull/1695
-                        # xywh are normalized in TFLite/EdgeTPU to mitigate quantization error of integer models
-                        if x.shape[-1] == 6:  # end-to-end model
-                            x[:, :, [0, 2]] *= w
-                            x[:, :, [1, 3]] *= h
-                        else:
-                            x[:, [0, 2]] *= w
-                            x[:, [1, 3]] *= h
-                    y.append(x)
-            # TF segment fixes: export is reversed vs ONNX export and protos are transposed
-            if len(y) == 2:  # segment with (det, proto) output order reversed
-                if len(y[1].shape) != 4:
-                    y = list(reversed(y))  # should be y = (1, 116, 8400), (1, 160, 160, 32)
-                if y[1].shape[-1] == 6:  # end-to-end model
-                    y = [y[1]]
-                else:
-                    y[1] = np.transpose(y[1], (0, 3, 1, 2))  # should be y = (1, 116, 8400), (1, 32, 160, 160)
-            y = [x if isinstance(x, np.ndarray) else x.numpy() for x in y]
+            raise NotImplementedError(
+                "This model format is not yet supported. Currently only Jittor (.pt, .pkl) and jtScript (.jtscript) formats are supported."
+            )
 
-        # for x in y:
-        #     print(type(x), len(x)) if isinstance(x, (list, tuple)) else print(type(x), x.shape)  # debug shapes
         if isinstance(y, (list, tuple)):
             if len(self.names) == 999 and (self.task == "segment" or len(y) == 2):  # segments and names not defined
                 ip, ib = (0, 1) if len(y[0].shape) == 4 else (1, 0)  # index of protos, boxes
@@ -694,7 +317,7 @@ class AutoBackend(nn.Module):
             imgsz (tuple): The shape of the dummy input tensor in the format (batch_size, channels, height, width)
         """
 
-        warmup_types = self.pt, self.jit, self.onnx, self.engine, self.saved_model, self.pb, self.triton, self.nn_module
+        warmup_types = self.pt, self.pkl, self.jit, self.nn_module
         if any(warmup_types):
             im = jt.empty(*imgsz, dtype=jt.half if self.fp16 else jt.float)  # input
             for _ in range(2 if self.jit else 1):
@@ -703,15 +326,15 @@ class AutoBackend(nn.Module):
     @staticmethod
     def _model_type(p="path/to/model.pt"):
         """
-        Takes a path to a model file and returns the model type. Possibles types are pt, jit, onnx, xml, engine, coreml,
-        saved_model, pb, tflite, edgetpu, tfjs, ncnn or paddle.
+        Takes a path to a model file and returns the model type. Possible types are pt (Jittor), pkl (JittorPickle),
+        jit (jtScript), or PyTorch.
 
         Args:
             p: path to the model file. Defaults to path/to/model.pt
 
         Examples:
-            >>> model = AutoBackend(weights="path/to/model.onnx")
-            >>> model_type = model._model_type()  # returns "onnx"
+            >>> model = AutoBackend(weights="path/to/model.pt")
+            >>> model_type = model._model_type()  # returns model type flags
         """
 
         sf = export_formats()["Suffix"]  # export suffixes
@@ -719,8 +342,7 @@ class AutoBackend(nn.Module):
             check_suffix(p, sf)  # checks
         name = Path(p).name
         types = [s in name for s in sf]
-        types[5] |= name.endswith(".mlmodel")  # retain support for older Apple CoreML *.mlmodel formats
-        types[8] &= not types[9]  # tflite &= not edgetpu
+        # Only check for supported formats (Jittor, JittorPickle, jtScript, PyTorch)
         if any(types):
             triton = False
         else:
@@ -733,21 +355,23 @@ class AutoBackend(nn.Module):
 
 
 def export_formats():
-    """jittoryolo YOLO export formats."""
+    """NK-YOLO YOLO export formats with Jittor and PyTorch support."""
     x = [
-        ["Pyjt", "-", ".pt", True, True],
+        ["Jittor", "-", ".pt", True, True],
         ["JittorPickle", "pkl", ".pkl", True, True],
         ["jtScript", "jtscript", ".jtscript", True, True],
-        ["ONNX", "onnx", ".onnx", True, True],
-        ["OpenVINO", "openvino", "_openvino_model", True, False],
-        ["TensorRT", "engine", ".engine", False, True],
-        ["CoreML", "coreml", ".mlpackage", True, False],
-        ["TensorFlow SavedModel", "saved_model", "_saved_model", True, True],
-        ["TensorFlow GraphDef", "pb", ".pb", True, True],
-        ["TensorFlow Lite", "tflite", ".tflite", True, False],
-        ["TensorFlow Edge TPU", "edgetpu", "_edgetpu.tflite", True, False],
-        ["TensorFlow.js", "tfjs", "_web_model", True, False],
-        ["PaddlePaddle", "paddle", "_paddle_model", True, True],
-        ["NCNN", "ncnn", "_ncnn_model", True, True],
+        ["PyTorch", "torch", ".pt", True, True],  # PyTorch support
+        # TODO: Add support for the following formats
+        # ["ONNX", "onnx", ".onnx", True, True],
+        # ["OpenVINO", "openvino", "_openvino_model", True, False],
+        # ["TensorRT", "engine", ".engine", False, True],
+        # ["CoreML", "coreml", ".mlpackage", True, False],
+        # ["TensorFlow SavedModel", "saved_model", "_saved_model", True, True],
+        # ["TensorFlow GraphDef", "pb", ".pb", True, True],
+        # ["TensorFlow Lite", "tflite", ".tflite", True, False],
+        # ["TensorFlow Edge TPU", "edgetpu", "_edgetpu.tflite", True, False],
+        # ["TensorFlow.js", "tfjs", "_web_model", True, False],
+        # ["PaddlePaddle", "paddle", "_paddle_model", True, True],
+        # ["NCNN", "ncnn", "_ncnn_model", True, True],
     ]
     return dict(zip(["Format", "Argument", "Suffix", "CPU", "GPU"], zip(*x)))

@@ -236,13 +236,13 @@ class Model(nn.Module):
 
     def _check_is_pytorch_model(self) -> None:
         """
-        Checks if the model is a PyTorch model and raises a TypeError if it's not.
+        Checks if the model is a Jittor model (or compatible format) and raises a TypeError if it's not.
 
-        This method verifies that the model is either a PyTorch module or a .pt file. It's used to ensure that
-        certain operations that require a PyTorch model are only performed on compatible model types.
+        This method verifies that the model is either a Jittor nn.Module or a .pt/.pkl file. It's used to ensure that
+        certain operations that require a Jittor model are only performed on compatible model types.
 
         Raises:
-            TypeError: If the model is not a PyTorch module or a .pt file. The error message provides detailed
+            TypeError: If the model is not a Jittor module or a .pt/.pkl file. The error message provides detailed
                 information about supported model formats and operations.
 
         Examples:
@@ -251,14 +251,14 @@ class Model(nn.Module):
             >>> model = Model("yolov8n.onnx")
             >>> model._check_is_pytorch_model()  # Raises TypeError
         """
-        pt_str = isinstance(self.model, (str, Path)) and Path(self.model).suffix == ".pt"
+        pt_str = isinstance(self.model, (str, Path)) and Path(self.model).suffix in (".pt", ".pkl")
         pt_module = isinstance(self.model, nn.Module)
         if not (pt_module or pt_str):
             raise TypeError(
-                f"model='{self.model}' should be a *.pt PyTorch model to run this method, but is a different format. "
-                f"PyTorch models can train, val, predict and export, i.e. 'model.train(data=...)', but exported "
+                f"model='{self.model}' should be a *.pt or *.pkl Jittor model to run this method, but is a different format. "
+                f"Jittor models can train, val, predict and export, i.e. 'model.train(data=...)', but exported "
                 f"formats like ONNX, TensorRT etc. only support 'predict' and 'val' modes, "
-                f"i.e. 'yolo predict model=yolov8n.onnx'.\nTo run CUDA or MPS inference please pass the device "
+                f"i.e. 'yolo predict model=yolov8n.onnx'.\nTo run CUDA inference please pass the device "
                 f"argument directly in your inference command, i.e. 'model.predict(source=..., device=0)'"
             )
 
