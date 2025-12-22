@@ -1,8 +1,8 @@
 from .tasks import (
     BaseModel,
-    ClassificationModel,
-    DetectionModel,
-    SegmentationModel,
+    ClassificationModel,  # TODO: Not implemented yet
+    DetectionModel,  # Currently supported
+    SegmentationModel,  # TODO: Not implemented yet
     attempt_load_one_weight,
     attempt_load_weights,
     guess_model_scale,
@@ -20,8 +20,8 @@ __all__ = (
     "guess_model_task",
     "guess_model_scale",
     "jittor_safe_load",
-    "DetectionModel",
-    "SegmentationModel",
-    "ClassificationModel",
+    "DetectionModel",  # Currently supported - use this for detection tasks
+    "SegmentationModel",  # TODO: Not implemented yet
+    "ClassificationModel",  # TODO: Not implemented yet
     "BaseModel",
 )

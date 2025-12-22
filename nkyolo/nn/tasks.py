@@ -1,3 +1,6 @@
+# NK-YOLO 🚀, AGPL-3.0 license
+# Refer to https://github.com/ultralytics/ultralytics/blob/main/ultralytics/nn/tasks.py
+
 import contextlib
 import pickle
 import re
@@ -143,6 +146,8 @@ class BaseModel(nn.Module):
             (jt.Var): The last output of the model.
         """
         y, dt, embeddings = [], [], []  # outputs
+        embed = frozenset(embed) if embed is not None else {-1}
+        max_idx = max(embed)
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -152,9 +157,9 @@ class BaseModel(nn.Module):
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
-            if embed and m.i in embed:
+            if m.i in embed:
                 embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
-                if m.i == max(embed):
+                if m.i == max_idx:
                     return jt.unbind(jt.concat(embeddings, 1), dim=0)
         return x
 
@@ -259,10 +264,12 @@ class BaseModel(nn.Module):
         """
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+        if isinstance(m, (Detect, WorldDetect, v10Detect)):  # includes all Detect subclasses
             m.stride = fn(m.stride)
-            m.anchors = fn(m.anchors)
-            m.strides = fn(m.strides)
+            if hasattr(m, "anchors"):
+                m.anchors = fn(m.anchors)
+            if hasattr(m, "strides"):
+                m.strides = fn(m.strides)
         return self
 
     def load(self, weights, verbose=True):
@@ -327,10 +334,17 @@ class BaseModel(nn.Module):
 
 
 class DetectionModel(BaseModel):
-    """YOLOv8 detection model."""
+    """YOLO detection model (supports YOLOv5, v8, v9, v10, v11, etc.)."""
 
     def __init__(self, cfg="yolov8n.yaml", ch=3, nc=None, verbose=True):  # model, input channels, number of classes
-        """Initialize the YOLOv8 detection model with the given config and parameters."""
+        """Initialize the YOLO detection model with the given config and parameters.
+        
+        Args:
+            cfg (str | dict): Model configuration file path (supports YOLOv5, v8, v9, v10, v11, etc.) or config dict.
+            ch (int): Number of input channels. Default is 3 (RGB).
+            nc (int, optional): Number of classes. If None, uses value from config.
+            verbose (bool): Whether to print model information. Default is True.
+        """
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
         if self.yaml["backbone"][0][2] == "Silence":
@@ -352,19 +366,23 @@ class DetectionModel(BaseModel):
 
         # Build strides
         m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+        if isinstance(m, (Detect, WorldDetect, v10Detect)):  # all detection head types
             s = 640  # 2x min stride
             m.inplace = self.inplace
 
             def _execute(x):
-                """Performs a execute pass through the model, handling different Detect subclass types accordingly."""
+                """Performs a execute pass through the model for stride calculation."""
                 if self.end2end:
                     return self.execute(x)["one2many"]
-                return self.execute(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.execute(x)
+                # For detection models, output is typically a tensor or tuple
+                output = self.execute(x)
+                # Return the first element if it's a tuple (inference output, training output)
+                return output[0] if isinstance(output, (list, tuple)) and len(output) > 0 else output
 
             m.stride = jt.Var([s / x.shape[-2] for x in _execute(jt.zeros(1, ch, s, s))])  # execute
             self.stride = m.stride
-            m.bias_init()  # only run once
+            if hasattr(m, "bias_init"):
+                m.bias_init()  # only run once
         else:
             self.stride = jt.Var([32])  # default stride for i.e. RTDETR
 
@@ -385,7 +403,9 @@ class DetectionModel(BaseModel):
         y = []  # outputs
         for si, fi in zip(s, f):
             xi = scale_img(x.flip(fi) if fi else x, si, gs=int(self.stride.max()))
-            yi = super().predict(xi)[0]  # execute
+            yi = super().predict(xi)  # execute
+            # Handle different output formats: (pred, train) tuple or just pred
+            yi = yi[0] if isinstance(yi, (list, tuple)) else yi
             yi = self._descale_pred(yi, fi, si, img_size)
             y.append(yi)
         y = self._clip_augmented(y)  # clip augmented tails
@@ -419,54 +439,66 @@ class DetectionModel(BaseModel):
 
 
 class OBBModel(DetectionModel):
-    """YOLOv8 Oriented Bounding Box (OBB) model."""
-    # TODO: Not implemented yet
+    """YOLO Oriented Bounding Box (OBB) model (supports YOLOv5, v8, v9, v10, v11, etc.).
+    
+    TODO: This model is not yet implemented. Only DetectionModel is currently supported.
+    """
+    # TODO: Not implemented yet - OBB task support
 
     def __init__(self, cfg="yolov8n-obb.yaml", ch=3, nc=None, verbose=True):
-        """Initialize YOLOv8 OBB model with given config and parameters."""
-        raise NotImplementedError("OBBModel is not implemented yet")
+        """Initialize YOLO OBB model with given config and parameters."""
+        raise NotImplementedError("OBBModel is not implemented yet. Only DetectionModel is currently supported.")
 
     def init_criterion(self):
         """Initialize the loss criterion for the model."""
-        raise NotImplementedError("OBBModel is not implemented yet")
+        raise NotImplementedError("OBBModel is not implemented yet. Only DetectionModel is currently supported.")
 
 
 class SegmentationModel(DetectionModel):
-    """YOLOv8 segmentation model."""
-    # TODO: Not implemented yet
+    """YOLO segmentation model (supports YOLOv5, v8, v9, v10, v11, etc.).
+    
+    TODO: This model is not yet implemented. Only DetectionModel is currently supported.
+    """
+    # TODO: Not implemented yet - Segmentation task support
 
     def __init__(self, cfg="yolov8n-seg.yaml", ch=3, nc=None, verbose=True):
-        """Initialize YOLOv8 segmentation model with given config and parameters."""
-        raise NotImplementedError("SegmentationModel is not implemented yet")
+        """Initialize YOLO segmentation model with given config and parameters."""
+        raise NotImplementedError("SegmentationModel is not implemented yet. Only DetectionModel is currently supported.")
 
     def init_criterion(self):
         """Initialize the loss criterion for the SegmentationModel."""
-        raise NotImplementedError("SegmentationModel is not implemented yet")
+        raise NotImplementedError("SegmentationModel is not implemented yet. Only DetectionModel is currently supported.")
 
 
 class PoseModel(DetectionModel):
-    """YOLOv8 pose model."""
-    # TODO: Not implemented yet
+    """YOLO pose estimation model (supports YOLOv5, v8, v9, v10, v11, etc.).
+    
+    TODO: This model is not yet implemented. Only DetectionModel is currently supported.
+    """
+    # TODO: Not implemented yet - Pose estimation task support
 
     def __init__(self, cfg="yolov8n-pose.yaml", ch=3, nc=None, data_kpt_shape=(None, None), verbose=True):
-        """Initialize YOLOv8 Pose model."""
-        raise NotImplementedError("PoseModel is not implemented yet")
+        """Initialize YOLO Pose model."""
+        raise NotImplementedError("PoseModel is not implemented yet. Only DetectionModel is currently supported.")
 
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""
-        raise NotImplementedError("PoseModel is not implemented yet")
+        raise NotImplementedError("PoseModel is not implemented yet. Only DetectionModel is currently supported.")
 
 
 class ClassificationModel(BaseModel):
-    """YOLOv8 classification model."""
-    # TODO: Not implemented yet
+    """YOLO classification model (supports YOLOv5, v8, v9, v10, v11, etc.).
+    
+    TODO: This model is not yet implemented. Only DetectionModel is currently supported.
+    """
+    # TODO: Not implemented yet - Classification task support
 
     def __init__(self, cfg="yolov8n-cls.yaml", ch=3, nc=None, verbose=True):
         """Init ClassificationModel with YAML, channels, number of classes, verbose flag."""
-        raise NotImplementedError("ClassificationModel is not implemented yet")
+        raise NotImplementedError("ClassificationModel is not implemented yet. Only DetectionModel is currently supported.")
 
     def _from_yaml(self, cfg, ch, nc, verbose):
-        """Set YOLOv8 model configurations and define the model architecture."""
+        """Set YOLO model configurations and define the model architecture."""
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
 
         # Define model
@@ -511,10 +543,11 @@ class RTDETRDetectionModel(DetectionModel):
     """
     RTDETR (Real-time DEtection and Tracking using Transformers) Detection Model class.
 
+    TODO: This model is not yet implemented. Only DetectionModel is currently supported.
+    
     This class is responsible for constructing the RTDETR architecture, defining loss functions, and facilitating both
     the training and inference processes. RTDETR is an object detection and tracking model that extends from the
     DetectionModel base class.
-    # TODO: Not implemented yet
 
     Attributes:
         cfg (str): The configuration file path or preset string. Default is 'rtdetr-l.yaml'.
@@ -527,6 +560,7 @@ class RTDETRDetectionModel(DetectionModel):
         loss: Computes and returns the loss during training.
         predict: Performs a execute pass through the network and returns the output.
     """
+    # TODO: Not implemented yet - RTDETR task support
 
     def __init__(self, cfg="rtdetr-l.yaml", ch=3, nc=None, verbose=True):
         """
@@ -538,7 +572,7 @@ class RTDETRDetectionModel(DetectionModel):
             nc (int, optional): Number of classes. Defaults to None.
             verbose (bool, optional): Print additional information during initialization. Defaults to True.
         """
-        raise NotImplementedError("RTDETRDetectionModel is not implemented yet")
+        raise NotImplementedError("RTDETRDetectionModel is not implemented yet. Only DetectionModel is currently supported.")
 
     def init_criterion(self):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
@@ -608,6 +642,8 @@ class RTDETRDetectionModel(DetectionModel):
             (jt.Var): Model's output tensor.
         """
         y, dt, embeddings = [], [], []  # outputs
+        embed = frozenset(embed) if embed is not None else {-1}
+        max_idx = max(embed)
         for m in self.model[:-1]:  # except the head part
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -617,9 +653,9 @@ class RTDETRDetectionModel(DetectionModel):
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
-            if embed and m.i in embed:
+            if m.i in embed:
                 embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
-                if m.i == max(embed):
+                if m.i == max_idx:
                     return jt.unbind(jt.concat(embeddings, 1), dim=0)
         head = self.model[-1]
         x = head([y[j] for j in head.f], batch)  # head inference
@@ -627,12 +663,15 @@ class RTDETRDetectionModel(DetectionModel):
 
 
 class WorldModel(DetectionModel):
-    """YOLOv8 World Model."""
-    # TODO: Not implemented yet
+    """YOLO World Model (supports YOLOv5, v8, v9, v10, v11, etc.).
+    
+    TODO: This model is not yet implemented. Only DetectionModel is currently supported.
+    """
+    # TODO: Not implemented yet - YOLO-World task support
 
     def __init__(self, cfg="yolov8s-world.yaml", ch=3, nc=None, verbose=True):
-        """Initialize YOLOv8 world model with given config and parameters."""
-        raise NotImplementedError("WorldModel is not implemented yet")
+        """Initialize YOLO World model with given config and parameters."""
+        raise NotImplementedError("WorldModel is not implemented yet. Only DetectionModel is currently supported.")
 
     def set_classes(self, text, batch=80, cache_clip_model=True):
         """Set classes in advance so that model could do offline-inference without clip model."""
@@ -675,6 +714,8 @@ class WorldModel(DetectionModel):
             txt_feats = txt_feats.repeat(len(x), 1, 1)
         ori_txt_feats = txt_feats.clone()
         y, dt, embeddings = [], [], []  # outputs
+        embed = frozenset(embed) if embed is not None else {-1}
+        max_idx = max(embed)
         for m in self.model:  # except the head part
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -692,9 +733,9 @@ class WorldModel(DetectionModel):
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
-            if embed and m.i in embed:
+            if m.i in embed:
                 embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
-                if m.i == max(embed):
+                if m.i == max_idx:
                     return jt.unbind(jt.concat(embeddings, 1), dim=0)
         return x
 
@@ -868,20 +909,24 @@ def jittor_safe_load(weight, safe_only=False):
                 emojis(
                     f"ERROR ❌️ {weight} appears to be a YOLO model originally trained with "
                     f"https://github.com/ultralytics/yolov5.\nThis model is NOT compatible with "
-                    f"YOLOv8 at https://github.com/ultralytics/ultralytics."
-                    f"\nRecommend fixes are to train a new model using the latest 'ultralytics' package or to "
+                    f"NK-YOLO (supports YOLOv5, v8, v9, v10, v11, etc.)."
+                    f"\nRecommend fixes are to train a new model using the latest 'NK-YOLO' package or to "
                     f"run a command with an official YOLO model, i.e. 'yolo predict model=yolov8n.pt'"
                 )
             ) from e
         LOGGER.warning(
             f"WARNING ⚠️ {weight} appears to require '{e.name}', which is not in NK-YOLO requirements."
             f"\nAutoInstall will run now for '{e.name}' but this feature will be removed in the future."
-            f"\nRecommend fixes are to train a new model using the latest 'NK-YOLO' package or to "
+            f"\nRecommend fixes are to train a new model using the latest 'NK-YOLO' package (supports YOLOv5, v8, v9, v10, v11, etc.) or to "
             f"run a command with an official YOLO model, i.e. 'yolo predict model=yolov8n.pt'"
         )
         check_requirements(e.name)  # install missing module
         ckpt = jt.load(file)
     # print('before:',ckpt)
+    # 保护 model_yaml 和其他非权重配置，避免被转换为 numpy
+    protected_keys = {"model_yaml", "train_args", "train_metrics", "train_results"}
+    protected_data = {k: ckpt.pop(k) for k in protected_keys if k in ckpt}
+    
     def _to_numpy(obj):      # 转化tensor数据类型
         if isinstance(obj, dict):
             return {k: _to_numpy(v) for k, v in obj.items()}
@@ -890,6 +935,9 @@ def jittor_safe_load(weight, safe_only=False):
         else:
             return obj
     ckpt = _to_numpy(ckpt)
+    
+    # 恢复受保护的配置数据
+    ckpt.update(protected_data)
 
     if not isinstance(ckpt, dict):
         # File is likely a YOLO instance saved with i.e. jt.save(model, "saved_model.pt")
@@ -917,25 +965,90 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
             task = args.get("task", "detect") if args else "detect"
             yaml_config = ckpt["model_yaml"]
             
+            # 处理 model_yaml：可能是字符串路径或字典
+            if isinstance(yaml_config, str):
+                # 如果是字符串路径，需要先加载
+                LOGGER.info(f"Loading model_yaml from path: {yaml_config}")
+                yaml_config = yaml_model_load(yaml_config)
+            elif isinstance(yaml_config, dict):
+                # 如果是字典，确保包含必要的字段
+                if "backbone" not in yaml_config or "head" not in yaml_config:
+                    LOGGER.warning(
+                        f"WARNING ⚠️ model_yaml dict missing required fields (backbone/head). "
+                        f"Attempting to use as-is, but model may fail to load."
+                    )
+                # 确保字典格式正确，添加必要的默认值
+                if "ch" not in yaml_config:
+                    yaml_config["ch"] = 3
+                if "nc" not in yaml_config:
+                    yaml_config["nc"] = 80  # 默认 COCO 类别数
+                
+                # 如果使用 scales 字典，确保 scale 键存在且正确
+                if "scales" in yaml_config and isinstance(yaml_config["scales"], dict):
+                    if "scale" not in yaml_config:
+                        # 如果没有 scale，尝试从 train_args 中推断
+                        scale = args.get("scale") if args else None
+                        if not scale:
+                            # 使用 scales 的第一个键作为默认值
+                            scale = tuple(yaml_config["scales"].keys())[0]
+                            LOGGER.warning(
+                                f"WARNING ⚠️ No 'scale' found in model_yaml. Using first scale from scales dict: '{scale}'. "
+                                f"This may cause shape mismatch if incorrect."
+                            )
+                        yaml_config["scale"] = scale
+                    LOGGER.info(
+                        f"Using saved model_yaml config (dict format) with nc={yaml_config.get('nc')}, ch={yaml_config.get('ch')}, "
+                        f"scale={yaml_config.get('scale', 'N/A')}, scales={list(yaml_config.get('scales', {}).keys()) if yaml_config.get('scales') else 'N/A'}"
+                    )
+                else:
+                    # 如果没有 scales，检查是否有 width_multiple 和 depth_multiple
+                    width = yaml_config.get("width_multiple", "N/A")
+                    depth = yaml_config.get("depth_multiple", "N/A")
+                    LOGGER.info(
+                        f"Using saved model_yaml config (dict format) with nc={yaml_config.get('nc')}, ch={yaml_config.get('ch')}, "
+                        f"width_multiple={width}, depth_multiple={depth}"
+                    )
+            else:
+                raise ValueError(
+                    f"model_yaml must be a dict or str, got {type(yaml_config)}: {yaml_config}"
+                )
+            
             if task == "detect":
                 model = DetectionModel(cfg=yaml_config, verbose=False)
             elif task in ["segment", "pose", "obb", "classify", "RTDETRDecoder"]:
-                raise NotImplementedError(f"{task} task is not implemented yet. Only 'detect' task is supported.")
+                # TODO: Other tasks (segment, pose, obb, classify, RTDETR) are not yet implemented
+                raise NotImplementedError(
+                    f"TODO: {task} task is not implemented yet. Only 'detect' task is currently supported."
+                )
             else:
                 # 默认使用DetectionModel
                 model = DetectionModel(cfg=yaml_config, verbose=False)
             
-            # 加载权重
+            # 加载权重 - 转换为 Jittor 格式并直接加载
             if ckpt.get("ema"):
-                ema_state_dict = ckpt["ema"]
-                for k, v in ema_state_dict.items():
-                    ema_state_dict[k] = v.float()
-                model.load_state_dict(ema_state_dict)
+                # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
+                ema_weights = {}
+                for k, v in ckpt["ema"].items():
+                    if isinstance(v, np.ndarray):
+                        if v.dtype in [np.float16, np.float64]:
+                            v = v.astype(np.float32)
+                        ema_weights[k] = jt.array(v)
+                    else:
+                        ema_weights[k] = v
+                # 直接使用 load_state_dict 进行严格加载，确保完全匹配
+                model.load_state_dict(ema_weights, strict=True)
             elif ckpt.get("model"):
-                model_state_dict = ckpt["model"]
-                for k, v in model_state_dict.items():
-                    model_state_dict[k] = v.float()
-                model.load_state_dict(model_state_dict)
+                # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
+                model_weights = {}
+                for k, v in ckpt["model"].items():
+                    if isinstance(v, np.ndarray):
+                        if v.dtype in [np.float16, np.float64]:
+                            v = v.astype(np.float32)
+                        model_weights[k] = jt.array(v)
+                    else:
+                        model_weights[k] = v
+                # 直接使用 load_state_dict 进行严格加载，确保完全匹配
+                model.load_state_dict(model_weights, strict=True)
         else:
             # 原有的加载逻辑（向后兼容）
             model_data = ckpt.get("ema") or ckpt["model"]
@@ -950,8 +1063,17 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
                     # 对于其他格式，使用通用配置或抛出错误
                     raise ValueError(f"Cannot handle weight dictionary format for file: {w}")
                 
-                # 直接加载权重字典（假设是 Jittor 格式）
-                model.load_state_dict(model_data)
+                # 转换权重格式为 Jittor 并直接加载（model_data 已经是 numpy 格式）
+                jittor_weights = {}
+                for k, v in model_data.items():
+                    if isinstance(v, np.ndarray):
+                        if v.dtype in [np.float16, np.float64]:
+                            v = v.astype(np.float32)
+                        jittor_weights[k] = jt.array(v)
+                    else:
+                        jittor_weights[k] = v
+                # 直接使用 load_state_dict 进行严格加载，确保完全匹配
+                model.load_state_dict(jittor_weights, strict=True)
             else:
                 # 如果是模型对象
                 model = model_data.float()  # FP32 model
@@ -1001,33 +1123,135 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
         task = args.get("task", "detect")
         yaml_config = ckpt["model_yaml"]
         
+        # 处理 model_yaml：可能是字符串路径或字典
+        if isinstance(yaml_config, str):
+            # 如果是字符串路径，需要先加载
+            LOGGER.info(f"Loading model_yaml from path: {yaml_config}")
+            yaml_config = yaml_model_load(yaml_config)
+        elif isinstance(yaml_config, dict):
+            # 如果是字典，确保包含必要的字段
+            if "backbone" not in yaml_config or "head" not in yaml_config:
+                LOGGER.warning(
+                    f"WARNING ⚠️ model_yaml dict missing required fields (backbone/head). "
+                    f"Attempting to use as-is, but model may fail to load."
+                )
+            # 确保字典格式正确，添加必要的默认值
+            if "ch" not in yaml_config:
+                yaml_config["ch"] = 3
+            if "nc" not in yaml_config:
+                yaml_config["nc"] = 80  # 默认 COCO 类别数
+            
+            # 如果使用 scales 字典，确保 scale 键存在且正确
+            if "scales" in yaml_config and isinstance(yaml_config["scales"], dict):
+                if "scale" not in yaml_config:
+                    # 如果没有 scale，尝试从权重文件名或 train_args 中推断
+                    scale = args.get("scale") if args else None
+                    if not scale and "train_args" in ckpt:
+                        scale = ckpt["train_args"].get("scale")
+                    if not scale:
+                        # 使用 scales 的第一个键作为默认值
+                        scale = tuple(yaml_config["scales"].keys())[0]
+                        LOGGER.warning(
+                            f"WARNING ⚠️ No 'scale' found in model_yaml. Using first scale from scales dict: '{scale}'. "
+                            f"This may cause shape mismatch if incorrect."
+                        )
+                    yaml_config["scale"] = scale
+                LOGGER.info(
+                    f"Using saved model_yaml config (dict format) with nc={yaml_config.get('nc')}, ch={yaml_config.get('ch')}, "
+                    f"scale={yaml_config.get('scale', 'N/A')}, scales={list(yaml_config.get('scales', {}).keys()) if yaml_config.get('scales') else 'N/A'}"
+                )
+            else:
+                # 如果没有 scales，检查是否有 width_multiple 和 depth_multiple
+                width = yaml_config.get("width_multiple", "N/A")
+                depth = yaml_config.get("depth_multiple", "N/A")
+                LOGGER.info(
+                    f"Using saved model_yaml config (dict format) with nc={yaml_config.get('nc')}, ch={yaml_config.get('ch')}, "
+                    f"width_multiple={width}, depth_multiple={depth}"
+                )
+        else:
+            raise ValueError(
+                f"model_yaml must be a dict or str, got {type(yaml_config)}: {yaml_config}"
+            )
+        
         if task == "detect":
             model = DetectionModel(cfg=yaml_config, verbose=False)
         elif task in ["segment", "pose", "obb", "classify", "RTDETRDecoder"]:
-            raise NotImplementedError(f"{task} task is not implemented yet. Only 'detect' task is supported.")
+            # TODO: Other tasks (segment, pose, obb, classify, RTDETR) are not yet implemented
+            raise NotImplementedError(
+                f"TODO: {task} task is not implemented yet. Only 'detect' task is currently supported."
+            )
         else:
             # 默认使用DetectionModel
             model = DetectionModel(cfg=yaml_config, verbose=False)
         
-        # 加载权重
+        # 确保模型的 yaml 属性正确设置（使用保存的配置）
+        if isinstance(yaml_config, dict):
+            model.yaml = yaml_config.copy()  # 使用副本，避免修改原始配置
+        
+        # 输出详细的配置信息用于调试
+        yaml_info = f"nc={model.yaml.get('nc')}, ch={model.yaml.get('ch')}"
+        if "scales" in model.yaml and isinstance(model.yaml["scales"], dict):
+            scale = model.yaml.get("scale", "N/A")
+            scales_info = list(model.yaml["scales"].keys())
+            if scale != "N/A" and scale in model.yaml["scales"]:
+                depth, width, _ = model.yaml["scales"][scale]
+                yaml_info += f", scale={scale}, width={width}, depth={depth}, available_scales={scales_info}"
+            else:
+                yaml_info += f", scale={scale}, available_scales={scales_info}"
+        else:
+            width = model.yaml.get("width_multiple", "N/A")
+            depth = model.yaml.get("depth_multiple", "N/A")
+            yaml_info += f", width_multiple={width}, depth_multiple={depth}"
+        LOGGER.info(f"Model created with saved model_yaml: {yaml_info}")
+        
+        # 加载权重 - 转换为 Jittor 格式并直接加载
         if ckpt.get("ema"):
-            model.load_state_dict(ckpt["ema"])
+            # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
+            ema_weights = {}
+            for k, v in ckpt["ema"].items():
+                if isinstance(v, np.ndarray):
+                    if v.dtype in [np.float16, np.float64]:
+                        v = v.astype(np.float32)
+                    ema_weights[k] = jt.array(v)
+                else:
+                    ema_weights[k] = v
+            # 直接使用 load_state_dict 进行严格加载，确保完全匹配
+            model.load_state_dict(ema_weights, strict=True)
         elif ckpt.get("model"):
-            model.load_state_dict(ckpt["model"])
+            # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
+            model_weights = {}
+            for k, v in ckpt["model"].items():
+                if isinstance(v, np.ndarray):
+                    if v.dtype in [np.float16, np.float64]:
+                        v = v.astype(np.float32)
+                    model_weights[k] = jt.array(v)
+                else:
+                    model_weights[k] = v
+            # 直接使用 load_state_dict 进行严格加载，确保完全匹配
+            model.load_state_dict(model_weights, strict=True)
         
         model = model.to(device).float()  # FP32 model
     else:
-        # 原有的加载逻辑（向后兼容）
+        # 原有的加载逻辑（向后兼容）- 没有 model_yaml 时使用默认配置
+        LOGGER.warning(
+            f"WARNING ⚠️ No model_yaml found in checkpoint. Using default config. "
+            f"This may cause shape mismatch if the model architecture differs."
+        )
         model_data = ckpt.get("ema") or ckpt["model"]
         if isinstance(model_data, dict):
             # 如果是权重字典，需要重新构建模型
             from nkyolo.nn.tasks import DetectionModel
+            LOGGER.info(f"Using default config: nkyolo/cfg/models/11/yolo11.yaml")
             model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
             
-            # 转换权重字典中的 tensor 到 Jittor，确保使用 float32
+            # 转换权重字典中的 tensor 到 Jittor，确保使用 float32（model_data 已经是 numpy 格式）
             jittor_state_dict = {}
             for k, v in model_data.items():
-                if hasattr(v, 'detach'):  # tensor with detach method
+                if isinstance(v, np.ndarray):
+                    if v.dtype in [np.float16, np.float64]:
+                        v = v.astype(np.float32)
+                    jittor_state_dict[k] = jt.array(v)
+                elif hasattr(v, 'detach'):  # tensor with detach method
                     numpy_val = v.detach().cpu().numpy()
                     # 确保所有浮点权重都是 float32
                     if numpy_val.dtype in [np.float16, np.float64]:
@@ -1036,7 +1260,8 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
                 else:
                     jittor_state_dict[k] = v
             
-            model.load_state_dict(jittor_state_dict)
+            # 直接使用 load_state_dict 进行严格加载，确保完全匹配
+            model.load_state_dict(jittor_state_dict, strict=True)
         else:
             # 如果是模型对象，需要转换模型到 Jittor
             # 直接转换权重
@@ -1047,7 +1272,11 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
             source_state_dict = model_data.state_dict()
             jittor_state_dict = {}
             for k, v in source_state_dict.items():
-                if hasattr(v, 'detach'):  # tensor with detach method
+                if isinstance(v, np.ndarray):
+                    if v.dtype in [np.float16, np.float64]:
+                        v = v.astype(np.float32)
+                    jittor_state_dict[k] = jt.array(v)
+                elif hasattr(v, 'detach'):  # tensor with detach method
                     numpy_val = v.detach().cpu().numpy()
                     # 确保所有浮点权重都是 float32
                     if numpy_val.dtype in [np.float16, np.float64]:
@@ -1056,7 +1285,8 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
                 else:
                     jittor_state_dict[k] = v
             
-            model.load_state_dict(jittor_state_dict)
+            # 直接使用 load_state_dict 进行严格加载，确保完全匹配
+            model.load_state_dict(jittor_state_dict, strict=True)
 
     # Model compatibility updates
     model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
@@ -1098,8 +1328,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         scale = d.get("scale")
         if not scale:
             scale = tuple(scales.keys())[0]
-            LOGGER.warning(f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}'.")
+            LOGGER.warning(
+                f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}' from scales dict. "
+                f"Available scales: {list(scales.keys())}. This may cause shape mismatch if incorrect."
+            )
+        if scale not in scales:
+            available = list(scales.keys())
+            LOGGER.error(
+                f"ERROR ❌ scale '{scale}' not found in scales dict. Available scales: {available}. "
+                f"Using first available scale '{available[0]}' instead."
+            )
+            scale = available[0]
         depth, width, max_channels = scales[scale]
+        LOGGER.info(f"Using scale '{scale}': width_multiple={width}, depth_multiple={depth}, max_channels={max_channels}")
 
         activation_mapping = {
             'SiLU': nn.SiLU,
@@ -1228,9 +1469,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = sum(ch[x] for x in f)
         elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
             args.append([ch[x] for x in f])
-            if m is Segment:
+            if m is Segment:  # or m is YOLOESegment (when implemented)
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, Segment, Pose, OBB}:
+            if m in {Detect, Segment, Pose, OBB}:  # Note: YOLOEDetect and YOLOESegment would also set legacy when implemented
                 m.legacy = legacy
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
@@ -1257,14 +1498,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
 
 def yaml_model_load(path):
-    """Load a YOLOv8 model from a YAML file."""
+    """Load a YOLO model from a YAML file (supports YOLOv5, v8, v9, v10, v11, etc.)."""
     path = Path(path)
-    if path.stem in (f"yolov{d}{x}6" for x in "nsmlx" for d in (5, 8)):
+    # Handle P6 models (yolov5n6, yolov8n6, yolov9n6, yolov10n6, yolov11n6, etc.)
+    if path.stem in (f"yolov{d}{x}6" for x in "nsmlx" for d in (5, 8, 9, 10, 11)):
         new_stem = re.sub(r"(\d+)([nslmx])6(.+)?$", r"\1\2-p6\3", path.stem)
         LOGGER.warning(f"WARNING ⚠️ NK-YOLO P6 models now use -p6 suffix. Renaming {path.stem} to {new_stem}.")
         path = path.with_name(new_stem + path.suffix)
 
-    unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
+    # Unify model paths (e.g., yolov8x.yaml -> yolov8.yaml, yolov11n.yaml -> yolov11.yaml)
+    unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))
     yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
     d = yaml_load(yaml_file)  # model dict
     d["scale"] = guess_model_scale(path)
@@ -1274,18 +1517,18 @@ def yaml_model_load(path):
 
 def guess_model_scale(model_path):
     """
-    Takes a path to a YOLO model's YAML file as input and extracts the size character of the model's scale. The function
-    uses regular expression matching to find the pattern of the model scale in the YAML file name, which is denoted by
-    n, s, m, l, or x. The function returns the size character of the model scale as a string.
+    Extract the size character n, s, m, l, or x of the model's scale from the model path.
+    Supports YOLOv5, v8, v9, v10, v11, and other versions.
 
     Args:
         model_path (str | Path): The path to the YOLO model's YAML file.
 
     Returns:
-        (str): The size character of the model's scale, which can be n, s, m, l, or x.
+        (str): The size character of the model's scale (n, s, m, l, or x).
     """
     try:
-        return re.search(r"yolo[v]?\d+([nslmx])", Path(model_path).stem).group(1)  # noqa, returns n, s, m, l, or x
+        # Match patterns like yolov8n, yolov11s, yolo-e-m, etc.
+        return re.search(r"yolo(e-)?[v]?\d+([nslmx])", Path(model_path).stem).group(2)
     except AttributeError:
         return ""
 
@@ -1311,13 +1554,13 @@ def guess_model_task(model):
             return "classify"
         if "detect" in m:
             return "detect"
-        if m == "segment":
+        if "segment" in m:
             return "segment"
         if m == "pose":
             return "pose"
         if m == "obb":
             return "obb"
-        return "detect" # Default: use detect task
+        return "detect"  # Default: use detect task
 
     # Guess from model cfg
     if isinstance(model, dict):
@@ -1342,6 +1585,9 @@ def guess_model_task(model):
                 return "obb"
             elif isinstance(m, (Detect, WorldDetect, v10Detect)):
                 return "detect"
+            # Note: YOLOEDetect and YOLOESegment are not yet implemented
+            # elif isinstance(m, (YOLOEDetect, YOLOESegment)):
+            #     return "detect" if isinstance(m, YOLOEDetect) else "segment"
 
     # Guess from model filename
     if isinstance(model, (str, Path)):
@@ -1360,6 +1606,6 @@ def guess_model_task(model):
     # Unable to determine task from model
     LOGGER.warning(
         "WARNING ⚠️ Unable to automatically guess model task, assuming 'task=detect'. "
-        "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify','pose' or 'obb'."
+        "Note: Only 'detect' task is currently supported. Other tasks (segment, classify, pose, obb) are TODO."
     )
-    return "detect"  # assume detect
+    return "detect"  # assume detect (only supported task)
