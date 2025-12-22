@@ -827,8 +827,8 @@ def crop_mask(masks, boxes):
     """
     _, h, w = masks.shape
     x1, y1, x2, y2 = jt.chunk(boxes[:, :, None], 4, 1)  # x1 shape(n,1,1)
-    r = jt.arange(w, device=masks.device, dtype=x1.dtype)[None, None, :]  # rows shape(1,1,w)
-    c = jt.arange(h, device=masks.device, dtype=x1.dtype)[None, :, None]  # cols shape(1,h,1)
+    r = jt.arange(w, dtype=x1.dtype)[None, None, :]  # rows shape(1,1,w)
+    c = jt.arange(h, dtype=x1.dtype)[None, :, None]  # cols shape(1,h,1)
 
     return masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2))
 

@@ -185,15 +185,20 @@ class BasePredictor:
     def setup_source(self, source):
         """Sets up source and inference mode."""
         self.imgsz = check_imgsz(self.args.imgsz, stride=self.model.stride, min_dim=2)  # check image size
-        self.transforms = (
-            getattr(
-                self.model.model,
-                "transforms",
-                classify_transforms(self.imgsz[0], crop_fraction=self.args.crop_fraction),
-            )
-            if self.args.task == "classify"
-            else None
-        )
+        # TODO: implement transforms for classify
+        # self.transforms = (
+        #     getattr(
+        #         self.model.model,
+        #         "transforms",
+        #         classify_transforms(self.imgsz[0], crop_fraction=self.args.crop_fraction),
+        #     )
+        #     if self.args.task == "classify"
+        #     else None
+        # )
+        if self.args.task == "classify":
+            raise NotImplementedError("transforms for classify are not implemented")
+        self.transforms = None
+        
         self.dataset = load_inference_source(
             source=source,
             batch=self.args.batch,
