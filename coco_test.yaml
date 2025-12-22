@@ -2,10 +2,10 @@
 # Using actual COCO data path
 
 # Dataset info
-path: ""  # dataset root dir
-train: train2017  # train images (relative to 'path') 
-val: val2017      # val images (relative to 'path')
-test: test2017    # test images (optional)
+path: "coco"  # dataset root dir
+train: train2017.txt # train images (relative to 'path') 118287 images
+val: val2017.txt # val images (relative to 'path') 5000 images
+test: test-dev2017.txt 
 
 # Classes (COCO has 80 classes, showing first few)
 names:
