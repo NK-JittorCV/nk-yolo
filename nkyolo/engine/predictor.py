@@ -41,7 +41,7 @@ import jittor as jt
 
 from nkyolo.cfg import get_cfg, get_save_dir
 from nkyolo.data import load_inference_source
-from nkyolo.data.augment import LetterBox, classify_transforms
+from nkyolo.data.augment import LetterBox
 from nkyolo.nn.autobackend import AutoBackend
 from nkyolo.utils import DEFAULT_CFG, LOGGER, MACOS, WINDOWS, callbacks, colorstr, ops
 from nkyolo.utils.checks import check_imgsz, check_imshow
