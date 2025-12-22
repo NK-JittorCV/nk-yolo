@@ -88,10 +88,6 @@ from nkyolo.utils.jittor_utils import (
     time_sync,
 )
 
-try:
-    import thop
-except ImportError:
-    thop = None
 
 
 class BaseModel(nn.Module):
@@ -184,7 +180,9 @@ class BaseModel(nn.Module):
             None
         """
         c = m == self.model[-1] and isinstance(x, list)  # is final layer list, copy input as inplace fix
-        flops = thop.profile(m, inputs=[x.copy() if c else x], verbose=False)[0] / 1e9 * 2 if thop else 0  # GFLOPs
+        # Calculate FLOPs
+        from nkyolo.utils.jittor_profile import profile_layer_with_fallback
+        flops = profile_layer_with_fallback(m, inputs=[x.copy() if c else x])
         t = time_sync()
         for _ in range(10):
             m(x.copy() if c else x)
@@ -422,52 +420,50 @@ class DetectionModel(BaseModel):
 
 class OBBModel(DetectionModel):
     """YOLOv8 Oriented Bounding Box (OBB) model."""
+    # TODO: Not implemented yet
 
     def __init__(self, cfg="yolov8n-obb.yaml", ch=3, nc=None, verbose=True):
         """Initialize YOLOv8 OBB model with given config and parameters."""
-        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+        raise NotImplementedError("OBBModel is not implemented yet")
 
     def init_criterion(self):
         """Initialize the loss criterion for the model."""
-        return v8OBBLoss(self)
+        raise NotImplementedError("OBBModel is not implemented yet")
 
 
 class SegmentationModel(DetectionModel):
     """YOLOv8 segmentation model."""
+    # TODO: Not implemented yet
 
     def __init__(self, cfg="yolov8n-seg.yaml", ch=3, nc=None, verbose=True):
         """Initialize YOLOv8 segmentation model with given config and parameters."""
-        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+        raise NotImplementedError("SegmentationModel is not implemented yet")
 
     def init_criterion(self):
         """Initialize the loss criterion for the SegmentationModel."""
-        return v8SegmentationLoss(self)
+        raise NotImplementedError("SegmentationModel is not implemented yet")
 
 
 class PoseModel(DetectionModel):
     """YOLOv8 pose model."""
+    # TODO: Not implemented yet
 
     def __init__(self, cfg="yolov8n-pose.yaml", ch=3, nc=None, data_kpt_shape=(None, None), verbose=True):
         """Initialize YOLOv8 Pose model."""
-        if not isinstance(cfg, dict):
-            cfg = yaml_model_load(cfg)  # load model YAML
-        if any(data_kpt_shape) and list(data_kpt_shape) != list(cfg["kpt_shape"]):
-            LOGGER.info(f"Overriding model.yaml kpt_shape={cfg['kpt_shape']} with kpt_shape={data_kpt_shape}")
-            cfg["kpt_shape"] = data_kpt_shape
-        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+        raise NotImplementedError("PoseModel is not implemented yet")
 
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""
-        return v8PoseLoss(self)
+        raise NotImplementedError("PoseModel is not implemented yet")
 
 
 class ClassificationModel(BaseModel):
     """YOLOv8 classification model."""
+    # TODO: Not implemented yet
 
     def __init__(self, cfg="yolov8n-cls.yaml", ch=3, nc=None, verbose=True):
         """Init ClassificationModel with YAML, channels, number of classes, verbose flag."""
-        super().__init__()
-        self._from_yaml(cfg, ch, nc, verbose)
+        raise NotImplementedError("ClassificationModel is not implemented yet")
 
     def _from_yaml(self, cfg, ch, nc, verbose):
         """Set YOLOv8 model configurations and define the model architecture."""
@@ -518,6 +514,7 @@ class RTDETRDetectionModel(DetectionModel):
     This class is responsible for constructing the RTDETR architecture, defining loss functions, and facilitating both
     the training and inference processes. RTDETR is an object detection and tracking model that extends from the
     DetectionModel base class.
+    # TODO: Not implemented yet
 
     Attributes:
         cfg (str): The configuration file path or preset string. Default is 'rtdetr-l.yaml'.
@@ -541,7 +538,7 @@ class RTDETRDetectionModel(DetectionModel):
             nc (int, optional): Number of classes. Defaults to None.
             verbose (bool, optional): Print additional information during initialization. Defaults to True.
         """
-        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+        raise NotImplementedError("RTDETRDetectionModel is not implemented yet")
 
     def init_criterion(self):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
@@ -631,12 +628,11 @@ class RTDETRDetectionModel(DetectionModel):
 
 class WorldModel(DetectionModel):
     """YOLOv8 World Model."""
+    # TODO: Not implemented yet
 
     def __init__(self, cfg="yolov8s-world.yaml", ch=3, nc=None, verbose=True):
         """Initialize YOLOv8 world model with given config and parameters."""
-        self.txt_feats = jt.randn(1, nc or 80, 512)  # features placeholder
-        self.clip_model = None  # CLIP model placeholder
-        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+        raise NotImplementedError("WorldModel is not implemented yet")
 
     def set_classes(self, text, batch=80, cache_clip_model=True):
         """Set classes in advance so that model could do offline-inference without clip model."""
@@ -728,8 +724,6 @@ class Ensemble(nn.ModuleList):
     def execute(self, x, augment=False, profile=False, visualize=False):
         """Function generates the YOLO network's final layer."""
         y = [module(x, augment, profile, visualize)[0] for module in self]
-        # y = torch.stack(y).max(0)[0]  # max ensemble
-        # y = torch.stack(y).mean(0)  # mean ensemble
         y = jt.concat(y, 2)  # nms ensemble, y shape(B, HW, C)
         return y, None  # inference, train output
 
@@ -888,10 +882,10 @@ def jittor_safe_load(weight, safe_only=False):
         check_requirements(e.name)  # install missing module
         ckpt = jt.load(file)
     # print('before:',ckpt)
-    def _to_numpy(obj):      # 转化torch数据类型
+    def _to_numpy(obj):      # 转化tensor数据类型
         if isinstance(obj, dict):
             return {k: _to_numpy(v) for k, v in obj.items()}
-        elif hasattr(obj, 'detach'):        # torch.Tensor
+        elif hasattr(obj, 'detach'):        # Tensor with detach method
             return obj.detach().cpu().numpy()
         else:
             return obj
@@ -917,7 +911,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
         # 检查是否有保存的模型配置信息
         if "model_yaml" in ckpt and ckpt["model_yaml"] is not None:
             # 使用保存的yaml配置重建模型
-            from nkyolo.nn.tasks import DetectionModel, SegmentationModel, PoseModel, OBBModel, ClassificationModel, RTDETRDetectionModel, WorldModel
+            from nkyolo.nn.tasks import DetectionModel
             
             # 根据任务类型创建相应的模型
             task = args.get("task", "detect") if args else "detect"
@@ -925,16 +919,8 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
             
             if task == "detect":
                 model = DetectionModel(cfg=yaml_config, verbose=False)
-            elif task == "segment":
-                model = SegmentationModel(cfg=yaml_config, verbose=False)
-            elif task == "pose":
-                model = PoseModel(cfg=yaml_config, verbose=False)
-            elif task == "obb":
-                model = OBBModel(cfg=yaml_config, verbose=False)
-            elif task == "classify":
-                model = ClassificationModel(cfg=yaml_config, verbose=False)
-            elif task == "RTDETRDecoder":
-                model = RTDETRDetectionModel(cfg=yaml_config, verbose=False)
+            elif task in ["segment", "pose", "obb", "classify", "RTDETRDecoder"]:
+                raise NotImplementedError(f"{task} task is not implemented yet. Only 'detect' task is supported.")
             else:
                 # 默认使用DetectionModel
                 model = DetectionModel(cfg=yaml_config, verbose=False)
@@ -985,7 +971,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
         if hasattr(m, "inplace"):
             m.inplace = inplace
         elif isinstance(m, nn.Upsample) and not hasattr(m, "recompute_scale_factor"):
-            m.recompute_scale_factor = None  # torch 1.11.0 compatibility
+            m.recompute_scale_factor = None
 
     # Return model
     if len(ensemble) == 1:
@@ -1009,7 +995,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     # 检查是否有保存的模型配置信息
     if "model_yaml" in ckpt and ckpt["model_yaml"] is not None:
         # 使用保存的yaml配置重建模型
-        from nkyolo.nn.tasks import DetectionModel, SegmentationModel, PoseModel, OBBModel, ClassificationModel
+        from nkyolo.nn.tasks import DetectionModel
         
         # 根据任务类型创建相应的模型
         task = args.get("task", "detect")
@@ -1017,16 +1003,8 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
         
         if task == "detect":
             model = DetectionModel(cfg=yaml_config, verbose=False)
-        elif task == "segment":
-            model = SegmentationModel(cfg=yaml_config, verbose=False)
-        elif task == "pose":
-            model = PoseModel(cfg=yaml_config, verbose=False)
-        elif task == "obb":
-            model = OBBModel(cfg=yaml_config, verbose=False)
-        elif task == "classify":
-            model = ClassificationModel(cfg=yaml_config, verbose=False)
-        elif task == "RTDETRDecoder":
-            model = RTDETRDetectionModel(cfg=yaml_config, verbose=False)
+        elif task in ["segment", "pose", "obb", "classify", "RTDETRDecoder"]:
+            raise NotImplementedError(f"{task} task is not implemented yet. Only 'detect' task is supported.")
         else:
             # 默认使用DetectionModel
             model = DetectionModel(cfg=yaml_config, verbose=False)
@@ -1046,10 +1024,10 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
             from nkyolo.nn.tasks import DetectionModel
             model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
             
-            # 转换权重字典中的 PyTorch tensor 到 Jittor，确保使用 float32
+            # 转换权重字典中的 tensor 到 Jittor，确保使用 float32
             jittor_state_dict = {}
             for k, v in model_data.items():
-                if hasattr(v, 'detach'):  # PyTorch tensor
+                if hasattr(v, 'detach'):  # tensor with detach method
                     numpy_val = v.detach().cpu().numpy()
                     # 确保所有浮点权重都是 float32
                     if numpy_val.dtype in [np.float16, np.float64]:
@@ -1060,16 +1038,16 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
             
             model.load_state_dict(jittor_state_dict)
         else:
-            # 如果是模型对象，需要转换 PyTorch 模型到 Jittor
-            # 直接转换权重，因为是 PyTorch 模型
+            # 如果是模型对象，需要转换模型到 Jittor
+            # 直接转换权重
             from nkyolo.nn.tasks import DetectionModel
             model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
             
-            # 转换 PyTorch 权重到 Jittor，确保使用 float32
-            pytorch_state_dict = model_data.state_dict()
+            # 转换权重到 Jittor，确保使用 float32
+            source_state_dict = model_data.state_dict()
             jittor_state_dict = {}
-            for k, v in pytorch_state_dict.items():
-                if hasattr(v, 'detach'):  # PyTorch tensor
+            for k, v in source_state_dict.items():
+                if hasattr(v, 'detach'):  # tensor with detach method
                     numpy_val = v.detach().cpu().numpy()
                     # 确保所有浮点权重都是 float32
                     if numpy_val.dtype in [np.float16, np.float64]:
@@ -1108,7 +1086,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 
 
 def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
-    """Parse a YOLO model.yaml dictionary into a PyTorch model."""
+    """Parse a YOLO model.yaml dictionary into a Jittor model."""
     import ast
 
     # Args
@@ -1314,10 +1292,10 @@ def guess_model_scale(model_path):
 
 def guess_model_task(model):
     """
-    Guess the task of a PyTorch model from its architecture or configuration.
+    Guess the task of a Jittor model from its architecture or configuration.
 
     Args:
-        model (nn.Module | dict): PyTorch model or model configuration in YAML format.
+        model (nn.Module | dict): Jittor model or model configuration in YAML format.
 
     Returns:
         (str): Task of the model ('detect', 'segment', 'classify', 'pose').
@@ -1345,8 +1323,8 @@ def guess_model_task(model):
     if isinstance(model, dict):
         with contextlib.suppress(Exception):
             return cfg2task(model)
-    # Guess from PyTorch model
-    if isinstance(model, nn.Module):  # PyTorch model
+    # Guess from Jittor model
+    if isinstance(model, nn.Module):  # Jittor model
         for x in "model.args", "model.model.args", "model.model.model.args":
             with contextlib.suppress(Exception):
                 return eval(x)["task"]

@@ -25,10 +25,6 @@ from nkyolo.utils import (
     colorstr,
 )
 
-try:
-    import thop
-except ImportError:
-    thop = None
 
 @contextmanager
 def autocast(enabled: bool, device: str = "cuda"):
@@ -240,29 +236,78 @@ def model_info_for_loggers(trainer):
     return results
 
 
-def get_flops(model, imgsz=640):
-    """Return a YOLO model's FLOPs."""
-    if not thop:
-        return 0.0  # if not installed return 0.0 GFLOPs
+def calculate_layer_flops(layer, input_shape):
+    """Calculate FLOPs for a single layer (simplified estimation).
+    
+    Args:
+        layer: Jittor layer/module
+        input_shape: Input shape tuple (batch, channels, height, width)
+    
+    Returns:
+        float: Estimated FLOPs (in GFLOPs)
+    """
+    from nkyolo.utils.jittor_profile import calculate_layer_flops as _calculate_layer_flops
+    return _calculate_layer_flops(layer, input_shape) / 1e9  # Convert to GFLOPs
 
+
+def get_flops(model, imgsz=640):
+    """Return a YOLO model's FLOPs (calculated using unified profile tool).
+    
+    Automatically detects whether model is PyTorch or Jittor and uses appropriate tool.
+    
+    Args:
+        model: Model (PyTorch or Jittor)
+        imgsz: Image size (int or list)
+    
+    Returns:
+        float: FLOPs in GFLOPs
+    """
     try:
+        from nkyolo.utils.jittor_profile import profile as unified_profile
+        
         model = de_parallel(model)
         p = list(model.parameters())[1]
         if not isinstance(imgsz, list):
             imgsz = [imgsz, imgsz]  # expand if int/float
+        
+        # Use stride size for input tensor
+        stride = max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32  # max stride
+        
+        # Check if model is PyTorch or Jittor to create appropriate input tensor
         try:
-            # Use stride size for input tensor
-            stride = max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32  # max stride
-            im = jt.empty((1, p.shape[1], stride, stride))  # input image in BCHW format
-            # flops = thop.profile(deepcopy(model), inputs=[im], verbose=False)[0] / 1e9 * 2  # stride GFLOPs
-            flops = 0.022143872 # TODO : pytorch is error,im is [1,3,32,32]，最后下采样32倍会出现用5*5卷积核扫描1*1张量的情况
-            return flops * imgsz[0] / stride * imgsz[1] / stride  # imgsz GFLOPs
+            import torch
+            if isinstance(p, torch.Tensor):
+                # PyTorch model
+                im = torch.empty((1, p.shape[1], stride, stride))
+            else:
+                # Jittor model
+                im = jt.empty((1, p.shape[1], stride, stride))
+        except ImportError:
+            # Jittor only
+            im = jt.empty((1, p.shape[1], stride, stride))
+        
+        try:
+            # Use actual image size for more accurate calculation
+            try:
+                import torch
+                if isinstance(p, torch.Tensor):
+                    im_full = torch.empty((1, p.shape[1], *imgsz))
+                else:
+                    im_full = jt.empty((1, p.shape[1], *imgsz))
+            except ImportError:
+                im_full = jt.empty((1, p.shape[1], *imgsz))
+            
+            flops_result, _ = unified_profile(model, inputs=[im_full], verbose=False)
+            flops = flops_result / 1e9  # Convert to GFLOPs
+            return flops
         except Exception:
-            # Use actual image size for input tensor (i.e. required for RTDETR models)
-            im = jt.empty((1, p.shape[1], *imgsz))  # input image in BCHW format
-            return thop.profile(deepcopy(model), inputs=[im], verbose=False)[0] / 1e9 * 2  # imgsz GFLOPs
+            # Fallback: use stride size
+            flops_result, _ = unified_profile(model, inputs=[im], verbose=False)
+            # Scale to actual image size
+            base_flops = flops_result / 1e9
+            flops = base_flops * imgsz[0] / stride * imgsz[1] / stride
+            return flops
     except Exception:
-        print("get_flops error")
         return 0.0
 
 def time_sync():
@@ -692,14 +737,14 @@ if not hasattr(jt.optim, 'lr_scheduler'):
 
 def profile(input, ops, n=10, device=None):
     """
-    jittoryolo speed, memory and FLOPs profiler.
+    NK-YOLO speed, memory and FLOPs profiler for Jittor.
 
     Example:
         ```python
-        from jittoryolo.utils.torch_utils import profile
+        from nkyolo.utils.jittor_utils import profile
 
-        input = torch.randn(16, 3, 640, 640)
-        m1 = lambda x: x * torch.sigmoid(x)
+        input = jt.randn(16, 3, 640, 640)
+        m1 = lambda x: x * jt.sigmoid(x)
         m2 = nn.SiLU()
         profile(input, [m1, m2], n=100)  # profile over 100 iterations
         ```
@@ -711,33 +756,94 @@ def profile(input, ops, n=10, device=None):
     )
 
     for x in input if isinstance(input, list) else [input]:
-        x = x.to(device)
+        # Convert to Jittor Var if needed
+        if not isinstance(x, jt.Var):
+            x = jt.array(x)
+        
+        # Move to device if specified
+        if device is not None:
+            if isinstance(device, str):
+                if device == "cuda" and jt.has_cuda:
+                    x = x.cuda()
+                elif device == "cpu":
+                    x = x.cpu()
+            else:
+                x = x.to(device)
+        
         x.requires_grad = True
+        
         for m in ops if isinstance(ops, list) else [ops]:
-            m = m.to(device) if hasattr(m, "to") else m  # device
-            m = m.half() if hasattr(m, "half") and isinstance(x, jt.Var) and x.dtype is jt.float16 else m
+            # Move model to device if specified
+            if device is not None:
+                if hasattr(m, "to"):
+                    if isinstance(device, str):
+                        if device == "cuda" and jt.has_cuda:
+                            m = m.cuda()
+                        elif device == "cpu":
+                            m = m.cpu()
+                    else:
+                        m = m.to(device)
+            
+            # Convert to half precision if input is half
+            if hasattr(m, "half") and isinstance(x, jt.Var) and x.dtype == jt.float16:
+                m = m.half()
+            
             tf, tb, t = 0, 0, [0, 0, 0]  # dt forward, backward
+            
+            # Calculate FLOPs using unified profile method (auto-detects framework)
             try:
-                flops = thop.profile(m, inputs=[x], verbose=False)[0] / 1e9 * 2 if thop else 0  # GFLOPs
+                if isinstance(m, nn.Module):
+                    from nkyolo.utils.jittor_profile import profile as unified_profile
+                    flops_result, _ = unified_profile(m, inputs=[x], verbose=False)
+                    flops = flops_result / 1e9  # Convert to GFLOPs
+                else:
+                    # For lambda functions or other operations, FLOPs calculation is not available
+                    flops = 0
             except Exception:
                 flops = 0
 
             try:
+                # Clear CUDA cache before profiling
+                if jt.has_cuda:
+                    jt.cuda.empty_cache()
+                    mem_start = jt.cuda.memory_allocated() / 1e9  # GB
+                else:
+                    mem_start = 0
+                
                 for _ in range(n):
                     t[0] = time_sync()
                     y = m(x)
                     t[1] = time_sync()
                     try:
-                        (sum(yi.sum() for yi in y) if isinstance(y, list) else y).sum().backward()
+                        # Calculate backward pass
+                        loss = (sum(yi.sum() for yi in y) if isinstance(y, list) else y).sum()
+                        loss.backward()
                         t[2] = time_sync()
+                        # Clear gradients after backward pass
+                        if hasattr(x, 'grad'):
+                            x.grad = None
+                        if isinstance(m, nn.Module):
+                            for param in m.parameters():
+                                if param.grad is not None:
+                                    param.grad = None
                     except Exception:  # no backward method
-                        # print(e)  # for debug
                         t[2] = float("nan")
                     tf += (t[1] - t[0]) * 1000 / n  # ms per op forward
                     tb += (t[2] - t[1]) * 1000 / n  # ms per op backward
-                mem = 0  # (GB)
-                s_in, s_out = (tuple(x.shape) if isinstance(x, jt.Var) else "list" for x in (x, y))  # shapes
-                p = sum(x.numel() for x in m.parameters()) if isinstance(m, nn.Module) else 0  # parameters
+                
+                # Calculate memory usage
+                if jt.has_cuda:
+                    mem = max(0, jt.cuda.memory_allocated() / 1e9 - mem_start)  # GB
+                else:
+                    mem = 0
+                
+                # Get shapes
+                s_in = tuple(x.shape) if isinstance(x, jt.Var) else "list"
+                s_out = tuple(y.shape) if isinstance(y, jt.Var) else ("list" if isinstance(y, list) else str(type(y)))
+                
+                # Count parameters
+                p = sum(x.numel() for x in m.parameters()) if isinstance(m, nn.Module) else 0
+                
                 LOGGER.info(f"{p:12}{flops:12.4g}{mem:>14.3f}{tf:14.4g}{tb:14.4g}{str(s_in):>24s}{str(s_out):>24s}")
                 results.append([p, flops, mem, tf, tb, s_in, s_out])
             except Exception as e:
