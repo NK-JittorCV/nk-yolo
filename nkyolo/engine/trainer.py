@@ -238,6 +238,7 @@ class BaseTrainer:
     def _setup_train(self, world_size):
         """Builds dataloaders and optimizer on correct rank process."""
         # Model
+
         self.run_callbacks("on_pretrain_routine_start")
         ckpt = self.setup_model()
         self.model = self.model
@@ -633,7 +634,7 @@ class BaseTrainer:
     def setup_model(self):
         """Load/create/download model for any task."""
         if isinstance(self.model, jt.nn.Module):  # if model is loaded beforehand. No setup needed
-            return
+            return None  # Explicitly return None when model is already set
 
         cfg, weights = self.model, None
         ckpt = None

@@ -336,7 +336,7 @@ class BaseModel(nn.Module):
 class DetectionModel(BaseModel):
     """YOLO detection model (supports YOLOv5, v8, v9, v10, v11, etc.)."""
 
-    def __init__(self, cfg="yolov8n.yaml", ch=3, nc=None, verbose=True):  # model, input channels, number of classes
+    def __init__(self, cfg, ch=3, nc=None, verbose=True):  # model, input channels, number of classes
         """Initialize the YOLO detection model with the given config and parameters.
         
         Args:
