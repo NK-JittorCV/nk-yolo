@@ -341,6 +341,16 @@ class BaseTrainer:
                 v.requires_grad = False
                 continue
             
+            # Configuration parameters that should never require gradients
+            if "stride" in k:
+                v.requires_grad = False
+                continue
+            
+            # DFL layer parameters should not require gradients (fixed layer)
+            if ".dfl" in k:
+                v.requires_grad = False
+                continue
+            
             # Freeze layers in freeze list
             if any(x in k for x in freeze_layer_names):
                 LOGGER.info(f"Freezing layer '{k}'")
@@ -506,16 +516,17 @@ class BaseTrainer:
                 # Log
                 if RANK in {-1, 0}:
                     loss_length = self.tloss.shape[0] if len(self.tloss.shape) else 1
-                    pbar.set_description(
-                        ("%11s" * 2 + "%11.4g" * (2 + loss_length))
-                        % (
-                            f"{epoch + 1}/{self.epochs}",
-                            f"{self._get_memory():.3g}G",  # (GB) GPU memory util
-                            *(self.tloss if loss_length > 1 else jt.unsqueeze(self.tloss, 0)),  # losses
-                            batch["cls"][0].shape[0],  # batch size, i.e. 8
-                            batch["img"][0].shape[-1],  # imgsz, i.e 640
-                        )
-                    )
+                    memory_str = self._get_memory_str()  # Get memory string or empty
+                    format_str = "%11s" * (1 + (1 if memory_str else 0)) + "%11.4g" * (2 + loss_length)
+                    log_items = [f"{epoch + 1}/{self.epochs}"]
+                    if memory_str:
+                        log_items.append(memory_str)
+                    log_items.extend([
+                        *(self.tloss if loss_length > 1 else jt.unsqueeze(self.tloss, 0)),  # losses
+                        batch["cls"][0].shape[0],  # batch size, i.e. 8
+                        batch["img"][0].shape[-1],  # imgsz, i.e 640
+                    ])
+                    pbar.set_description(format_str % tuple(log_items))
                     self.run_callbacks("on_batch_end")
                     if self.args.plots and ni in self.plot_idx:
                         self.plot_training_samples(batch, ni)
@@ -587,25 +598,22 @@ class BaseTrainer:
 
     def _get_memory(self, fraction=False):
         """Get accelerator memory utilization in GB or as a fraction of total memory."""
-        memory, total = 0, 0
-        if self.device == "mps":
-            # Jittor doesn't support MPS, fallback to CPU
-            memory = 0
-            if fraction:
-                return __import__("psutil").virtual_memory().percent / 100
-        elif self.device == "cpu":
-            memory = 0
-        else:
-            try:
-                # Jittor CUDA memory API
-                memory = jt.cuda.memory_allocated()
-                if fraction:
-                    # Jittor doesn't have get_device_properties, use a fallback
-                    total = 8 * 1024**3  # assume 8GB VRAM, can be obtained through other methods in practice
-            except:
-                memory = 0
-                total = 0
-        return ((memory / total) if total > 0 else 0) if fraction else (memory / 1e9)
+        device_str = str(self.device).lower()
+        
+        # Handle non-CUDA devices
+        if "mps" in device_str:
+            return __import__("psutil").virtual_memory().percent / 100 if fraction else 0.0
+        
+        if "cpu" in device_str:
+            return 0.0
+        
+        # Handle CUDA devices - Jittor has no direct memory API, return None to indicate unavailable
+        return None
+
+    def _get_memory_str(self):
+        """Get memory string for display, returns empty string if unavailable."""
+        memory = self._get_memory()
+        return f"{memory:.3g}G" if memory is not None and memory > 0 else ""
 
     def _model_train(self):
         """Set model in training mode."""
@@ -617,18 +625,15 @@ class BaseTrainer:
                     m.eval()
 
     def _clear_memory(self, threshold: float = None):
-        """Clear accelerator memory by calling garbage collector and emptying cache."""
+        """Clear accelerator memory by calling garbage collector (Jittor uses jt.gc() per official docs)."""
         if threshold:
             assert 0 <= threshold <= 1, "Threshold must be between 0 and 1."
-            if self._get_memory(fraction=True) <= threshold:
+            memory_frac = self._get_memory(fraction=True)
+            if memory_frac is None or memory_frac <= threshold:
                 return
         gc.collect()
-        if self.device == "mps":
-            jt.mps.empty_cache()
-        elif self.device == "cpu":
-            return
-        else:
-            jt.cuda.empty_cache()
+        if jt.has_cuda and "cuda" in str(self.device).lower():
+            jt.gc()  # Jittor's official way to release GPU memory
 
     def read_results_csv(self):
         """Read results.csv into a dict using pandas."""

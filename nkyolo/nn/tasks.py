@@ -266,6 +266,7 @@ class BaseModel(nn.Module):
         m = self.model[-1]  # Detect()
         if isinstance(m, (Detect, WorldDetect, v10Detect)):  # includes all Detect subclasses
             m.stride = fn(m.stride)
+            m.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
             if hasattr(m, "anchors"):
                 m.anchors = fn(m.anchors)
             if hasattr(m, "strides"):
@@ -371,20 +372,42 @@ class DetectionModel(BaseModel):
             m.inplace = self.inplace
 
             def _execute(x):
-                """Performs a execute pass through the model for stride calculation."""
-                if self.end2end:
-                    return self.execute(x)["one2many"]
-                # For detection models, output is typically a tensor or tuple
-                output = self.execute(x)
-                # Return the first element if it's a tuple (inference output, training output)
-                return output[0] if isinstance(output, (list, tuple)) and len(output) > 0 else output
+                """Performs a forward pass through the model for stride calculation."""
+                # Forward through backbone and neck to get feature maps
+                y = []  # outputs
+                for module in self.model[:-1]:  # except the head part
+                    if module.f != -1:  # if not from previous layer
+                        x = y[module.f] if isinstance(module.f, int) else [x if j == -1 else y[j] for j in module.f]
+                    x = module(x)  # run
+                    y.append(x if module.i in self.save else None)  # save output
+                
+                # Get feature maps that will be fed to the head
+                head_input = [y[j] for j in m.f]
+                
+                # Execute head to get feature maps
+                # In training mode, Detect.execute returns feature maps directly
+                # In eval mode, it returns (inference_output, feature_maps)
+                head_output = m(head_input)
+                
+                # Handle different return formats from head
+                if isinstance(head_output, (list, tuple)) and len(head_output) == 2:
+                    # Eval mode: (inference, features) - return feature maps
+                    return head_output[1]
+                elif isinstance(head_output, list):
+                    # Training mode: feature maps list
+                    return head_output
+                else:
+                    # Fallback: use head input (feature maps before head processing)
+                    return head_input
 
             m.stride = jt.Var([s / x.shape[-2] for x in _execute(jt.zeros(1, ch, s, s))])  # execute
+            m.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
             self.stride = m.stride
             if hasattr(m, "bias_init"):
                 m.bias_init()  # only run once
         else:
             self.stride = jt.Var([32])  # default stride for i.e. RTDETR
+            self.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
 
         # Init weights, biases
         initialize_weights(self)
@@ -510,6 +533,7 @@ class ClassificationModel(BaseModel):
             raise ValueError("nc not specified. Must specify nc in model.yaml or function arguments.")
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.stride = jt.Var([1])  # no stride constraints
+        self.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.info()
 
@@ -1084,6 +1108,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
         model.task = guess_model_task(model)
         if not hasattr(model, "stride"):
             model.stride = jt.Var([32.0])
+            model.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
 
         # Append
         ensemble.append(model.fuse().eval() if fuse and hasattr(model, "fuse") else model.eval())  # model in eval mode
@@ -1295,6 +1320,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 
     if not hasattr(model, "stride"):
         model.stride = jt.array([32.0])
+        model.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
 
     # 模型转换为评估模式并移动到指定设备
     if fuse and hasattr(model, "fuse"):

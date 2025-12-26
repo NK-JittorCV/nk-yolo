@@ -160,15 +160,19 @@ class DetectionTrainer(BaseTrainer):
         """Returns formatted string header for training progress display.
         
         Returns:
-            str: Formatted string with column headers (Epoch, GPU_mem, losses, Instances, Size).
+            str: Formatted string with column headers (Epoch, GPU_mem (if available), losses, Instances, Size).
         """
-        return ("\n" + "%11s" * (4 + len(self.loss_names))) % (
-            "Epoch",
-            "GPU_mem",
-            *self.loss_names,
-            "Instances",
-            "Size",
-        )
+        # Check if memory is available
+        memory_str = self._get_memory_str() if hasattr(self, '_get_memory_str') else ""
+        has_memory = bool(memory_str)
+        
+        headers = ["Epoch"]
+        if has_memory:
+            headers.append("GPU_mem")
+        headers.extend(self.loss_names)
+        headers.extend(["Instances", "Size"])
+        
+        return ("\n" + "%11s" * len(headers)) % tuple(headers)
 
     def plot_training_samples(self, batch, ni):
         """Plots training samples with annotations.

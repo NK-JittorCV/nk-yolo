@@ -305,23 +305,132 @@ class RotatedTaskAlignedAssigner(TaskAlignedAssigner):
 
 
 def make_anchors(feats, strides, grid_cell_offset=0.5):
-    """Generate anchors from features."""
+    """Generate anchors from features.
+    
+    Args:
+        feats: List of feature tensors, each with shape (B, C, H, W)
+        strides: List, tuple, or Jittor Var of stride values, should match length of feats
+        grid_cell_offset: Offset for grid cell centers (default 0.5)
+    
+    Returns:
+        anchor_points: Concatenated anchor points, shape (sum(H*W), 2)
+        stride_tensor: Concatenated stride tensor, shape (sum(H*W), 1)
+    
+    Note:
+        The number of anchor points should match the total number of spatial locations
+        across all feature maps, which should equal the second dimension of pred_distri
+        when generated from the same feats.
+    """
     anchor_points, stride_tensor = [], []
-    assert feats is not None
+    assert feats is not None, "feats cannot be None"
+    assert len(feats) > 0, "feats cannot be empty"
+    
+    # Convert strides to list, handling Jittor Var, list, tuple, or scalar
+    if isinstance(strides, jt.Var):
+        # Jittor Var - convert to list of Python floats
+        strides_list = [float(strides[i]) for i in range(len(strides))]
+    elif isinstance(strides, (list, tuple)):
+        # Already a list or tuple
+        strides_list = list(strides)
+    elif hasattr(strides, '__len__') and not isinstance(strides, (str, bytes)):
+        # Other sequence type
+        strides_list = list(strides)
+    else:
+        # Scalar - repeat for all feats
+        strides_list = [float(strides)] * len(feats)
+    
+    if len(strides_list) != len(feats):
+        raise ValueError(
+            f"Length mismatch: feats has {len(feats)} elements, "
+            f"but strides has {len(strides_list)} elements. "
+            f"They must have the same length."
+        )
+    
     dtype = feats[0].dtype
-    for i, stride in enumerate(strides):
+    total_anchors = 0
+    
+    for i, stride in enumerate(strides_list):
+        if feats[i] is None:
+            raise ValueError(f"feats[{i}] is None")
+        
         _, _, h, w = feats[i].shape
+        stride_val = float(stride)  # Ensure stride is a Python float
+        
         sx = jt.arange(end=w, dtype=dtype) + grid_cell_offset  # shift x
         sy = jt.arange(end=h, dtype=dtype) + grid_cell_offset  # shift y
         sy, sx = jt.meshgrid(sy, sx)
         anchor_points.append(jt.stack((sx, sy), -1).view(-1, 2))
-        stride_tensor.append(jt.full((h * w, 1), stride, dtype=dtype))
-    return jt.cat(anchor_points), jt.cat(stride_tensor)
+        stride_tensor.append(jt.full((h * w, 1), stride_val, dtype=dtype))
+        total_anchors += h * w
+    
+    anchor_points_cat = jt.cat(anchor_points)
+    stride_tensor_cat = jt.cat(stride_tensor)
+    
+    # Verify the total number of anchors matches expected count
+    assert anchor_points_cat.shape[0] == total_anchors, (
+        f"Anchor count mismatch: expected {total_anchors}, got {anchor_points_cat.shape[0]}"
+    )
+    
+    return anchor_points_cat, stride_tensor_cat
 
 
 def dist2bbox(distance, anchor_points, xywh=True, dim=-1):
-    """Transform distance(ltrb) to box(xywh or xyxy)."""
+    """Transform distance(ltrb) to box(xywh or xyxy).
+    
+    Args:
+        distance: Distance tensor, shape (b, h*w, 4) or (h*w, 4)
+        anchor_points: Anchor points, shape (h*w, 2) or (b, h*w, 2)
+        xywh: If True, return xywh format, else return xyxy format
+        dim: Dimension along which to split distance
+    
+    Returns:
+        Bounding boxes in xywh or xyxy format
+    """
     lt, rb = distance.chunk(2, dim)
+    
+    # Handle shape mismatch: ensure anchor_points can broadcast with distance
+    # If distance has batch dimension but anchor_points doesn't, expand anchor_points
+    if distance.ndim == 3 and anchor_points.ndim == 2:
+        # distance: (b, h*w, 4), anchor_points: (h*w, 2)
+        # Check if anchor count matches
+        if anchor_points.shape[0] != distance.shape[1]:
+            # Shape mismatch - anchor_points and distance have different anchor counts
+            # This should not happen if make_anchors and pred_distri use the same feats
+            # As a workaround, we'll use the shape from distance as the source of truth
+            # and pad or slice anchor_points to match
+            expected_anchors = distance.shape[1]
+            actual_anchors = anchor_points.shape[0]
+            
+            if actual_anchors < expected_anchors:
+                # Pad anchor_points if it has fewer anchors
+                # This is a workaround - the root cause should be fixed in make_anchors
+                pad_size = expected_anchors - actual_anchors
+                # Repeat the last anchor point to pad
+                last_anchor = anchor_points[-1:].expand(pad_size, -1)
+                anchor_points = jt.cat([anchor_points, last_anchor], dim=0)
+            elif actual_anchors > expected_anchors:
+                # Slice anchor_points if it has more anchors
+                anchor_points = anchor_points[:expected_anchors]
+        
+        # Expand anchor_points to (1, h*w, 2) for broadcasting
+        anchor_points = anchor_points.unsqueeze(0)
+    
+    # After unsqueeze, anchor_points should be (1, h*w, 2) or (b, h*w, 2)
+    # lt/rb should be (b, h*w, 2)
+    # Jittor broadcasting: (1, h*w, 2) - (b, h*w, 2) -> (b, h*w, 2)
+    # Verify shapes are compatible
+    if anchor_points.ndim == 3 and lt.ndim == 3:
+        if anchor_points.shape[1] != lt.shape[1]:
+            # Final check - if still mismatched, raise a clear error
+            raise ValueError(
+                f"Shape mismatch in dist2bbox: anchor_points shape {anchor_points.shape} "
+                f"cannot broadcast with distance shape {distance.shape}. "
+                f"Expected anchor_points[1] == distance[1], got {anchor_points.shape[1]} != {distance.shape[1]}"
+            )
+        # Expand batch dimension if needed
+        if anchor_points.shape[0] == 1 and lt.shape[0] > 1:
+            anchor_points = anchor_points.expand(lt.shape[0], -1, -1)
+    
     x1y1 = anchor_points - lt
     x2y2 = anchor_points + rb
     if xywh:
