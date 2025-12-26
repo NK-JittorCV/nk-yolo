@@ -1625,7 +1625,7 @@ class LetterBox:
         >>> updated_instances = result["instances"]
     """
 
-    def __init__(self, new_shape=(640, 640), auto=False, scaleup=True, center=True, stride=32, padding_value=114, interpolation=cv2.INTER_LINEAR):
+    def __init__(self, new_shape=(640, 640), auto=False, scaleFill=False, scaleup=True, center=True, stride=32, padding_value=114, interpolation=cv2.INTER_LINEAR):
         """
         Initialize LetterBox object for resizing and padding images.
 
@@ -1635,9 +1635,12 @@ class LetterBox:
         Args:
             new_shape (Tuple[int, int]): Target size (height, width) for the resized image.
             auto (bool): If True, use minimum rectangle to resize. If False, use new_shape directly.
+            scaleFill (bool): If True, stretch the image to new_shape without padding. If False, maintain aspect ratio.
             scaleup (bool): If True, allow scaling up. If False, only scale down.
             center (bool): If True, center the placed image. If False, place image in top-left corner.
             stride (int): Stride of the model (e.g., 32 for YOLOv5).
+            padding_value (int): Value used for padding (default: 114).
+            interpolation (int): OpenCV interpolation method (default: cv2.INTER_LINEAR).
 
         Attributes:
             new_shape (Tuple[int, int]): Target size for the resized image.
@@ -1652,6 +1655,7 @@ class LetterBox:
         """
         self.new_shape = new_shape
         self.auto = auto
+        self.scaleFill = scaleFill
         self.scaleup = scaleup
         self.stride = stride
         self.center = center  # Put the image in the middle or top-left
