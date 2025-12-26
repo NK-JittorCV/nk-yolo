@@ -232,12 +232,75 @@ class v8DetectionLoss:
             pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj)
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
+        
+        # Verify anchor_points and pred_dist have matching anchor counts
+        if pred_dist.ndim == 3 and anchor_points.ndim == 2:
+            expected_anchors = pred_dist.shape[1]
+            actual_anchors = anchor_points.shape[0]
+            if actual_anchors != expected_anchors:
+                # Log warning but let dist2bbox handle the shape mismatch
+                from nkyolo.utils import LOGGER
+                LOGGER.warning(
+                    f"Anchor count mismatch in bbox_decode: anchor_points has {actual_anchors} anchors, "
+                    f"but pred_dist has {expected_anchors} anchors. This may indicate an issue with "
+                    f"make_anchors or pred_distri generation."
+                )
+        
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = jt.zeros(3)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
+        
+        # Convert stride to list and ensure it matches feats length
+        # Convert stride to list for easier handling
+        if isinstance(self.stride, jt.Var):
+            stride_len = len(self.stride)
+            stride_list = [float(self.stride[i]) for i in range(stride_len)]
+        elif isinstance(self.stride, (list, tuple)):
+            stride_list = list(self.stride)
+        else:
+            stride_list = [float(self.stride)]
+        
+        # If stride has fewer elements than feats, compute missing strides from feature shapes
+        if len(stride_list) < len(feats):
+            # Compute stride from feature map sizes
+            # Stride is typically: input_size / feature_map_size
+            # We'll use a reference input size (640) and compute stride for each feature map
+            reference_size = 640.0  # Standard YOLO input size
+            for i in range(len(stride_list), len(feats)):
+                h = feats[i].shape[2]  # feature map height
+                # Stride = input_size / feature_map_size
+                computed_stride = reference_size / h
+                stride_list.append(computed_stride)
+        
+        # If stride has more elements than feats, truncate
+        if len(stride_list) > len(feats):
+            from nkyolo.utils import LOGGER
+            LOGGER.warning(
+                f"Stride length ({len(stride_list)}) > feats length ({len(feats)}). "
+                f"Truncating stride to match feats length."
+            )
+            stride_list = stride_list[:len(feats)]
+        
+        # Final verification
+        if len(stride_list) != len(feats):
+            from nkyolo.utils import LOGGER
+            LOGGER.error(
+                f"Unable to resolve stride length mismatch: feats has {len(feats)} elements, "
+                f"but stride has {len(stride_list)} elements after adjustment."
+            )
+            raise ValueError(
+                f"feats length ({len(feats)}) must match stride length ({len(stride_list)})"
+            )
+        
+        # Use the adjusted stride list (convert back to Var for consistency)
+        stride_to_use = jt.Var(stride_list) if len(stride_list) > 0 else jt.Var([32.0])
+        
+        # Generate pred_distri and pred_scores
+        # Each feat is reshaped to (batch, no, h*w), then concatenated along dim=2
+        # Result: (batch, no, total_h*w) where total_h*w is sum of all h*w
         pred_distri, pred_scores = jt.concat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
         )
@@ -247,8 +310,29 @@ class v8DetectionLoss:
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
-        imgsz = jt.array(list(feats[0].shape[2:]),dtype = dtype) * self.stride[0]  # image size (h,w)
-        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+        # Get stride value for image size calculation
+        stride_val = stride_list[0] if isinstance(stride_list, list) else (self.stride[0] if isinstance(self.stride, jt.Var) and len(self.stride) > 0 else self.stride)
+        imgsz = jt.array(list(feats[0].shape[2:]),dtype = dtype) * float(stride_val)  # image size (h,w)
+        
+        # Generate anchor_points - should have same total count as pred_distri's second dimension
+        anchor_points, stride_tensor = make_anchors(feats, stride_to_use, 0.5)
+        
+        # Verify anchor count matches pred_distri
+        expected_anchors = pred_distri.shape[1]  # (batch, anchors, channels)
+        actual_anchors = anchor_points.shape[0]   # (anchors, 2)
+        if actual_anchors != expected_anchors:
+            from nkyolo.utils import LOGGER
+            LOGGER.error(
+                f"Anchor count mismatch: anchor_points has {actual_anchors} anchors, "
+                f"but pred_distri has {expected_anchors} anchors. "
+                f"This indicates a bug in make_anchors or pred_distri generation. "
+                f"Feats shapes: {[f.shape for f in feats]}, "
+                f"Strides: {self.stride}"
+            )
+            raise ValueError(
+                f"Anchor count mismatch: anchor_points ({actual_anchors}) != pred_distri ({expected_anchors}). "
+                f"This should not happen if make_anchors and pred_distri use the same feats."
+            )
 
         # Targets
         targets = jt.concat((

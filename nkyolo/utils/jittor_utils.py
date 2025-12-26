@@ -28,14 +28,42 @@ from nkyolo.utils import (
 
 @contextmanager
 def autocast(enabled: bool, device: str = "cuda"):
-    prev_amp = jt.flags.use_cuda_amp if hasattr(jt.flags, "use_cuda_amp") else 0
-    if enabled and device == "cuda":
-        jt.flags.use_cuda_amp = 1
+    """Context manager for automatic mixed precision training.
+    
+    Args:
+        enabled: Whether to enable AMP
+        device: Device type ('cuda' or 'cpu')
+    
+    Note:
+        For Jittor, AMP is handled internally. This context manager is a no-op
+        if use_cuda_amp flag is not available in the Jittor version.
+    """
+    # Check if Jittor supports use_cuda_amp flag
+    use_cuda_amp_available = hasattr(jt.flags, "use_cuda_amp")
+    prev_amp = 0
+    
+    if use_cuda_amp_available:
+        try:
+            prev_amp = jt.flags.use_cuda_amp
+        except (AttributeError, TypeError):
+            use_cuda_amp_available = False
+    
+    if enabled and device == "cuda" and use_cuda_amp_available:
+        try:
+            jt.flags.use_cuda_amp = 1
+        except (AttributeError, TypeError):
+            # Jittor version doesn't support use_cuda_amp flag
+            pass
+    
     try:
         yield
     finally:
-        if hasattr(jt.flags, "use_cuda_amp"):
-            jt.flags.use_cuda_amp = prev_amp
+        if use_cuda_amp_available:
+            try:
+                jt.flags.use_cuda_amp = prev_amp
+            except (AttributeError, TypeError):
+                # Ignore errors when restoring
+                pass
 
 
 def get_cpu_info():

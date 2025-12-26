@@ -140,6 +140,10 @@ class BaseTrainer:
 
         self.trainset, self.testset = self.get_dataset()
         self.ema = None
+        
+        # Initialize framework detection (will be updated after model is loaded)
+        self.is_torch = False
+        self.framework = "jittor"
 
         # Optimization utils init
         self.lf = None
@@ -174,6 +178,27 @@ class BaseTrainer:
         """Run all existing callbacks associated with a particular event."""
         for callback in self.callbacks.get(event, []):
             callback(self)
+
+    def _detect_framework(self):
+        """Detect whether the model uses PyTorch or Jittor framework."""
+        if isinstance(self.model, nn.Module):
+            self.is_torch = False
+            self.framework = "jittor"
+            return
+        
+        # Check if model is PyTorch
+        try:
+            import torch
+            if isinstance(self.model, torch.nn.Module):
+                self.is_torch = True
+                self.framework = "pytorch"
+                return
+        except (ImportError, AttributeError):
+            pass
+        
+        # Default to Jittor
+        self.is_torch = False
+        self.framework = "jittor"
 
     def train(self):
         """Allow device='', device=None on Multi-GPU systems to default to device=0."""
@@ -237,95 +262,36 @@ class BaseTrainer:
 
     def _setup_train(self, world_size):
         """Builds dataloaders and optimizer on correct rank process."""
-        # Model
-
         self.run_callbacks("on_pretrain_routine_start")
         ckpt = self.setup_model()
-        self.model = self.model
         self.set_model_attributes()
-
+        
+        # Update framework detection after model is loaded
+        self._detect_framework()
+        
         # Freeze layers
-        freeze_list = (
-            self.args.freeze
-            if isinstance(self.args.freeze, list)
-            else range(self.args.freeze)
-            if isinstance(self.args.freeze, int)
-            else []
-        )
-        always_freeze_names = [".dfl"]  # always freeze these layers
-        freeze_layer_names = [f"model.{x}." for x in freeze_list] + always_freeze_names
-        self.freeze_layer_names = freeze_layer_names
-        for k, v in self.model.named_parameters():
-            # v.register_hook(lambda x: jt.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
-            if any(x in k for x in freeze_layer_names):
-                LOGGER.info(f"Freezing layer '{k}'")
-                v.requires_grad = False
-            # 增加对BatchNorm参数的特殊处理
-            elif "running_mean" in k or "running_var" in k:
-                # BatchNorm的running_mean和running_var不需要梯度
-                v.requires_grad = False
-            elif not v.requires_grad and v.dtype.is_floating_point:  # only floating point Tensor can require gradients
-                LOGGER.info(
-                    f"WARNING ⚠️ setting 'requires_grad=True' for frozen layer '{k}'. "
-                    "See nkyolo.engine.trainer for customization of frozen layers."
-                )
-                v.requires_grad = True
-
-        # Check AMP
-        self.amp = False # True or False
-        # if self.amp and RANK in {-1, 0}:  # Single-GPU and DDP
-        #     callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
-        #     self.amp = check_amp(self.model)
-        #     callbacks.default_callbacks = callbacks_backup  # restore callbacks
-        # if RANK > -1 and world_size > 1:  # DDP
-        #     jt.broadcast(self.amp, src=0)  # broadcast the tensor from rank 0 to all other ranks (returns None)
-        # self.amp = bool(self.amp)  # as boolean
-        # self.scaler = (
-        #     jt.amp.GradScaler("cuda", enabled=self.amp) if jt else jt.cuda.amp.GradScaler(enabled=self.amp)
-        # )
-        # if world_size > 1:
-        #     self.model = nn.parallel.jtributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
-        # self.amp = self.args.amp  # True or False
-        # callbacks_backup = None  # Placeholder for callbacks in case needed
-
-        # # Check if AMP is enabled and synchronize across processes
-        # if self.amp and (jt.rank == -1 or jt.rank == 0):  # Single-GPU or main process in DDP
-        #     jt.flags.use_cuda_amp = self.amp  # Enable/disable mixed precision
-
-        # # Broadcast the AMP setting from rank 0 to all other processes
-        # if jt.world_size > 1:
-        #     # Create a Jittor Var from the boolean value and convert to integer for broadcasting
-        #     amp_var = jt.Var([int(self.amp)], dtype=jt.int32)
-        #     jt.distributed.broadcast(amp_var, 0)  # Broadcast from rank 0 to all ranks
-        #     self.amp = bool(amp_var.item())  # Update self.amp based on rank 0's value
-
-        # Ensure self.amp is a boolean
-        self.amp = bool(self.amp)
-
-        # Enable mixed precision based on the broadcasted flag
-        # jt.flags.use_cuda_amp = int(self.amp)
-
-        # Initialize the GradScaler (placeholder, Jittor does not require this)
-        self.scaler = None
-
-        # Wrap the model with DistributedDataParallel if using multiple GPUs
-        # if jt.world_size > 1:
-        #     self.model = jt.distributed.ParallelModel(self.model)
-
+        self._freeze_layers()
+        
+        # Setup AMP (Automatic Mixed Precision)
+        self._setup_amp(world_size)
+        
+        # Setup DDP (Distributed Data Parallel) if needed
+        if world_size > 1:
+            self._setup_model_ddp(world_size)
+        
         # Check imgsz
-        gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
+        gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)
         self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
-        self.stride = gs  # for multiscale training
-
+        self.stride = gs
+        
         # Batch size
-        if self.batch_size < 1 and RANK == -1:  # single-GPU only, estimate best batch size
+        if self.batch_size < 1 and RANK == -1:
             self.args.batch = self.batch_size = self.auto_batch()
-
+        
         # Dataloaders
         batch_size = self.batch_size // max(world_size, 1)
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=LOCAL_RANK, mode="train")
         if RANK in {-1, 0}:
-            # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
             self.test_loader = self.get_dataloader(
                 self.testset, batch_size=batch_size if self.args.task == "obb" else batch_size * 2, rank=-1, mode="val"
             )
@@ -335,10 +301,10 @@ class BaseTrainer:
             self.ema = ModelEMA(self.model)
             if self.args.plots:
                 self.plot_training_labels()
-
+        
         # Optimizer
-        self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
-        weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
+        self.accumulate = max(round(self.args.nbs / self.batch_size), 1)
+        weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs
         iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
         self.optimizer = self.build_optimizer(
             model=self.model,
@@ -348,12 +314,104 @@ class BaseTrainer:
             decay=weight_decay,
             iterations=iterations,
         )
+        
         # Scheduler
         self._setup_scheduler()
         self.stopper, self.stop = EarlyStopping(patience=self.args.patience), False
         self.resume_training(ckpt)
-        self.scheduler.last_epoch = self.start_epoch - 1  # do not move
+        self.scheduler.last_epoch = self.start_epoch - 1
         self.run_callbacks("on_pretrain_routine_end")
+    
+    def _freeze_layers(self):
+        """Freeze specified layers based on args.freeze."""
+        freeze_list = (
+            self.args.freeze
+            if isinstance(self.args.freeze, list)
+            else range(self.args.freeze)
+            if isinstance(self.args.freeze, int)
+            else []
+        )
+        always_freeze_names = [".dfl"]
+        freeze_layer_names = [f"model.{x}." for x in freeze_list] + always_freeze_names
+        self.freeze_layer_names = freeze_layer_names
+        
+        for k, v in self.model.named_parameters():
+            # BatchNorm running stats never require gradients
+            if "running_mean" in k or "running_var" in k:
+                v.requires_grad = False
+                continue
+            
+            # Freeze layers in freeze list
+            if any(x in k for x in freeze_layer_names):
+                LOGGER.info(f"Freezing layer '{k}'")
+                v.requires_grad = False
+            # Ensure trainable parameters have requires_grad=True
+            elif hasattr(v, 'dtype') and v.dtype.is_floating_point:
+                if not v.requires_grad:
+                    v.requires_grad = True
+    
+    def _setup_amp(self, world_size):
+        """Setup Automatic Mixed Precision (AMP) for training."""
+        # Get AMP setting from args, default to False
+        self.amp = getattr(self.args, 'amp', False)
+        
+        if self.is_torch:
+            # PyTorch AMP setup
+            try:
+                import torch
+                import torch.distributed as dist
+                
+                # Check AMP compatibility on main process
+                if self.amp and RANK in {-1, 0}:
+                    from nkyolo.utils.checks import check_amp
+                    callbacks_backup = callbacks.default_callbacks.copy()
+                    self.amp = check_amp(self.model)
+                    callbacks.default_callbacks = callbacks_backup
+                
+                # Broadcast AMP setting in DDP mode
+                if RANK > -1 and world_size > 1 and dist.is_initialized():
+                    amp_tensor = torch.tensor([int(self.amp)], dtype=torch.int32)
+                    if torch.cuda.is_available():
+                        amp_tensor = amp_tensor.cuda()
+                    dist.broadcast(amp_tensor, src=0)
+                    self.amp = bool(amp_tensor.item())
+                
+                self.amp = bool(self.amp)
+                self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp) if torch.cuda.is_available() else None
+            except (ImportError, AttributeError, RuntimeError):
+                self.amp = False
+                self.scaler = None
+        else:
+            # Jittor AMP setup
+            # Jittor handles AMP through autocast context manager during training
+            # No need to set flags here - autocast() will handle it per-batch
+            self.amp = bool(self.amp)
+            self.scaler = None  # Jittor handles AMP internally via autocast context manager
+    
+    def _setup_model_ddp(self, world_size):
+        """Setup Distributed Data Parallel (DDP) wrapper for model in multi-GPU training."""
+        if world_size <= 1:
+            return
+        
+        if self.is_torch:
+            # PyTorch DDP setup
+            try:
+                import torch
+                import torch.nn as torch_nn
+                if RANK > -1:
+                    self.model = torch_nn.parallel.DistributedDataParallel(
+                        self.model, device_ids=[RANK], find_unused_parameters=True
+                    )
+            except (ImportError, AttributeError):
+                LOGGER.warning("PyTorch DDP not available, skipping DDP setup")
+        else:
+            # Jittor DDP setup (if supported)
+            # Jittor handles parallelization differently, may not need explicit DDP wrapper
+            if hasattr(jt, 'distributed') and hasattr(jt.distributed, 'ParallelModel'):
+                try:
+                    self.model = jt.distributed.ParallelModel(self.model)
+                except Exception:
+                    LOGGER.warning("Jittor DDP not available, skipping DDP setup")
 
     def _do_train(self, world_size=1):
         """Train completed, evaluate and plot if specified by arguments."""
@@ -424,7 +482,7 @@ class BaseTrainer:
                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
 
-                # Backward (使用 optimizer.backward(loss) 替代 loss.backward())
+                # Backward (use optimizer.backward(loss) instead of loss.backward())
                 if self.scaler is not None:
                     self.scaler.backward(self.loss)
                 else:
@@ -543,7 +601,7 @@ class BaseTrainer:
                 memory = jt.cuda.memory_allocated()
                 if fraction:
                     # Jittor doesn't have get_device_properties, use a fallback
-                    total = 8 * 1024**3  # 假设8GB显存，实际应用中可以通过其他方式获取
+                    total = 8 * 1024**3  # assume 8GB VRAM, can be obtained through other methods in practice
             except:
                 memory = 0
                 total = 0
@@ -596,11 +654,11 @@ class BaseTrainer:
             "version": __version__,
             "license": "AGPL-3.0 (https://ultralytics.com/license)",
             "docs": "https://docs.ultralytics.com",
-            "model_yaml": getattr(self.ema.ema, "yaml", None),  # 保存模型配置信息用于重建模型
+            "model_yaml": getattr(self.ema.ema, "yaml", None),  # save model config for model reconstruction
         }
 
         # Save checkpoints directly to files
-        jt.save(checkpoint_data, str(self.last))  # save last.pt ，jittor.save(params_dict, path: str)只保存参数不能保存实例化模型
+        jt.save(checkpoint_data, str(self.last))  # save last.pt, jittor.save(params_dict, path: str) only saves parameters, not instantiated model
         if self.best_fitness == self.fitness:
             jt.save(checkpoint_data, str(self.best))  # save best.pt
         if (self.save_period > 0) and (self.epoch % self.save_period == 0):
