@@ -57,17 +57,25 @@ class DETRLoss(nn.Module):
 
         self.use_uni_match = use_uni_match
         self.uni_match_ind = uni_match_ind
-        self.device = None
+        # self.device = None
 
     def _get_loss_class(self, pred_scores, targets, gt_scores, num_gts, postfix=""):
         """Computes the classification loss based on predictions, target values, and ground truth scores."""
         # Logits: [b, query, num_classes], gt_class: list[[n, 1]]
         name_class = f"loss_class{postfix}"
         bs, nq = pred_scores.shape[:2]
-        # one_hot = F.one_hot(targets, self.nc + 1)[..., :-1]  # (bs, num_queries, num_classes)
-        one_hot = jt.zeros((bs, nq, self.nc + 1), dtype=jt.int64, device=targets.device)
-        one_hot.scatter_(2, targets.unsqueeze(-1), 1)
+        # --------------- refix
+        targets = targets.int() 
+        one_hot = nn.one_hot(targets, num_classes=self.nc + 1)
         one_hot = one_hot[..., :-1]
+        one_hot = one_hot.float()
+        # one_hot = one_hot[..., :-1].float()
+        # # one_hot = F.one_hot(targets, self.nc + 1)[..., :-1]  # (bs, num_queries, num_classes)
+        # one_hot = jt.zeros((bs, nq, self.nc + 1), dtype=jt.int64)
+        # one_hot.scatter_(2, targets.unsqueeze(-1), 1)
+        # one_hot = one_hot[..., :-1]
+        # ----------------
+
         gt_scores = gt_scores.view(bs, nq, 1) * one_hot
 
         if self.fl:
@@ -78,8 +86,8 @@ class DETRLoss(nn.Module):
             loss_cls /= max(num_gts, 1) / nq
         else:
             loss_cls = nn.BCEWithLogitsLoss(reduction="none")(pred_scores, gt_scores).mean(1).sum()  # YOLO CLS loss
-
-        return {name_class: loss_cls.squeeze() * self.loss_gain["class"]}
+        return {name_class: loss_cls * self.loss_gain["class"]}
+        # return {name_class: loss_cls.squeeze() * self.loss_gain["class"]}
 
     def _get_loss_bbox(self, pred_bboxes, gt_bboxes, postfix=""):
         """Computes bounding box and GIoU losses for predicted and ground truth bounding boxes."""
@@ -89,16 +97,18 @@ class DETRLoss(nn.Module):
 
         loss = {}
         if len(gt_bboxes) == 0:
-            loss[name_bbox] = jt.tensor(0.0, device=self.device)
-            loss[name_giou] = jt.tensor(0.0, device=self.device)
+            loss[name_bbox] = jt.tensor(0.0)
+            loss[name_giou] = jt.tensor(0.0)
 
             return loss
 
-        loss[name_bbox] = self.loss_gain["bbox"] * jt.nn.L1Loss(reduction="sum")(pred_bboxes, gt_bboxes) / len(gt_bboxes)
+        # loss[name_bbox] = self.loss_gain["bbox"] * jt.nn.L1Loss(reduction="sum")(pred_bboxes, gt_bboxes) / len(gt_bboxes)
+        loss[name_bbox] = self.loss_gain["bbox"] * (pred_bboxes - gt_bboxes).abs().sum() / len(gt_bboxes)
         loss[name_giou] = 1.0 - bbox_iou(pred_bboxes, gt_bboxes, xywh=True, GIoU=True)
         loss[name_giou] = loss[name_giou].sum() / len(gt_bboxes)
         loss[name_giou] = self.loss_gain["giou"] * loss[name_giou]
-        return {k: v.squeeze() for k, v in loss.items()}
+        return {k: v for k, v in loss.items()}
+        # return {k: v.squeeze() for k, v in loss.items()}
 
     # This function is for future RT-DETR Segment models
     # def _get_loss_mask(self, masks, gt_mask, match_indices, postfix=''):
@@ -145,7 +155,7 @@ class DETRLoss(nn.Module):
     ):
         """Get auxiliary losses."""
         # NOTE: loss class, bbox, giou, mask, dice
-        loss = jt.zeros(5 if masks is not None else 3, device=pred_bboxes.device)
+        loss = jt.zeros(5 if masks is not None else 3)
 
         if match_indices is None and self.use_uni_match:
             match_indices = self.matcher(
@@ -191,23 +201,27 @@ class DETRLoss(nn.Module):
     @staticmethod
     def _get_index(match_indices):
         """Returns batch indices, source indices, and destination indices from provided match indices."""
-        batch_idx = jt.concat([jt.full_like(src, i) for i, (src, _) in enumerate(match_indices)])
-        src_idx = jt.concat([src for (src, _) in match_indices])
-        dst_idx = jt.concat([dst for (_, dst) in match_indices])
+        batch_idx = jt.concat([jt.full_like(src, i).int32() for i, (src, _) in enumerate(match_indices)])
+        src_idx = jt.concat([src.int32() for (src, _) in match_indices])
+        dst_idx = jt.concat([dst.int32() for (_, dst) in match_indices])
+        return (batch_idx.int32(), src_idx.int32()), dst_idx.int32()
+        # batch_idx = jt.concat([jt.full_like(src, i) for i, (src, _) in enumerate(match_indices)])
+        # src_idx = jt.concat([src for (src, _) in match_indices])
+        # dst_idx = jt.concat([dst for (_, dst) in match_indices])
 
-        return (batch_idx, src_idx), dst_idx
+        # return (batch_idx, src_idx), dst_idx
 
     def _get_assigned_bboxes(self, pred_bboxes, gt_bboxes, match_indices):
         """Assigns predicted bounding boxes to ground truth bounding boxes based on the match indices."""
         pred_assigned = jt.concat(
             [
-                t[i] if len(i) > 0 else jt.zeros(0, t.shape[-1], device=self.device)
+                t[i] if len(i) > 0 else jt.zeros(0, t.shape[-1])
                 for t, (i, _) in zip(pred_bboxes, match_indices)
             ]
         )
         gt_assigned = jt.concat(
             [
-                t[j] if len(j) > 0 else jt.zeros(0, t.shape[-1], device=self.device)
+                t[j] if len(j) > 0 else jt.zeros(0, t.shape[-1])
                 for t, (_, j) in zip(gt_bboxes, match_indices)
             ]
         )
@@ -233,25 +247,46 @@ class DETRLoss(nn.Module):
             )
 
         idx, gt_idx = self._get_index(match_indices)
+        idx = (idx[0].int(), idx[1].int())
+        gt_idx = gt_idx.int()
         pred_bboxes, gt_bboxes = pred_bboxes[idx], gt_bboxes[gt_idx]
 
         bs, nq = pred_scores.shape[:2]
-        targets = jt.full((bs, nq), self.nc, device=pred_scores.device, dtype=gt_cls.dtype)
-        targets[idx] = gt_cls[gt_idx]
+        # targets = jt.full((bs, nq), self.nc, dtype=gt_cls.dtype)
+        targets = jt.full((bs, nq), self.nc, dtype=jt.int32)
+        if idx[0].numel() > 0:
+            targets[idx] = gt_cls[gt_idx].int32()
+        
+        gt_scores = jt.zeros([bs, nq])
+        
+        if len(gt_bboxes) > 0 and idx[0].numel() > 0:
+            iou_vals = bbox_iou(pred_bboxes.detach(), gt_bboxes, xywh=True).view(-1)
+            gt_scores[idx] = iou_vals
+        # if idx[0].numel() > 0:
+        #     targets[idx] = gt_cls[gt_idx].int32()
+        #     gt_scores = jt.zeros([bs, nq])
+        #     if len(gt_bboxes) > 0:
+        #         iou_vals = bbox_iou(pred_bboxes.detach(), gt_bboxes, xywh=True).view(-1)
+        #         gt_scores[idx] = iou_vals
+        # else:
+        #     gt_scores = jt.zeros([bs, nq])
+        # targets[idx] = gt_cls[gt_idx]
 
-        gt_scores = jt.zeros([bs, nq], device=pred_scores.device)
+        # gt_scores = jt.zeros([bs, nq])
 
-        if len(gt_bboxes):
-            gt_scores[idx] = bbox_iou(pred_bboxes.detach(), gt_bboxes, xywh=True).squeeze(-1)
+        # if len(gt_bboxes):
+        #     gt_scores[idx] = bbox_iou(pred_bboxes.detach(), gt_bboxes, xywh=True).squeeze(-1)
 
         loss = {}
         loss.update(self._get_loss_class(pred_scores, targets, gt_scores, len(gt_bboxes), postfix))
         loss.update(self._get_loss_bbox(pred_bboxes, gt_bboxes, postfix))
+        # loss.update(self._get_loss_class(pred_scores, targets, gt_scores, len(gt_bboxes), postfix))
+        # loss.update(self._get_loss_bbox(pred_bboxes, gt_bboxes, postfix))
         # if masks is not None and gt_mask is not None:
         #     loss.update(self._get_loss_mask(masks, gt_mask, match_indices, postfix))
         return loss
 
-    def forward(self, pred_bboxes, pred_scores, batch, postfix="", **kwargs):
+    def execute(self, pred_bboxes, pred_scores, batch, postfix="", **kwargs):
         """
         Calculate loss for predicted bounding boxes and scores.
 
@@ -272,7 +307,7 @@ class DETRLoss(nn.Module):
             Uses last elements of pred_bboxes and pred_scores for main loss, and the rest for auxiliary losses if
             self.aux_loss is True.
         """
-        self.device = pred_bboxes.device
+        # self.device = pred_bboxes.device
         match_indices = kwargs.get("match_indices", None)
         gt_cls, gt_bboxes, gt_groups = batch["cls"], batch["bboxes"], batch["gt_groups"]
 
@@ -298,7 +333,7 @@ class RTDETRDetectionLoss(DETRLoss):
     an additional denoising training loss when provided with denoising metadata.
     """
 
-    def forward(self, preds, batch, dn_bboxes=None, dn_scores=None, dn_meta=None):
+    def execute(self, preds, batch, dn_bboxes=None, dn_scores=None, dn_meta=None):
         """
         Forward pass to compute the detection loss.
 
@@ -313,22 +348,27 @@ class RTDETRDetectionLoss(DETRLoss):
             (dict): Dictionary containing the total loss and, if applicable, the denoising loss.
         """
         pred_bboxes, pred_scores = preds
-        total_loss = super().forward(pred_bboxes, pred_scores, batch)
+        total_loss = super().execute(pred_bboxes, pred_scores, batch)
 
         # Check for denoising metadata to compute denoising training loss
         if dn_meta is not None:
             dn_pos_idx, dn_num_group = dn_meta["dn_pos_idx"], dn_meta["dn_num_group"]
             assert len(batch["gt_groups"]) == len(dn_pos_idx)
 
+            if dn_bboxes is not None and dn_bboxes.ndim == 3:
+                dn_bboxes = dn_bboxes.unsqueeze(0)
+            if dn_scores is not None and dn_scores.ndim == 3:
+                dn_scores = dn_scores.unsqueeze(0)
+
             # Get the match indices for denoising
             match_indices = self.get_dn_match_indices(dn_pos_idx, dn_num_group, batch["gt_groups"])
 
             # Compute the denoising training loss
-            dn_loss = super().forward(dn_bboxes, dn_scores, batch, postfix="_dn", match_indices=match_indices)
+            dn_loss = super().execute(dn_bboxes, dn_scores, batch, postfix="_dn", match_indices=match_indices)
             total_loss.update(dn_loss)
         else:
             # If no denoising metadata is provided, set denoising loss to zero
-            total_loss.update({f"{k}_dn": jt.tensor(0.0, device=self.device) for k in total_loss.keys()})
+            total_loss.update({f"{k}_dn": jt.tensor(0.0) for k in total_loss.keys()})
 
 
         return total_loss
@@ -350,11 +390,14 @@ class RTDETRDetectionLoss(DETRLoss):
         idx_groups = jt.array([0, *gt_groups[:-1]]).cumsum(0)
         for i, num_gt in enumerate(gt_groups):
             if num_gt > 0:
-                gt_idx = jt.arange(end=num_gt, dtype=jt.int64) + idx_groups[i]
+                gt_idx = jt.arange(end=num_gt, dtype=jt.int32) + idx_groups[i]
                 gt_idx = gt_idx.repeat(dn_num_group)
-                assert len(dn_pos_idx[i]) == len(gt_idx), f"Expected the same length, but got {len(dn_pos_idx[i])} and {len(gt_idx)} respectively."
-                dn_match_indices.append((dn_pos_idx[i], gt_idx))
+                current_dn_pos = dn_pos_idx[i].int()
+                assert len(current_dn_pos) == len(gt_idx)
+                dn_match_indices.append((current_dn_pos, gt_idx))
+                # assert len(dn_pos_idx[i]) == len(gt_idx), f"Expected the same length, but got {len(dn_pos_idx[i])} and {len(gt_idx)} respectively."
+                # dn_match_indices.append((dn_pos_idx[i], gt_idx))
             else:
-                dn_match_indices.append((jt.zeros([0], dtype=jt.int64), jt.zeros([0], dtype=jt.int64)))
+                dn_match_indices.append((jt.zeros([0], dtype=jt.int32), jt.zeros([0], dtype=jt.int32)))
 
         return dn_match_indices
