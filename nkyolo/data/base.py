@@ -16,7 +16,7 @@ import psutil
 from jittor.dataset import Dataset
 
 from nkyolo.data.utils import FORMATS_HELP_MSG, HELP_URL, IMG_FORMATS
-from nkyolo.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, TQDM
+from nkyolo.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, RANK, TQDM
 
 
 class BaseDataset(Dataset):
@@ -62,6 +62,7 @@ class BaseDataset(Dataset):
         single_cls=False,
         classes=None,
         fraction=1.0,
+        split_by_rank=True,
     ):
         """Initialize BaseDataset with given configuration and options."""
         super().__init__()
@@ -71,10 +72,41 @@ class BaseDataset(Dataset):
         self.single_cls = single_cls
         self.prefix = prefix
         self.fraction = fraction
+        self.split_by_rank = split_by_rank
         self.im_files = self.get_img_files(self.img_path)
         self.labels = self.get_labels()
         self.update_labels(include_class=classes)  # single_cls and include_class
-        self.ni = len(self.labels)  # number of images
+        
+        # In MPI distributed training, split data per process
+        # Each process should only see its portion of the data
+        if self.split_by_rank and RANK >= 0:
+            # Get world size from MPI environment
+            if "OMPI_COMM_WORLD_SIZE" in os.environ:
+                world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
+            elif "PMI_SIZE" in os.environ:
+                world_size = int(os.environ["PMI_SIZE"])
+            elif "WORLD_SIZE" in os.environ:
+                world_size = int(os.environ["WORLD_SIZE"])
+            else:
+                world_size = 1
+            
+            if world_size > 1:
+                # Split data: each rank gets its portion
+                total_len = len(self.labels)
+                per_rank = total_len // world_size
+                start_idx = RANK * per_rank
+                # Last rank gets any remaining samples
+                end_idx = start_idx + per_rank if RANK < world_size - 1 else total_len
+                
+                # Slice data for this rank
+                self.im_files = self.im_files[start_idx:end_idx]
+                self.labels = self.labels[start_idx:end_idx]
+                
+                LOGGER.info(f"{self.prefix}Rank {RANK}/{world_size-1}: Split dataset - "
+                           f"total: {total_len}, per_rank: ~{per_rank}, "
+                           f"this rank: [{start_idx}:{end_idx}] = {len(self.labels)} samples")
+        
+        self.ni = len(self.labels)  # number of images for this process
         self.rect = rect
         self.batch_size = batch_size
         self.stride = stride
@@ -88,6 +120,7 @@ class BaseDataset(Dataset):
         self.max_buffer_length = min((self.ni, self.batch_size * 8, 1000)) if self.augment else 0
 
         # Cache images (options are cache = True, False, None, "ram", "disk")
+        # IMPORTANT: npy_files must be set AFTER data splitting to match the sliced im_files
         self.ims, self.im_hw0, self.im_hw = [None] * self.ni, [None] * self.ni, [None] * self.ni
         self.npy_files = [Path(f).with_suffix(".npy") for f in self.im_files]
         self.cache = cache.lower() if isinstance(cache, str) else "ram" if cache is True else None

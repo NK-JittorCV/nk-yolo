@@ -2194,25 +2194,27 @@ class Format:
         if self.return_mask:
             if nl:
                 masks, instances, cls = self._format_segments(instances, cls, w, h)
-                masks = jt.array(masks)
             else:
-                masks = jt.zeros(
-                    1 if self.mask_overlap else nl, img.shape[0] // self.mask_ratio, img.shape[1] // self.mask_ratio
+                masks = np.zeros(
+                    (1 if self.mask_overlap else nl, img.shape[0] // self.mask_ratio, img.shape[1] // self.mask_ratio),
+                    dtype=np.uint8,
                 )
             labels["masks"] = masks
         labels["img"] = self._format_img(img)
-        labels["cls"] = jt.array(cls) if nl else jt.zeros((nl, 1))
-        labels["bboxes"] = jt.array(instances.bboxes) if nl else jt.zeros((nl, 4))
+        labels["cls"] = (np.asarray(cls, dtype=np.int32) if nl else np.zeros((nl, 1), dtype=np.int32))
+        labels["bboxes"] = (
+            np.asarray(instances.bboxes, dtype=np.float32) if nl else np.zeros((nl, 4), dtype=np.float32)
+        )
         if self.return_keypoint:
             labels["keypoints"] = (
-                jt.empty((0, 3)) if instances.keypoints is None else jt.array(instances.keypoints)
+                np.empty((0, 3), dtype=np.float32) if instances.keypoints is None else np.asarray(instances.keypoints)
             )
             if self.normalize:
                 labels["keypoints"][..., 0] /= w
                 labels["keypoints"][..., 1] /= h
         if self.return_obb:
             labels["bboxes"] = (
-                xyxyxyxy2xywhr(jt.array(instances.segments)) if len(instances.segments) else jt.zeros((0, 5))
+                xyxyxyxy2xywhr(np.asarray(instances.segments)) if len(instances.segments) else np.zeros((0, 5), dtype=np.float32)
             )
         # NOTE: need to normalize obb in xywhr format for width-height consistency
         if self.normalize:
@@ -2220,7 +2222,7 @@ class Format:
             labels["bboxes"][:, [1, 3]] /= h
         # Then we can use collate_fn
         if self.batch_idx:
-            labels["batch_idx"] = jt.zeros(nl)
+            labels["batch_idx"] = np.zeros(nl, dtype=np.int32)
         return labels
 
     def _format_img(self, img):
@@ -2251,7 +2253,6 @@ class Format:
             img = np.expand_dims(img, -1)
         img = img.transpose(2, 0, 1)
         img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr and img.shape[0] == 3 else img)
-        img = jt.array(img)
         return img
 
     def _format_segments(self, instances, cls, w, h):

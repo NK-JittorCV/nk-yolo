@@ -29,7 +29,7 @@ from .utils import (
     verify_image_label,
 )
 
-# NK-YOLO dataset *.cache version, >= 0.0.1 for YOLOv8
+# NK-YOLO dataset *.jittor_cache version, >= 0.0.1 for YOLOv8
 DATASET_CACHE_VERSION = "0.0.1"
 
 class YOLODataset(BaseDataset):
@@ -53,12 +53,12 @@ class YOLODataset(BaseDataset):
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, **kwargs)
 
-    def cache_labels(self, path=Path("./labels.cache")):
+    def cache_labels(self, path=Path("./labels.jittor_cache")):
         """
         Cache dataset labels, check images and read shapes.
 
         Args:
-            path (Path): Path where to save the cache file. Default is Path('./labels.cache').
+            path (Path): Path where to save the cache file. Default is Path('./labels.jittor_cache').
 
         Returns:
             (dict): labels.
@@ -123,9 +123,9 @@ class YOLODataset(BaseDataset):
     def get_labels(self):
         """Returns dictionary of labels for YOLO training."""
         self.label_files = img2label_paths(self.im_files)
-        cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
+        cache_path = Path(self.label_files[0]).parent.with_suffix(".jittor_cache")
         try:
-            cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
+            cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.jittor_cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
             assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
         except (FileNotFoundError, AssertionError, AttributeError):
@@ -228,24 +228,18 @@ class YOLODataset(BaseDataset):
             
             if k == "img":
                 # 图像可以直接堆叠，因为已经被预处理为相同大小
-                new_batch[k] = jt.stack(values, 0)
+                new_batch[k] = np.stack(values, 0)
             elif k == "cls":
-                # TODO: 类别索引可能长度不同，保持为列表
-                new_batch[k] = jt.concat(values, 0)# values
+                # 类别索引长度可变，拼接为一维
+                new_batch[k] = np.concatenate(values, 0) if len(values) else np.zeros((0, 1), dtype=np.int32)
             elif k == "bboxes":
-                # TODO: 边界框可能大小不同，保持为列表
-                new_batch[k] = jt.concat(values, 0)# values
+                # 边界框长度可变，拼接为一维
+                new_batch[k] = np.concatenate(values, 0) if len(values) else np.zeros((0, 4), dtype=np.float32)
             elif k == "batch_idx":
-                # # 创建批次索引
-                # lengths = [len(v) for v in values[0]]  # 获取每个样本中实例的数量
-                # batch_idx = []
-                # for i, length in enumerate(lengths):
-                #     batch_idx.extend([i] * length)
-                # new_batch[k] = jt.array(batch_idx)
                 new_batch["batch_idx"] = [item["batch_idx"] for item in batch]
                 for i in range(len(new_batch["batch_idx"])):
-                    new_batch["batch_idx"][i] += i  # add target image index for build_targets()
-                new_batch["batch_idx"] = jt.concat(new_batch["batch_idx"], 0)
+                    new_batch["batch_idx"][i] = new_batch["batch_idx"][i] + i  # add target image index for build_targets()
+                new_batch["batch_idx"] = np.concatenate(new_batch["batch_idx"], 0).astype(np.int32)
             else:
                 # 其他数据保持原样
                 new_batch[k] = values

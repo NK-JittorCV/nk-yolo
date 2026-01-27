@@ -44,9 +44,15 @@ class InfiniteDataset(Dataset):
         super().__init__()
         self.dataset = dataset
         
+        # In MPI distributed training, Jittor automatically splits data per process
+        # len(dataset) already returns the size for this process's data subset
+        # Don't set total_len explicitly - let Jittor handle it automatically in MPI mode
+        # This ensures each process only sees its portion of the data
+        dataset_len = len(dataset)
+        
         # Set dataset attributes with correct values from the start
         self.set_attrs(
-            total_len=len(dataset),
+            total_len=dataset_len,  # This is already the per-process size in MPI mode
             batch_size=batch_size,
             shuffle=shuffle,
             drop_last=drop_last,
@@ -86,38 +92,37 @@ def collate_fn(batch):
     out = {}
     keys = batch[0].keys()
     
+    def _same_shape(vals):
+        first = vals[0]
+        if not hasattr(first, "shape"):
+            return False
+        shape = first.shape
+        return all(hasattr(v, "shape") and v.shape == shape for v in vals)
+
     for k in keys:
         values = [item[k] for item in batch]
         
         if k == "img":
-            # Images should always be stacked
-            out[k] = jt.stack(values, 0)
+            # Images should always be stacked (HWC or CHW numpy arrays)
+            out[k] = np.stack(values, 0)
             
         elif k in ["masks", "keypoints", "bboxes", "cls", "segments"]:
             # These items may have different sizes per sample
-            if isinstance(values[0], jt.Var):
-                try:
-                    # Try stacking if shapes match
-                    out[k] = jt.stack(values, 0)
-                except:
-                    # Fall back to list if shapes don't match
-                    out[k] = values
-            else:
-                out[k] = values
+            out[k] = np.stack(values, 0) if _same_shape(values) else values
                 
         elif k == "batch_idx":
             # Special handling for batch indices
-            if isinstance(values[0], (list, tuple)):
+            if isinstance(values[0], (list, tuple, np.ndarray)):
                 out[k] = []
                 for i, v in enumerate(values):
                     out[k].extend([i] * len(v))
-                out[k] = jt.array(out[k])
+                out[k] = np.array(out[k], dtype=np.int32)
             else:
-                out[k] = jt.array(values)
+                out[k] = np.array(values, dtype=np.int32)
                 
-        elif isinstance(values[0], (int, float)):
+        elif isinstance(values[0], (int, float, np.integer, np.floating)):
             # Basic numeric types
-            out[k] = jt.array(values)
+            out[k] = np.array(values)
             
         else:
             # Keep other types as lists
@@ -144,6 +149,8 @@ class InfiniteDataLoader:
             buffer_size (int): Buffer size for Jittor RingBuffer.
             collate_fn (callable, optional): Function to collate batches.
         """
+        from nkyolo.utils import RANK
+        
         self.original_dataset = dataset
         self.dataset = dataset
         
@@ -163,9 +170,18 @@ class InfiniteDataLoader:
         self.buffer_size = buffer_size
         
         # Calculate number of batches
-        self.num_batches = len(dataset) // batch_size
-        if not drop_last and len(dataset) % batch_size != 0:
+        # In distributed training, dataset is already split per process in BaseDataset
+        # So len(dataset) already returns the size for this process's data subset
+        dataset_size = len(dataset)
+        self.num_batches = dataset_size // batch_size
+        if not drop_last and dataset_size % batch_size != 0:
             self.num_batches += 1
+        
+        # Debug logging for distributed training
+        if RANK >= 0:
+            from nkyolo.utils import LOGGER
+            LOGGER.info(f"InfiniteDataLoader rank {RANK}: dataset_size={dataset_size}, "
+                       f"batch_size={batch_size}, num_batches={self.num_batches}")
 
     def __len__(self):
         """Return length of dataset."""
@@ -174,7 +190,9 @@ class InfiniteDataLoader:
     def __iter__(self):
         """Return self as iterator."""
         dataset_len = len(self.original_dataset)
-        final_buffer_size = max(self.buffer_size, dataset_len)
+        
+        # Jittor RingBuffer size is in bytes. Use configured buffer_size or 512MB minimum.
+        final_buffer_size = max(int(self.buffer_size), 512 * 1024 * 1024)
         
         self.dataset = InfiniteDataset(
             self.original_dataset,
@@ -210,6 +228,9 @@ def seed_worker(worker_id):  # noqa
     Args:
         worker_id (int): The worker process/thread ID.
     """
+    # Data loading should run on CPU to avoid CUDA initialization in worker processes.
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    jt.flags.use_cuda = 0
     # Use Python's random and numpy instead of Jittor-specific RNG
     seed = int(random.random() * 2**32)  # Generate random seed
     np.random.seed(seed + worker_id)
@@ -232,6 +253,13 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     Returns:
         YOLODataset: Configured YOLO dataset instance.
     """
+    if isinstance(stride, jt.Var):
+        stride = int(stride.max().item())
+    elif isinstance(stride, (list, tuple, np.ndarray)):
+        stride = int(np.max(stride))
+    else:
+        stride = int(stride)
+
     return YOLODataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
@@ -241,13 +269,14 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         rect=cfg.rect or rect,  # rectangular batches
         cache=cfg.cache or None,
         single_cls=cfg.single_cls or False,
-        stride=int(stride),
+        stride=stride,
         pad=0.0 if mode == "train" else 0.5,
         prefix=colorstr(f"{mode}: "),
         task=cfg.task,
         classes=cfg.classes,
         data=data,
         fraction=cfg.fraction if mode == "train" else 1.0,
+        split_by_rank=(mode == "train"),
     )
 
 
@@ -265,16 +294,32 @@ def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size
     Returns:
         InfiniteDataLoader: Configured data loader.
     """
+    from nkyolo.utils import RANK, LOCAL_RANK, LOGGER
+    
     batch = min(batch, len(dataset))
     workers = min(os.cpu_count() or 1, workers)
+    if RANK >= 0 and workers > 0:
+        # Jittor dataloader workers can deadlock under MPI; force single-process loading.
+        LOGGER.warning("WARNING ⚠️ DDP detected, forcing dataloader workers=0 to avoid Jittor worker crashes.")
+        workers = 0
+    
+    # In distributed training, Jittor automatically handles data splitting via MPI
+    # Each rank will get a different subset of the data
+    # For distributed training, use the actual RANK instead of the passed rank parameter
+    actual_rank = RANK if RANK >= 0 else rank
     
     if buffer_size is None:
-        buffer_size = 100000000  # Fixed very large value (100 million) to avoid buffer overflow
+        # Jittor RingBuffer size is in bytes. Default to 512MB to avoid worker overflow.
+        buffer_size = 512 * 1024 * 1024
+    
+    # In distributed training, shuffle should be enabled for each rank
+    # Jittor's MPI will automatically ensure different ranks get different data
+    use_shuffle = shuffle  # Allow shuffle in distributed training, MPI handles data distribution
     
     loader = InfiniteDataLoader(
         dataset=dataset,
         batch_size=batch,
-        shuffle=shuffle and rank == -1,
+        shuffle=use_shuffle,
         num_workers=workers,
         pin_memory=PIN_MEMORY,
         worker_init_fn=seed_worker,

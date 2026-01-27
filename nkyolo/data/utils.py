@@ -654,23 +654,67 @@ def autosplit(path=DATASETS_DIR / "coco8/images", weights=(0.9, 0.1, 0.0), annot
 
 
 def load_dataset_cache_file(path):
-    """Load an NK-YOLO *.cache dictionary from path."""
+    """Load an NK-YOLO *.jittor_cache dictionary from path.
+    
+    Supports both .jittor_cache (new) and .cache (legacy) files for backward compatibility.
+    """
     import gc
+    
+    path = Path(path)  # ensure Path object
+    # np.save saves files with .npy extension, but we want to use .jittor_cache extension
+    # So we need to check .jittor_cache, .cache (legacy), and .npy files
+    # Priority: .jittor_cache > .cache (legacy) > .npy
+    if path.exists():
+        # .jittor_cache file exists (was renamed from .npy)
+        cache_path = path
+    else:
+        # Try legacy .cache file for backward compatibility
+        legacy_cache_path = path.with_suffix(".cache")
+        if legacy_cache_path.exists():
+            cache_path = legacy_cache_path
+        else:
+            # Try .npy (in case it wasn't renamed)
+            npy_path = path.with_suffix(".npy")
+            if npy_path.exists():
+                cache_path = npy_path
+            else:
+                # Try legacy .cache.npy
+                legacy_npy_path = legacy_cache_path.with_suffix(".npy")
+                if legacy_npy_path.exists():
+                    cache_path = legacy_npy_path
+                else:
+                    # Neither exists, raise FileNotFoundError
+                    raise FileNotFoundError(f"Cache file not found: {path}, {legacy_cache_path}, {npy_path}, or {legacy_npy_path}")
 
     gc.disable()  
-    cache = np.load(str(path), allow_pickle=True).item()  # load dict
+    cache = np.load(str(cache_path), allow_pickle=True).item()  # load dict
     gc.enable()
     return cache
 
 
 def save_dataset_cache_file(prefix, path, x, version):
-    """Save an NK-YOLO dataset *.cache dictionary x to path."""
+    """Save an NK-YOLO dataset *.jittor_cache dictionary x to path.
+    
+    Note: np.save automatically adds .npy extension to filenames.
+    So if path is 'labels.jittor_cache', np.save will create 'labels.jittor_cache.npy'.
+    We then rename it to 'labels.jittor_cache' to maintain the .jittor_cache extension.
+    """
     x["version"] = version  # add cache version
+    path = Path(path)  # ensure Path object
     if is_dir_writeable(path.parent):
+        # Remove existing .jittor_cache or .npy file if exists
         if path.exists():
-            path.unlink()  # remove *.cache file if exists
-        np.save(str(path), x)  # save cache for next time
-        path.with_suffix(".cache.npy").rename(path)  # remove .npy suffix
+            path.unlink()  # remove *.jittor_cache file if exists
+        npy_path = path.with_suffix(".npy")
+        if npy_path.exists():
+            npy_path.unlink()  # remove *.npy file if exists
+        
+        # np.save automatically adds .npy extension to the filename
+        # If path is "labels.jittor_cache", np.save will create "labels.jittor_cache.npy"
+        # So we save to a temporary .npy path, then rename to .jittor_cache
+        temp_npy_path = path.with_suffix(".npy")
+        np.save(str(temp_npy_path), x)  # save as .npy file
+        temp_npy_path.rename(path)  # rename .npy to .jittor_cache
         LOGGER.info(f"{prefix}New cache created: {path}")
     else:
         LOGGER.warning(f"{prefix}WARNING ⚠️ Cache directory {path.parent} is not writeable, cache not saved.")
