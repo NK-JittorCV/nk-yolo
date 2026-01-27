@@ -40,17 +40,7 @@ class DetectionTrainer(BaseTrainer):
         Returns:
             YOLODataset: Configured YOLO dataset instance.
         """
-        if self.model:
-            # Get stride directly from model since Jittor handles parallel processing differently
-            try:
-                stride = max(int(self.model.stride.max()), 32)
-            except (AttributeError, ValueError):
-                stride = 32
-                LOGGER.warning("WARNING: Unable to get model stride, using default value of 32")
-        else:
-            stride = 32
-        
-        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=stride)
+        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=self.model.stride.max())
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
         """Construct and return dataloader.
@@ -70,7 +60,9 @@ class DetectionTrainer(BaseTrainer):
         if getattr(dataset, "rect", False) and shuffle:
             LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
             shuffle = False
-        workers = self.args.workers if mode == "train" else self.args.workers * 2
+        # Use same number of workers for train and val to avoid resource contention
+        # Validation doesn't need more workers (no shuffle overhead)
+        workers = self.args.workers
         return build_dataloader(dataset, batch_size, workers, shuffle, rank, buffer_size=None)
 
     def preprocess_batch(self, batch):
@@ -82,7 +74,19 @@ class DetectionTrainer(BaseTrainer):
         Returns:
             dict: Preprocessed batch.
         """
-        batch["img"] = batch["img"].to(self.device, non_blocking=True).float() / 255
+        img = batch["img"].to(self.device, non_blocking=True)
+        # Align input dtype with model parameters to avoid mixed-precision conv errors.
+        param_dtype = None
+        if hasattr(self.model, "parameters"):
+            params = self.model.parameters()
+            params_iter = iter(params)
+            first_param = next(params_iter, None)
+            param_dtype = first_param.dtype if first_param is not None else None
+        if param_dtype is not None and "float16" in str(param_dtype):
+            img = img.half()
+        else:
+            img = img.float()
+        batch["img"] = img / 255
         if self.args.multi_scale:
             imgs = batch["img"]
             sz = (

@@ -4,10 +4,10 @@
 import jittor as jt
 import jittor.nn as nn
 
+from nkyolo.utils import LOGGER
 from nkyolo.utils.metrics import OKS_SIGMA
 from nkyolo.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from nkyolo.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
-from nkyolo.utils.jittor_utils import autocast
 
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
@@ -165,7 +165,9 @@ class v8DetectionLoss:
         self.bce = nn.BCEWithLogitsLoss()
         # self.bce = nn.BCEWithLogitsLoss(reduction='none')
         self.hyp = h
-        self.stride = m.stride  # model strides
+        # m.stride is already jt.Var (set in tasks.py DetectionModel.__init__ at line 403)
+        # All sources set stride as jt.Var: tasks.py lines 403, 409, 535, 1110, 1322
+        self.stride = m.stride  # Direct assignment - m.stride is always jt.Var from source
         self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4
         self.reg_max = m.reg_max
@@ -182,33 +184,34 @@ class v8DetectionLoss:
         if nl == 0:
             out = jt.zeros((batch_size, 0, ne - 1), dtype=jt.float32)
         else:
-            i = targets[:, 0]  # image index
-            unique_values = i.unique()
-            counts = jt.zeros_like(unique_values)
-            for idx, val in enumerate(unique_values):
-                counts[idx] = (i == val).sum()
+            i: jt.Var = targets[:, 0]  # image index
+            # Critical fix: Always cast to int32 regardless of current dtype
+            # This handles the case where model precision switches between epochs:
+            # - Epoch 1: float16 mode -> bboxes is float16 -> targets[:, 0] is float16
+            # - Epoch 2+: After validation, model is float32 -> bboxes is float32 -> targets[:, 0] is float32
+            # jt.unique requires consistent int32 input to avoid CUDA compilation errors
+            # Use cast() instead of int() for explicit type conversion that works across precision modes
+            i = i.cast(jt.int32)
+            
+            # jt.unique with return_counts=True alone returns Var, need return_inverse=True to get tuple
+            _, _, counts = jt.unique(i, return_inverse=True, return_counts=True)
             counts = counts.to(dtype=jt.int32)
-            max_count = jt.max(counts).item()
+            max_count = counts.max().item()
             
             batch_data = []
             for j in range(batch_size):
                 matches = i == j
                 n = matches.sum().item()
                 if n > 0:
-                    if hasattr(matches, 'where'):
-                        indices = matches.where()[0]
-                        selected_rows = targets[indices]  
-                        selected = selected_rows[:, 1:] 
-                    else:
-                        mask_indices = jt.nonzero(matches).squeeze()
-                        selected_rows = targets[mask_indices]
-                        selected = selected_rows[:, 1:]
+                    indices = matches.where()[0]
+                    selected = targets[indices, 1:]  # Direct indexing and slicing
                     
-                    if len(selected.shape) == 1:
+                    if selected.ndim == 1:
                         selected = selected.unsqueeze(0)
                     
                     actual_n = selected.shape[0]
                     
+                    # Pad or truncate to max_count
                     if actual_n < max_count:
                         padding = jt.zeros((max_count - actual_n, ne - 1), dtype=jt.float32)
                         selected = jt.concat([selected, padding], dim=0)
@@ -217,7 +220,7 @@ class v8DetectionLoss:
                 else:
                     selected = jt.zeros((max_count, ne - 1), dtype=jt.float32)
                 
-                # 确保最终形状是 (max_count, ne-1)
+                # Ensure final shape is (max_count, ne-1)
                 assert selected.shape[0] == max_count, f"Shape mismatch: {selected.shape[0]} vs {max_count}"
                 batch_data.append(selected.unsqueeze(0))
             
@@ -253,50 +256,47 @@ class v8DetectionLoss:
         loss = jt.zeros(3)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
         
-        # Convert stride to list and ensure it matches feats length
-        # Convert stride to list for easier handling
-        if isinstance(self.stride, jt.Var):
-            stride_len = len(self.stride)
-            stride_list = [float(self.stride[i]) for i in range(stride_len)]
-        elif isinstance(self.stride, (list, tuple)):
-            stride_list = list(self.stride)
-        else:
-            stride_list = [float(self.stride)]
+        # self.stride is already jt.Var (ensured in __init__)
+        # Ensure stride matches feats length
+        stride_to_use = self.stride
+        stride_len = len(stride_to_use)
         
         # If stride has fewer elements than feats, compute missing strides from feature shapes
-        if len(stride_list) < len(feats):
+        if stride_len < len(feats):
+            LOGGER.warning(
+                f"Stride length ({stride_len}) < feats length ({len(feats)}). "
+                f"Computing missing strides from feature shapes."
+            )
             # Compute stride from feature map sizes
             # Stride is typically: input_size / feature_map_size
             # We'll use a reference input size (640) and compute stride for each feature map
             reference_size = 640.0  # Standard YOLO input size
-            for i in range(len(stride_list), len(feats)):
+            additional_strides = []
+            for i in range(stride_len, len(feats)):
                 h = feats[i].shape[2]  # feature map height
                 # Stride = input_size / feature_map_size
                 computed_stride = reference_size / h
-                stride_list.append(computed_stride)
+                additional_strides.append(computed_stride)
+            # Concatenate existing strides with computed ones
+            stride_to_use = jt.concat([stride_to_use, jt.Var(additional_strides)])
         
         # If stride has more elements than feats, truncate
-        if len(stride_list) > len(feats):
-            from nkyolo.utils import LOGGER
+        if stride_len > len(feats):
             LOGGER.warning(
-                f"Stride length ({len(stride_list)}) > feats length ({len(feats)}). "
+                f"Stride length ({stride_len}) > feats length ({len(feats)}). "
                 f"Truncating stride to match feats length."
             )
-            stride_list = stride_list[:len(feats)]
+            stride_to_use = stride_to_use[:len(feats)]
         
         # Final verification
-        if len(stride_list) != len(feats):
-            from nkyolo.utils import LOGGER
+        if len(stride_to_use) != len(feats):
             LOGGER.error(
                 f"Unable to resolve stride length mismatch: feats has {len(feats)} elements, "
-                f"but stride has {len(stride_list)} elements after adjustment."
+                f"but stride has {len(stride_to_use)} elements after adjustment."
             )
             raise ValueError(
-                f"feats length ({len(feats)}) must match stride length ({len(stride_list)})"
+                f"feats length ({len(feats)}) must match stride length ({len(stride_to_use)})"
             )
-        
-        # Use the adjusted stride list (convert back to Var for consistency)
-        stride_to_use = jt.Var(stride_list) if len(stride_list) > 0 else jt.Var([32.0])
         
         # Generate pred_distri and pred_scores
         # Each feat is reshaped to (batch, no, h*w), then concatenated along dim=2
@@ -310,11 +310,12 @@ class v8DetectionLoss:
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
-        # Get stride value for image size calculation
-        stride_val = stride_list[0] if isinstance(stride_list, list) else (self.stride[0] if isinstance(self.stride, jt.Var) and len(self.stride) > 0 else self.stride)
-        imgsz = jt.array(list(feats[0].shape[2:]),dtype = dtype) * float(stride_val)  # image size (h,w)
+        # Get stride value for image size calculation - use getitem() instead of float()
+        stride_val = stride_to_use.getitem(0)
+        imgsz = jt.array(list(feats[0].shape[2:]),dtype = dtype) * stride_val  # image size (h,w)
         
         # Generate anchor_points - should have same total count as pred_distri's second dimension
+        # Pass jt.Var directly, no type conversion
         anchor_points, stride_tensor = make_anchors(feats, stride_to_use, 0.5)
         
         # Verify anchor count matches pred_distri
@@ -335,10 +336,17 @@ class v8DetectionLoss:
             )
 
         # Targets
+        # Critical: Ensure batch_idx is int32 before concat to avoid type promotion issues
+        # When model switches from float16 (epoch 1) to float32 (epoch 2+ after validation),
+        # bboxes dtype changes, which would promote batch_idx to float if not explicitly set to int32
+        batch_idx = jt.array(batch["batch_idx"], dtype=jt.int32).view(-1, 1)
+        cls = jt.array(batch["cls"], dtype=jt.int32).view(-1, 1)
+        bboxes = jt.array(batch["bboxes"]).view(-1, 4)
+        # Concat will promote int32 to float, but we'll extract batch_idx separately in preprocess
         targets = jt.concat((
-            jt.array(batch["batch_idx"]).view(-1, 1),
-            jt.array(batch["cls"]).view(-1, 1),
-            jt.array(batch["bboxes"]).view(-1,4),
+            batch_idx.cast(bboxes.dtype),  # Cast to match bboxes dtype for concat
+            cls.cast(bboxes.dtype),        # Cast to match bboxes dtype for concat
+            bboxes,
         ), 1)
         targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
@@ -706,15 +714,17 @@ class v8PoseLoss(v8DetectionLoss):
                 - kpts_loss (jt.Var): The keypoints loss.
                 - kpts_obj_loss (jt.Var): The keypoints object loss.
         """
-        batch_idx = batch_idx.flatten()
+        batch_idx: jt.Var = batch_idx.flatten()
+        # Ensure int32 dtype to avoid compilation conflicts in float16 mode
+        # Use explicit cast to int32 to avoid CUDA compilation type inference issues
+        # This is critical when batch_idx may have been promoted to float16/float32
+        if batch_idx.dtype != jt.int32:
+            batch_idx = batch_idx.cast(jt.int32)
         batch_size = len(masks)
 
         # Find the maximum number of keypoints in a single image
-        # max_kpts = jt.unique(batch_idx, return_counts=True)[1].max()
-        unique_vals = jt.unique(batch_idx)
-        counts = jt.zeros_like(unique_vals)
-        for i, val in enumerate(unique_vals):
-             counts[i] = (batch_idx == val).sum()
+        # jt.unique with return_counts=True alone returns Var, need return_inverse=True to get tuple
+        _, _, counts = jt.unique(batch_idx, return_inverse=True, return_counts=True)
         max_kpts = counts.max().item()
 
         # Create a tensor to hold batched keypoints
@@ -780,7 +790,12 @@ class v8OBBLoss(v8DetectionLoss):
             out = jt.zeros(batch_size, 0, 6)
         else:
             i = targets[:, 0]  # image index
-            _, counts = i.unique(return_counts=True)
+            # Ensure int32 dtype to avoid compilation conflicts in float16 mode
+            # Use explicit int() cast to avoid CUDA compilation type inference issues
+            if i.dtype != jt.int32:
+                i = i.int()
+            # jt.unique with return_counts=True alone returns Var, need return_inverse=True to get tuple
+            _, _, counts = jt.unique(i, return_inverse=True, return_counts=True)
             counts = counts.to(dtype=jt.int32)
             max_count = counts.max().item()
             
@@ -789,13 +804,8 @@ class v8OBBLoss(v8DetectionLoss):
                 matches = i == j
                 n = matches.sum().item()
                 if n > 0:
-                    
-                    if hasattr(matches, 'where'):
-                        indices = matches.where()[0]
-                        selected = targets[indices]  
-                    else:
-                        mask_indices = jt.nonzero(matches).squeeze()
-                        selected = targets[mask_indices]
+                    indices = matches.where()[0]
+                    selected = targets[indices]
                     
                     if len(selected.shape) == 1:
                         selected = selected.unsqueeze(0)

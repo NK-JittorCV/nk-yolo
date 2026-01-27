@@ -27,6 +27,9 @@ class DetectionPredictor(BasePredictor):
             agnostic=self.args.agnostic_nms,
             max_det=self.args.max_det,
             classes=self.args.classes,
+            max_nms=self.args.max_nms,
+            max_time_img=self.args.max_time_img,
+            multi_label=self.args.multi_label,
         )
 
         if not isinstance(orig_imgs, list):  # input images are a jt.Var, not a list

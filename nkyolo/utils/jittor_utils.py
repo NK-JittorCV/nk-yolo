@@ -35,36 +35,25 @@ def autocast(enabled: bool, device: str = "cuda"):
         device: Device type ('cuda' or 'cpu')
     
     Note:
-        For Jittor, AMP is handled internally. This context manager is a no-op
-        if use_cuda_amp flag is not available in the Jittor version.
+        For Jittor, AMP is handled internally. This context manager preserves
+        the previous auto_mixed_precision_level setting to avoid precision changes
+        between epochs.
     """
-    # Check if Jittor supports use_cuda_amp flag
-    use_cuda_amp_available = hasattr(jt.flags, "use_cuda_amp")
-    prev_amp = 0
+    # 保存之前的精度设置，避免在 epoch 切换时丢失
+    prev_amp_level = jt.flags.auto_mixed_precision_level
     
-    if use_cuda_amp_available:
-        try:
-            prev_amp = jt.flags.use_cuda_amp
-        except (AttributeError, TypeError):
-            use_cuda_amp_available = False
-    
-    if enabled and device == "cuda" and use_cuda_amp_available:
-        try:
-            jt.flags.use_cuda_amp = 1
-        except (AttributeError, TypeError):
-            # Jittor version doesn't support use_cuda_amp flag
-            pass
+    # 设置新的精度级别
+    if enabled:
+        jt.flags.auto_mixed_precision_level = 1
+    else:
+        jt.flags.auto_mixed_precision_level = 0
     
     try:
         yield
     finally:
-        if use_cuda_amp_available:
-            try:
-                jt.flags.use_cuda_amp = prev_amp
-            except (AttributeError, TypeError):
-                # Ignore errors when restoring
-                pass
-
+        # 恢复之前的精度设置，而不是总是设为 0
+        # 这样可以保持跨 epoch 的精度一致性
+        jt.flags.auto_mixed_precision_level = prev_amp_level
 
 def get_cpu_info():
     """Return a string with system CPU information, i.e. 'Apple M2'."""

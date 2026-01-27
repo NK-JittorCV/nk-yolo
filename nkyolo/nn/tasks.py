@@ -975,6 +975,47 @@ def jittor_safe_load(weight, safe_only=False):
 
 def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     """Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a."""
+    def _load_state_dict_compat(model, state_dict, strict=True):
+        """Load state dict with optional strict handling for Jittor's API."""
+        load_fn = model.load_state_dict
+        supports_strict = False
+        if hasattr(load_fn, "__code__"):
+            supports_strict = "strict" in load_fn.__code__.co_varnames
+        else:
+            text_sig = getattr(load_fn, "__text_signature__", "") or ""
+            supports_strict = "strict" in text_sig
+
+        if not supports_strict and strict:
+            # Manual strictness check for common key mismatches
+            if hasattr(model, "state_dict"):
+                def _normalize_keys(keys):
+                    keys = set(keys)
+                    if keys and all(k.startswith("module.") for k in keys):
+                        keys = {k[7:] for k in keys}
+                    return keys
+
+                model_keys = _normalize_keys(model.state_dict().keys())
+                state_keys = _normalize_keys(state_dict.keys())
+                missing = model_keys - state_keys
+                unexpected = state_keys - model_keys
+                if missing or unexpected:
+                    # Allow known non-parameter buffers to be dropped when only unexpected keys exist.
+                    if not missing and unexpected:
+                        droppable_suffixes = (".anchors", ".strides")
+                        droppable = {k for k in state_dict.keys() if k.endswith(droppable_suffixes)}
+                        droppable_norm = _normalize_keys(droppable)
+                        if unexpected.issubset(droppable_norm) and droppable:
+                            LOGGER.warning(
+                                f"WARNING ⚠️ Dropping non-parameter keys from checkpoint: {sorted(droppable)}"
+                            )
+                            for k in droppable:
+                                state_dict.pop(k, None)
+                            return load_fn(state_dict)
+                    raise RuntimeError(
+                        f"State dict keys mismatch (strict=True). Missing: {len(missing)}, unexpected: {len(unexpected)}."
+                    )
+        return load_fn(state_dict, strict=strict) if supports_strict else load_fn(state_dict)
+
     ensemble = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
         ckpt, w = jittor_safe_load(w)  # load ckpt
@@ -1060,7 +1101,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
                     else:
                         ema_weights[k] = v
                 # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-                model.load_state_dict(ema_weights, strict=True)
+                _load_state_dict_compat(model, ema_weights, strict=True)
             elif ckpt.get("model"):
                 # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
                 model_weights = {}
@@ -1072,7 +1113,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
                     else:
                         model_weights[k] = v
                 # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-                model.load_state_dict(model_weights, strict=True)
+                _load_state_dict_compat(model, model_weights, strict=True)
         else:
             # 原有的加载逻辑（向后兼容）
             model_data = ckpt.get("ema") or ckpt["model"]
@@ -1097,7 +1138,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
                     else:
                         jittor_weights[k] = v
                 # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-                model.load_state_dict(jittor_weights, strict=True)
+                _load_state_dict_compat(model, jittor_weights, strict=True)
             else:
                 # 如果是模型对象
                 model = model_data.float()  # FP32 model

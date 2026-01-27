@@ -1,13 +1,20 @@
-# COCO dataset configuration for NK-YOLO training test
-# Using actual COCO data path
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-# Dataset info
-path: "coco"  # dataset root dir
-train: train2017.txt # train images (relative to 'path') 118287 images
-val: val2017.txt # val images (relative to 'path') 5000 images
-test: test-dev2017.txt 
+# COCO8 dataset (first 8 images from COCO train2017) by Ultralytics
+# Documentation: https://docs.ultralytics.com/datasets/detect/coco8/
+# Example usage: yolo train data=coco8.yaml
+# parent
+# ├── ultralytics
+# └── datasets
+#     └── coco8 ← downloads here (1 MB)
 
-# Classes (COCO has 80 classes, showing first few)
+# Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
+path: coco8 # dataset root dir
+train: images/train # train images (relative to 'path') 4 images
+val: images/val # val images (relative to 'path') 4 images
+test: # test images (optional)
+
+# Classes
 names:
   0: person
   1: bicycle
@@ -90,5 +97,5 @@ names:
   78: hair drier
   79: toothbrush
 
-# Number of classes
-nc: 80
+# Download script/URL (optional)
+download: https://github.com/ultralytics/assets/releases/download/v0.0.0/coco8.zip

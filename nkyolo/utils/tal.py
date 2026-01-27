@@ -309,7 +309,8 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
     
     Args:
         feats: List of feature tensors, each with shape (B, C, H, W)
-        strides: List, tuple, or Jittor Var of stride values, should match length of feats
+        strides: jt.Var of stride values, should match length of feats.
+                All callers (head.py, loss.py) now pass jt.Var after type unification at source.
         grid_cell_offset: Offset for grid cell centers (default 0.5)
     
     Returns:
@@ -325,41 +326,35 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
     assert feats is not None, "feats cannot be None"
     assert len(feats) > 0, "feats cannot be empty"
     
-    # Convert strides to list, handling Jittor Var, list, tuple, or scalar
-    if isinstance(strides, jt.Var):
-        # Jittor Var - convert to list of Python floats
-        strides_list = [float(strides[i]) for i in range(len(strides))]
-    elif isinstance(strides, (list, tuple)):
-        # Already a list or tuple
-        strides_list = list(strides)
-    elif hasattr(strides, '__len__') and not isinstance(strides, (str, bytes)):
-        # Other sequence type
-        strides_list = list(strides)
-    else:
-        # Scalar - repeat for all feats
-        strides_list = [float(strides)] * len(feats)
+    # strides should be jt.Var (all callers now pass jt.Var after type unification at source)
+    # Direct assignment - no conversion needed
+    strides_var = strides
     
-    if len(strides_list) != len(feats):
+    # Now strides_var is always jt.Var, verify length
+    if len(strides_var) != len(feats):
         raise ValueError(
             f"Length mismatch: feats has {len(feats)} elements, "
-            f"but strides has {len(strides_list)} elements. "
+            f"but strides has {len(strides_var)} elements. "
             f"They must have the same length."
         )
     
     dtype = feats[0].dtype
     total_anchors = 0
     
-    for i, stride in enumerate(strides_list):
+    # Process with unified jt.Var type
+    for i in range(len(feats)):
         if feats[i] is None:
             raise ValueError(f"feats[{i}] is None")
         
         _, _, h, w = feats[i].shape
-        stride_val = float(stride)  # Ensure stride is a Python float
+        # strides_var is jt.Var, use getitem() to get value
+        stride_val = strides_var.getitem(i)
         
         sx = jt.arange(end=w, dtype=dtype) + grid_cell_offset  # shift x
         sy = jt.arange(end=h, dtype=dtype) + grid_cell_offset  # shift y
         sy, sx = jt.meshgrid(sy, sx)
         anchor_points.append(jt.stack((sx, sy), -1).view(-1, 2))
+        # stride_val is jt.Var (0-d scalar), jt.full() accepts jt.Var
         stride_tensor.append(jt.full((h * w, 1), stride_val, dtype=dtype))
         total_anchors += h * w
     

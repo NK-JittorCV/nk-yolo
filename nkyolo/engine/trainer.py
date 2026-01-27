@@ -10,7 +10,9 @@ Usage:
 import gc
 import math
 import os
+import pickle
 import subprocess
+import tempfile
 import time
 import warnings
 from copy import copy
@@ -38,7 +40,13 @@ from nkyolo.utils import (
 )
 from nkyolo.utils.autobatch import check_train_batch_size
 from nkyolo.utils.checks import check_file, check_imgsz, check_model_file_from_stem, print_args
-from nkyolo.utils.dist import ddp_cleanup # TODO:generate_ddp_command
+from nkyolo.utils.dist import (
+    ddp_cleanup,
+    generate_ddp_command,
+    get_visible_devices,
+    parse_device_list,
+    resolve_device_id,
+)
 from nkyolo.utils.files import get_latest_run
 from nkyolo.utils.jittor_utils import (
     EarlyStopping,
@@ -202,10 +210,18 @@ class BaseTrainer:
 
     def train(self):
         """Allow device='', device=None on Multi-GPU systems to default to device=0."""
-        if isinstance(self.args.device, str) and len(self.args.device):  # i.e. device='0' or device='0,1,2,3'
-            world_size = len(self.args.device.split(","))
-        elif isinstance(self.args.device, (tuple, list)):  # i.e. device=[0, 1, 2, 3] (multi-GPU from CLI is list)
-            world_size = len(self.args.device)
+        # Check if we're already in an MPI environment (to avoid recursive mpirun calls)
+        # MPI sets various environment variables: OMPI_COMM_WORLD_SIZE, PMI_SIZE, or we check RANK
+        is_mpi_env = (
+            "OMPI_COMM_WORLD_SIZE" in os.environ or 
+            "PMI_SIZE" in os.environ or 
+            "WORLD_SIZE" in os.environ or
+            (RANK >= 0 and "LOCAL_RANK" in os.environ)
+        )
+        
+        device_list = parse_device_list(self.args.device)
+        if device_list:
+            world_size = len(device_list)
         elif self.args.device in {"cpu", "mps"}:  # i.e. device='cpu' or 'mps'
             world_size = 0
         elif jt.has_cuda:  # i.e. device=None or device='' or device=number
@@ -213,8 +229,21 @@ class BaseTrainer:
         else:  # i.e. device=None or device=''
             world_size = 0
 
-        # Run subprocess if DDP training, else train normally
-        if world_size > 1 and "LOCAL_RANK" not in os.environ:
+        # If we're in MPI environment, get actual world size from MPI
+        if is_mpi_env:
+            if "OMPI_COMM_WORLD_SIZE" in os.environ:
+                world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
+            elif "PMI_SIZE" in os.environ:
+                world_size = int(os.environ["PMI_SIZE"])
+            elif "WORLD_SIZE" in os.environ:
+                world_size = int(os.environ["WORLD_SIZE"])
+            elif RANK >= 0:
+                # If RANK is set but world_size is not, we need to infer it
+                # This is a fallback - ideally MPI should set WORLD_SIZE
+                world_size = max(world_size, 1)  # At least 1 if RANK is set
+
+        # Run subprocess if DDP training and NOT already in MPI environment, else train normally
+        if world_size > 1 and not is_mpi_env:
             # Argument checks
             if self.args.rect:
                 LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with Multi-GPU training, setting 'rect=False'")
@@ -227,17 +256,70 @@ class BaseTrainer:
                 self.args.batch = 16
 
             # Command
-            # cmd, file = generate_ddp_command(world_size, self) # TODO:generate_ddp_command
-            # try:
-            #     LOGGER.info(f'{colorstr("DDP:")} debug command {" ".join(cmd)}')
-            #     subprocess.run(cmd, check=True)
-            # except Exception as e:
-            #     raise e
-            # finally:
-            #     ddp_cleanup(self, str(file))
+            cmd, file, env = generate_ddp_command(world_size, self)
+            try:
+                LOGGER.info(f'{colorstr("DDP:")} debug command {" ".join(cmd)}')
+                subprocess.run(cmd, check=True, env=env)
+            except Exception as e:
+                raise e
+            finally:
+                ddp_cleanup(self, str(file))
 
         else:
             self._do_train(world_size)
+
+    def _broadcast_object(self, obj, src=0):
+        """Broadcast an object from source rank to all ranks in MPI environment.
+        
+        Args:
+            obj: Object to broadcast (only used on src rank)
+            src: Source rank to broadcast from (default: 0)
+            
+        Returns:
+            The broadcasted object (same value on all ranks)
+        """
+        if RANK == -1:
+            # Not in distributed training, just return the object
+            return obj
+        
+        # Use temporary file for broadcasting in MPI environment
+        # This is a simple implementation using file system
+        broadcast_file = self.save_dir / f"_broadcast_{src}.pkl"
+        
+        if RANK == src:
+            # Source rank: write object to file
+            with open(broadcast_file, 'wb') as f:
+                pickle.dump(obj, f)
+            # Small delay to ensure file is written
+            time.sleep(0.01)
+        
+        # All ranks: wait for file and read it
+        max_wait = 5.0  # Maximum wait time in seconds
+        wait_time = 0.0
+        while not broadcast_file.exists() and wait_time < max_wait:
+            time.sleep(0.01)
+            wait_time += 0.01
+        
+        if not broadcast_file.exists():
+            LOGGER.warning(f"Rank {RANK}: Broadcast file not found after {max_wait}s, using default value")
+            return obj if RANK == src else None
+        
+        # Read the broadcasted object
+        try:
+            with open(broadcast_file, 'rb') as f:
+                result = pickle.load(f)
+        except Exception as e:
+            LOGGER.warning(f"Rank {RANK}: Failed to read broadcast file: {e}, using default value")
+            return obj if RANK == src else None
+        
+        # Clean up: only rank 0 removes the file
+        if RANK == 0:
+            try:
+                broadcast_file.unlink()
+            except Exception:
+                pass
+        
+        return result
 
     def _setup_scheduler(self):
         """Initialize training learning rate scheduler."""
@@ -248,17 +330,59 @@ class BaseTrainer:
         self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.lf)
 
     def _setup_ddp(self, world_size):
-        """Initializes and sets the jtributedDataParallel parameters for training."""
-        jt.cuda.set_device(RANK)
-        self.device = jt.device("cuda", RANK)
-        # LOGGER.info(f'DDP info: RANK {RANK}, WORLD_SIZE {world_size}, DEVICE {self.device}')
-        os.environ["jt_NCCL_BLOCKING_WAIT"] = "1"  # set to enforce timeout
-        jt.init_process_group(
-            backend="nccl" if jt.is_nccl_available() else "gloo",
-            timeout=timedelta(seconds=10800),  # 3 hours
-            rank=RANK,
-            world_size=world_size,
-        )
+        """Initializes and sets the distributed training parameters for Jittor."""
+        # Jittor automatically handles distributed setup via MPI
+        # Set device based on rank using CUDA_VISIBLE_DEVICES environment variable
+        if RANK >= 0:
+            # CRITICAL: Disable Jittor's parallel compilation in MPI environments to prevent segfaults
+            # Multiple MPI processes compiling operators simultaneously causes memory corruption
+            # This must be set BEFORE any Jittor operations that trigger compilation
+            # Use environment variables to control Jittor compilation behavior
+            os.environ["JIT_PARALLEL"] = "0"  # Disable Jittor's parallel JIT compilation
+            os.environ["JITTOR_COMPILE_THREADS"] = "1"  # Use single-threaded compilation
+            # Disable Jittor's internal parallel compiler if available
+            if hasattr(jt.flags, 'parallel_compile'):
+                jt.flags.parallel_compile = False
+            device_value = getattr(self.args, "device", "")
+            device_arg = str(device_value).lower().strip()
+            visible_devices = get_visible_devices()
+            device_list = visible_devices or parse_device_list(device_value)
+            device_id = resolve_device_id(device_list, LOCAL_RANK, RANK)
+
+            force_cpu = device_arg in {"cpu", "mps"} or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1"
+            if jt.has_cuda and not force_cpu:
+                # Set per-rank CUDA_VISIBLE_DEVICES for stable Jittor compilation
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
+                jt.flags.use_cuda = 1
+
+                # Device string for logging (Jittor doesn't have jt.device like PyTorch)
+                # Note: After CUDA_VISIBLE_DEVICES is set, Jittor sees the GPU as device 0
+                # So we log the actual physical GPU ID from CUDA_VISIBLE_DEVICES
+                self.device = f"cuda:{device_id}"
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+                jt.flags.use_cuda = 0
+                self.device = "cpu"
+            
+            # Get actual world size from environment if available
+            actual_world_size = world_size
+            if "OMPI_COMM_WORLD_SIZE" in os.environ:
+                actual_world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
+            elif "PMI_SIZE" in os.environ:
+                actual_world_size = int(os.environ["PMI_SIZE"])
+            elif "WORLD_SIZE" in os.environ:
+                actual_world_size = int(os.environ["WORLD_SIZE"])
+            
+            # Always print DDP info for all ranks - use print to bypass logging level restriction
+            import sys
+            print(f'[Rank {RANK}] DDP info: RANK {RANK}, LOCAL_RANK {LOCAL_RANK}, WORLD_SIZE {actual_world_size}, '
+                  f'DEVICE {self.device}, CUDA_VISIBLE_DEVICES={os.environ.get("CUDA_VISIBLE_DEVICES", "not set")}', 
+                  file=sys.stderr, flush=True)
+            LOGGER.info(f'DDP info: RANK {RANK}, LOCAL_RANK {LOCAL_RANK}, WORLD_SIZE {actual_world_size}, DEVICE {self.device}')
+            
+            # Jittor uses MPI for distributed training, no need for explicit init_process_group
+            # The distributed context is automatically set up by MPI
+            # Each process will automatically get a different subset of data
 
     def _setup_train(self, world_size):
         """Builds dataloaders and optimizer on correct rank process."""
@@ -415,13 +539,22 @@ class BaseTrainer:
             except (ImportError, AttributeError):
                 LOGGER.warning("PyTorch DDP not available, skipping DDP setup")
         else:
-            # Jittor DDP setup (if supported)
-            # Jittor handles parallelization differently, may not need explicit DDP wrapper
-            if hasattr(jt, 'distributed') and hasattr(jt.distributed, 'ParallelModel'):
-                try:
-                    self.model = jt.distributed.ParallelModel(self.model)
-                except Exception:
-                    LOGGER.warning("Jittor DDP not available, skipping DDP setup")
+            # Jittor DDP setup
+            # Jittor uses ParallelModel for distributed training
+            try:
+                if hasattr(jt, 'distributed') and hasattr(jt.distributed, 'ParallelModel'):
+                    if RANK > -1:
+                        self.model = jt.distributed.ParallelModel(self.model)
+                        LOGGER.info(f"Jittor ParallelModel initialized for rank {RANK}")
+                else:
+                    # Fallback: Jittor may handle distribution automatically via MPI
+                    # Just ensure model is on the correct device
+                    if RANK >= 0 and jt.has_cuda:
+                        device_id = LOCAL_RANK if LOCAL_RANK >= 0 else RANK
+                        # Model parameters will be automatically distributed
+                        LOGGER.info(f"Jittor distributed training enabled for rank {RANK} on device {device_id}")
+            except Exception as e:
+                LOGGER.warning(f"Jittor DDP setup failed: {e}, continuing without explicit DDP wrapper")
 
     def _do_train(self, world_size=1):
         """Train completed, evaluate and plot if specified by arguments."""
@@ -429,7 +562,10 @@ class BaseTrainer:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
 
-        nb = len(self.train_loader)  # number of batches
+        nb = len(self.train_loader)  # number of batches per process
+        if RANK >= 0:
+            LOGGER.info(f"Rank {RANK}: Number of batches per epoch = {nb} "
+                       f"(dataset size: {len(self.trainset)}, batch_size: {self.batch_size // max(world_size, 1)})")
         nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
         last_opt_step = -1
         self.epoch_time = None
@@ -455,7 +591,9 @@ class BaseTrainer:
                 self.scheduler.step()
 
             self._model_train()
-            if RANK != -1:
+            # Jittor handles distributed sampling automatically via MPI
+            # No need to set sampler epoch manually
+            if RANK != -1 and hasattr(self.train_loader, 'sampler') and hasattr(self.train_loader.sampler, 'set_epoch'):
                 self.train_loader.sampler.set_epoch(epoch)
             pbar = enumerate(self.train_loader)
             # Update dataloader attributes (optional)
@@ -507,9 +645,7 @@ class BaseTrainer:
                     if self.args.time:
                         self.stop = (time.time() - self.train_time_start) > (self.args.time * 3600)
                         if RANK != -1:  # if DDP training
-                            broadcast_list = [self.stop if RANK == 0 else None]
-                            jt.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
-                            self.stop = broadcast_list[0]
+                            self.stop = self._broadcast_object(self.stop, src=0)
                         if self.stop:  # training time exceeded
                             break
 
@@ -568,9 +704,7 @@ class BaseTrainer:
 
             # Early Stopping
             if RANK != -1:  # if DDP training
-                broadcast_list = [self.stop if RANK == 0 else None]
-                jt.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
-                self.stop = broadcast_list[0]
+                self.stop = self._broadcast_object(self.stop, src=0)
             if self.stop:
                 break  # must break all DDP ranks
             epoch += 1
@@ -579,7 +713,8 @@ class BaseTrainer:
             # Do final val with best.pt
             seconds = time.time() - self.train_time_start
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
-            self.final_eval()
+            if getattr(self.args, "final_eval", True):
+                self.final_eval()
             if self.args.plots:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
@@ -643,13 +778,24 @@ class BaseTrainer:
 
     def save_model(self):
         """Save model training checkpoints with additional metadata."""
+
+        def _half_state_dict(model):
+            """Create an FP16 copy of a model state dict without mutating the model."""
+            state = model.state_dict()
+            half_state = {}
+            for k, v in state.items():
+                if isinstance(v, jt.Var):
+                    half_state[k] = v.half()
+                else:
+                    half_state[k] = v
+            return half_state
         
         # Prepare checkpoint data
         checkpoint_data = {
             "epoch": self.epoch,
             "best_fitness": self.best_fitness,
             "model": None,  # resume and final checkpoints derive from EMA
-            "ema": safe_deepcopy_jittor(self.ema.ema).half().state_dict(),
+            "ema": _half_state_dict(self.ema.ema),
             "updates": self.ema.updates,
             "optimizer": convert_optimizer_state_dict_to_fp16(safe_deepcopy_jittor(self.optimizer.state_dict())),
             "train_args": vars(self.args),  # save as dict

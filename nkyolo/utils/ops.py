@@ -12,7 +12,7 @@ import jittor as jt
 import jittor.nn as nn
 
 from nkyolo.utils import LOGGER
-from nkyolo.utils.metrics import batch_probiou
+from nkyolo.utils.metrics import batch_probiou, box_iou
 
 
 class Profile(contextlib.ContextDecorator):
@@ -58,8 +58,6 @@ class Profile(contextlib.ContextDecorator):
 
     def time(self):
         """Get current time."""
-        if self.cuda:
-            jt.cuda.synchronize(self.device)
         return time.time()
 
 
@@ -140,102 +138,11 @@ def make_divisible(x, divisor):
     return math.ceil(x / divisor) * divisor
 
 
-def compute_iou(box1, box2):
-    """
-    简单的 IoU 计算实现
-    
-    Args:
-        box1 (jt.Var): 边界框1，shape (1, 4)，格式 xyxy
-        box2 (jt.Var): 边界框2，shape (N, 4)，格式 xyxy
-    
-    Returns:
-        jt.Var: IoU 值，shape (1, N)
-    """
-    # 逐个计算IoU，避免广播问题
-    ious = []
-    
-    # 确保正确的形状和数据访问
-    if box1.ndim == 2:
-        box1_flat = box1.view(-1)  # flatten to 1D
-    else:
-        box1_flat = box1
-    
-    for i in range(box2.shape[0]):
-        box2_i = box2[i]  # shape (4,)
-        
-        # 安全的数据访问方式
-        try:
-            # 尝试使用 numpy 转换
-            box1_np = box1_flat.numpy()
-            box2_np = box2_i.numpy()
-            
-            x1 = max(float(box1_np[0]), float(box2_np[0]))
-            y1 = max(float(box1_np[1]), float(box2_np[1]))
-            x2 = min(float(box1_np[2]), float(box2_np[2]))
-            y2 = min(float(box1_np[3]), float(box2_np[3]))
-            
-            intersection = max(0, x2 - x1) * max(0, y2 - y1)
-            
-            # 计算面积
-            area1 = (float(box1_np[2]) - float(box1_np[0])) * (float(box1_np[3]) - float(box1_np[1]))
-            area2 = (float(box2_np[2]) - float(box2_np[0])) * (float(box2_np[3]) - float(box2_np[1]))
-            
-            # 计算IoU
-            union = area1 + area2 - intersection
-            iou = intersection / (union + 1e-6) if union > 0 else 0
-            ious.append(iou)
-            
-        except:
-            # 如果转换失败，使用默认值
-            ious.append(0.0)
-    
-    return jt.array(ious).unsqueeze(0)  # shape (1, N)
-
-
-def simple_nms(boxes, scores, iou_threshold):
-    """
-    简单的 NMS 实现，用于 Jittor 兼容性
-    
-    Args:
-        boxes (jt.Var): 边界框，shape (N, 4)，格式 xyxy
-        scores (jt.Var): 置信度分数，shape (N,)
-        iou_threshold (float): IoU 阈值
-    
-    Returns:
-        jt.Var: 保留的框的索引
-    """
-    if boxes.numel() == 0:
-        return jt.empty((0,), dtype=jt.int64)
-    
-    # 按分数降序排序
-    _, indices = scores.sort(descending=True)
-    
-    keep = []
-    while len(indices) > 0:
-        # 保留当前最高分数的框
-        current = indices[0]
-        keep.append(current.item())
-        
-        if len(indices) == 1:
-            break
-            
-        # 计算当前框与其余框的 IoU
-        current_box = boxes[current].unsqueeze(0)
-        other_boxes = boxes[indices[1:]]
-        
-        # 计算 IoU - 使用自定义实现
-        ious = compute_iou(current_box, other_boxes).squeeze(0)
-        
-        # 保留 IoU 小于阈值的框
-        mask = ious <= iou_threshold
-        indices = indices[1:][mask]
-    
-    return jt.array(keep, dtype=jt.int64)
 
 
 def nms_rotated(boxes, scores, threshold=0.45):
     """
-    NMS for oriented bounding boxes using probiou and fast-nms.
+    Optimized NMS for oriented bounding boxes using probiou and fast-nms.
 
     Args:
         boxes (jt.Var): Rotated bounding boxes, shape (N, 5), format xywhr.
@@ -243,21 +150,48 @@ def nms_rotated(boxes, scores, threshold=0.45):
         threshold (float, optional): IoU threshold. Defaults to 0.45.
 
     Returns:
-        (jt.Var): Indices of boxes to keep after NMS.
+        (jt.Var): Indices of boxes to keep after NMS, dtype=int32.
     """
     if len(boxes) == 0:
-        return np.empty((0,), dtype=np.int8)
-    sorted_idx = jt.argsort(scores, descending=True)
+        return jt.array([], dtype='int32')
+    
+    # 按分数降序排序
+    argsort_result = jt.argsort(scores, descending=True)
+    if isinstance(argsort_result, tuple):
+        sorted_idx = argsort_result[0]
+    else:
+        sorted_idx = argsort_result
+    
     boxes = boxes[sorted_idx]
+    
+    # 批量计算所有框之间的 probiou（只计算上三角矩阵，避免重复计算）
     ious = batch_probiou(boxes, boxes).triu_(diagonal=1)
-    pick = jt.nonzero(ious.max(dim=0)[0] < threshold).squeeze_(-1)
-    return sorted_idx[pick]
+    
+    # 对于每个框，找到与它重叠度最高的框的 IoU
+    # 如果最大 IoU 小于阈值，则保留该框
+    max_ious = ious.max(dim=0)[0]  # 每个框与前面框的最大 IoU
+    
+    # 第一个框（分数最高）总是保留，所以从索引1开始检查
+    if boxes.shape[0] > 1:
+        # 对于索引 >= 1 的框，检查是否应该保留
+        keep_mask = max_ious < threshold
+        # 第一个框总是保留
+        keep_mask = jt.concat([jt.array([True], dtype=jt.bool), keep_mask])
+        pick = jt.where(keep_mask)[0]
+    else:
+        pick = jt.array([0], dtype=jt.int64)
+    
+    return sorted_idx[pick].astype('int32')
 
 
 
 def jtnms(boxes: jt.Var, scores: jt.Var, iou_threshold: float) -> jt.Var:
     """
-    Non-Maximum Suppression (NMS) implementation in Jittor, used to remove highly overlapping detection boxes.
+    Optimized Non-Maximum Suppression (NMS) implementation in Jittor.
+    Used to remove highly overlapping detection boxes.
+    
+    This implementation uses optimized batch IoU computation with early stopping
+    for better performance, especially when dealing with many boxes.
 
     Args:
         boxes (jt.Var): [N, 4], bounding box coordinates in the format (x1, y1, x2, y2).
@@ -267,8 +201,15 @@ def jtnms(boxes: jt.Var, scores: jt.Var, iou_threshold: float) -> jt.Var:
     Returns:
         jt.Var: Indices of the kept boxes [M,], dtype=int32.
     """
+    # Use Jittor's built-in NMS operator when available (faster, operator-level).
+    if hasattr(jt, "nms"):
+        if scores.ndim == 2:
+            scores = scores.squeeze(1)
+        dets = jt.concat((boxes, scores.reshape(-1, 1)), dim=1)
+        return jt.nms(dets, iou_threshold).astype("int32")
+
     # 处理空输入
-    if boxes.numel() == 0:
+    if boxes.numel() == 0 or boxes.shape[0] == 0:
         return jt.array([], dtype='int32')
     
     # 确保 scores 是 [N] 形状
@@ -276,48 +217,46 @@ def jtnms(boxes: jt.Var, scores: jt.Var, iou_threshold: float) -> jt.Var:
         scores = scores.squeeze(1)  # [N, 1] -> [N]
     
     # 按 scores 降序排序并获取排序索引
-    _, order = jt.argsort(scores, descending=True)
+    argsort_result = jt.argsort(scores, descending=True)
+    if isinstance(argsort_result, tuple):
+        order = argsort_result[0]
+    else:
+        order = argsort_result
+    
     boxes = boxes[order]  # 排序后的 boxes
-    keep = jt.zeros(boxes.shape[0], dtype='bool')  # 用于标记保留的框
-    num_keep = 0  # 已保留的框数量
+    n = boxes.shape[0]
     
-    # 预先计算所有框的面积，避免重复计算
-    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    # 优化：对于非常少的框，直接返回
+    if n == 1:
+        return order.astype('int32')
     
-    for i in range(boxes.shape[0]):
-        # 如果当前框已被标记为抑制，则跳过
-        if keep[i]:
+    # 使用优化的循环实现
+    keep = jt.ones(n, dtype=jt.bool)  # 初始时所有框都保留
+    
+    # 对于每个保留的框，批量计算它与后续所有框的 IoU
+    for i in range(n):
+        if not keep[i]:  # 如果当前框已被抑制，跳过
             continue
+        
+        # 计算当前框与后续所有框的 IoU（批量计算）
+        if i + 1 < n:
+            # 只检查后续还保留的框（优化：减少不必要的计算）
+            # 但为了简化，我们先计算所有后续框，然后应用 keep 掩码
+            current_box = boxes[i:i+1]  # [1, 4]
+            remaining_boxes = boxes[i+1:]  # [M, 4]
             
-        # 保留当前框
-        keep[i] = True
-        num_keep += 1
-        
-        # 计算当前框与剩余所有框的IOU
-        # 当前框坐标
-        x1, y1, x2, y2 = boxes[i]
-        
-        # 剩余框与当前框的交集坐标
-        xx1 = jt.maximum(x1, boxes[i+1:, 0])
-        yy1 = jt.maximum(y1, boxes[i+1:, 1])
-        xx2 = jt.minimum(x2, boxes[i+1:, 2])
-        yy2 = jt.minimum(y2, boxes[i+1:, 3])
-        
-        # 计算交集面积
-        w = jt.maximum(0.0, xx2 - xx1)
-        h = jt.maximum(0.0, yy2 - yy1)
-        inter = w * h
-        
-        # 计算并集面积和IOU
-        union = areas[i] + areas[i+1:] - inter
-        iou = inter / jt.maximum(union, 1e-9)  # 防止除零
-        
-        # 抑制IOU超过阈值的框
-        overlap_mask = iou > iou_threshold
-        keep[i+1:][overlap_mask] = False
+            # 批量计算 IoU: [1, M]
+            ious = box_iou(current_box, remaining_boxes).squeeze(0)  # [M]
+            
+            # 抑制 IoU 超过阈值的框
+            suppress_mask = ious > iou_threshold
+            # 只更新后续还保留的框
+            keep[i+1:] = keep[i+1:] & jt.logical_not(suppress_mask)
     
     # 获取保留的索引并映射回原始顺序
     keep_indices = jt.where(keep)[0]
+    if len(keep_indices) == 0:
+        return jt.array([], dtype='int32')
     return order[keep_indices].astype('int32')
 
 
@@ -332,13 +271,15 @@ def non_max_suppression(
     max_det=300,
     nc=0,  # number of classes (optional)
     max_time_img=0.05,
-    max_nms=30000,
+    max_nms=30000,  # Maximum boxes to process in NMS (lower values = faster but may reduce accuracy)
     max_wh=7680,
     in_place=True,
     rotated=False,
 ):
     """
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
+
+    Referenced from: https://github.com/ultralytics/ultralytics/blob/main/ultralytics/utils/ops.py
 
     Args:
         prediction (jt.Var): A tensor of shape (batch_size, num_classes + 4 + num_masks, num_boxes)
@@ -358,7 +299,7 @@ def non_max_suppression(
         max_det (int): The maximum number of boxes to keep after NMS.
         nc (int, optional): The number of classes output by the model. Any indices after this will be considered masks.
         max_time_img (float): The maximum time (seconds) for processing one image.
-        max_nms (int): The maximum number of boxes into torchvision.ops.nms().
+        max_nms (int): The maximum number of boxes into NMS.
         max_wh (int): The maximum box width and height in pixels.
         in_place (bool): If True, the input prediction tensor will be modified in place.
         rotated (bool): If Oriented Bounding Boxes (OBB) are being passed for NMS.
@@ -368,58 +309,83 @@ def non_max_suppression(
             shape (num_boxes, 6 + num_masks) containing the kept boxes, with columns
             (x1, y1, x2, y2, confidence, class, mask1, mask2, ...).
     """
-
     # Checks
     assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
     assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
-    if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
+    
+    # Handle tuple/list input (YOLOv8 model in validation mode, output = (inference_out, loss_out))
+    if isinstance(prediction, (list, tuple)):
         prediction = prediction[0]  # select only inference output
-    if classes is not None:
-        classes = jt.Var(classes, device=prediction.device)
 
-    if prediction.shape[-1] == 6:  # end-to-end model (BNC, i.e. 1,300,6)
+    # Jittor NMS/where kernels are more reliable in FP32; cast if needed
+    if isinstance(prediction, jt.Var):
+        # Force FP32 for NMS path to avoid Jittor FP16 codegen issues
+        prediction = prediction.float32()
+    
+    # Convert classes to tensor if provided
+    if classes is not None:
+        classes = jt.Var(classes, device=prediction.device) if not isinstance(classes, jt.Var) else classes
+
+    # Handle end-to-end model format (BNC, i.e. 1,300,6)
+    if prediction.shape[-1] == 6:
         output = [pred[pred[:, 4] > conf_thres][:max_det] for pred in prediction]
         if classes is not None:
             output = [pred[(pred[:, 5:6] == classes).any(1)] for pred in output]
         return output
 
+    # Extract dimensions
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
     nc = nc or (prediction.shape[1] - 4)  # number of classes
     nm = prediction.shape[1] - nc - 4  # number of masks
     mi = 4 + nc  # mask start index
+    
+    # Filter candidates by confidence threshold
     xc = prediction[:, 4:mi].max(1) > conf_thres  # candidates
+    if isinstance(xc, jt.Var) and xc.dtype != jt.bool:
+        xc = xc.astype(jt.bool)
 
     # Settings
-    # min_wh = 2  # (pixels) minimum box width and height
     time_limit = 2.0 + max_time_img * bs  # seconds to quit after
     multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
 
+    # Transpose prediction from (batch, channels, boxes) to (batch, boxes, channels)
     prediction = prediction.transpose(-1, -2)  # shape(1,84,6300) to shape(1,6300,84)
+    
+    # Convert boxes from xywh to xyxy format
     if not rotated:
         if in_place:
             prediction[..., :4] = xywh2xyxy(prediction[..., :4])  # xywh to xyxy
         else:
             prediction = jt.concat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)  # xywh to xyxy
 
+    # Process each image in batch
     t = time.time()
-    output = [jt.zeros((0, 6 + nm))] * bs
+    output = [jt.zeros(0, 6 + nm)] * bs
+    
     for xi, x in enumerate(prediction):  # image index, image inference
-        # Apply constraints
-        # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
-        # 修复 Jittor 布尔索引兼容性
+        # Apply confidence mask to filter candidates
         mask = xc[xi]
-        if hasattr(mask, 'where'):
-            indices = mask.where()[0]  # Jittor 方式
-            x = x[indices]
-        else:
-            x = x[mask]  # 原始方式
+        if isinstance(mask, jt.Var) and mask.dtype != jt.bool:
+            mask = mask.astype(jt.bool)
+        indices = jt.where(mask)[0]
+        if indices.shape[0] == 0:
+            # No candidates, skip to next image
+            continue
+        x = x[indices]
 
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]) and not rotated:
             lb = labels[xi]
-            v = jt.zeros((len(lb), nc + nm + 4), device=x.device)
-            v[:, :4] = xywh2xyxy(lb[:, 1:5])  # box
-            v[range(len(lb)), lb[:, 0].long() + 4] = 1.0  # cls
+            if isinstance(lb, jt.Var):
+                v = jt.zeros((len(lb), nc + nm + 4), device=x.device, dtype=x.dtype)
+                v[:, :4] = xywh2xyxy(lb[:, 1:5])  # box
+                v[range(len(lb)), lb[:, 0].long() + 4] = 1.0  # cls
+            else:
+                # Handle numpy array or list
+                lb = jt.Var(lb) if not isinstance(lb, jt.Var) else lb
+                v = jt.zeros((len(lb), nc + nm + 4), device=x.device, dtype=x.dtype)
+                v[:, :4] = xywh2xyxy(lb[:, 1:5])  # box
+                v[range(len(lb)), lb[:, 0].long() + 4] = 1.0  # cls
             x = jt.concat((x, v), 0)
 
         # If none remain process next image
@@ -427,22 +393,21 @@ def non_max_suppression(
             continue
 
         # Detections matrix nx6 (xyxy, conf, cls)
-        box, cls, mask = x.split((4, nc, nm), 1)
+        box, cls, mask_vals = x.split((4, nc, nm), 1)
 
         if multi_label:
+            # Multiple labels per box
             i, j = jt.where(cls > conf_thres)
-            x = jt.concat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
-
-        else:  # 仅保留最佳类别
+            x = jt.concat((box[i], x[i, 4 + j, None], j[:, None].float(), mask_vals[i]), 1)
+        else:
+            # Single best class per box
             conf = cls.max(1, keepdim=True)
-            argmax_result = jt.argmax(cls, dim=1)
-            if isinstance(argmax_result, tuple):
-                j = argmax_result[0]
-            else:
-                j = argmax_result
-            j = j.unsqueeze(1) 
+            j = cls.argmax(1)
+            if isinstance(j, tuple):
+                j = j[0]
+            j = j.reshape(-1, 1)
             filt = conf.view(-1) > conf_thres
-            x = jt.cat((box, conf, j.float(), mask), 1)[filt]
+            x = jt.concat((box, conf, j.float(), mask_vals), 1)[filt]
 
         # Filter by class
         if classes is not None:
@@ -452,36 +417,37 @@ def non_max_suppression(
         n = x.shape[0]  # number of boxes
         if not n:  # no boxes
             continue
+        # 优化：提前限制框的数量，减少 NMS 计算量（这是性能关键优化）
         if n > max_nms:  # excess boxes
-            x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+            # Sort by confidence and keep top max_nms
+            argsort_result = x[:, 4].argsort(descending=True)
+            if isinstance(argsort_result, tuple):
+                sorted_idx = argsort_result[0]
+            else:
+                sorted_idx = argsort_result
+            x = x[sorted_idx[:max_nms]]
+            n = max_nms  # 更新框数量
 
         # Batched NMS
         c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
         scores = x[:, 4]  # scores
+        
         if rotated:
+            # Oriented bounding boxes
             boxes = jt.concat((x[:, :2] + c, x[:, 2:4], x[:, -1:]), dim=-1)  # xywhr
             i = nms_rotated(boxes, scores, iou_thres)
         else:
+            # Standard bounding boxes
             boxes = x[:, :4] + c  # boxes (offset by class)
-            # 1. 首先将scores合并到boxes中
-            boxes_with_scores = jt.cat([boxes, scores.unsqueeze(1)], dim=1) 
-            # 2. 调用Jittor的nms函数，传入boxes和iou阈值
-            i = jt.nms(boxes_with_scores, iou_thres)  # NMS
-        i = i[:max_det]  # limit detections
-
-        # # Experimental
-        # merge = False  # use merge-NMS
-        # if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
-        #     # Update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
-        #     from .metrics import box_iou
-        #     iou = box_iou(boxes[i], boxes) > iou_thres  # IoU matrix
-        #     weights = iou * scores[None]  # box weights
-        #     x[i, :4] = jt.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
-        #     redundant = True  # require redundant detections
-        #     if redundant:
-        #         i = i[iou.sum(1) > 1]  # require redundancy
-
+            i = jtnms(boxes, scores, iou_thres)  # NMS
+        
+        # Limit detections
+        if len(i) > max_det:
+            i = i[:max_det]
+        
         output[xi] = x[i]
+        
+        # Check time limit
         if (time.time() - t) > time_limit:
             LOGGER.warning(f"WARNING ⚠️ NMS time limit {time_limit:.3f}s exceeded")
             break  # time limit exceeded
@@ -1012,143 +978,3 @@ def clean_str(s):
         (str): a string with special characters replaced by an underscore _
     """
     return re.sub(pattern="[|@#!¡·$€%&()=?¿^*;:,¨´><+]", repl="_", string=s)
-
-
-def compute_iou_optimized(box1, box2):
-    """
-    计算两个单独边界框的IoU，专门优化处理Jittor Var对象。
-    
-    Args:
-        box1 (jt.Var): 边界框1，格式为[x1, y1, x2, y2]
-        box2 (jt.Var): 边界框2，格式为[x1, y1, x2, y2]
-    
-    Returns:
-        float: IoU值
-    """
-    # 转换为numpy以避免Jittor broadcasting问题
-    if hasattr(box1, 'numpy'):
-        box1_np = box1.numpy()
-    else:
-        box1_np = np.array(box1)
-    
-    if hasattr(box2, 'numpy'):
-        box2_np = box2.numpy()
-    else:
-        box2_np = np.array(box2)
-    
-    # 确保是1D数组
-    box1_np = box1_np.flatten()
-    box2_np = box2_np.flatten()
-    
-    # 计算交集区域
-    x1 = max(box1_np[0], box2_np[0])
-    y1 = max(box1_np[1], box2_np[1])
-    x2 = min(box1_np[2], box2_np[2])
-    y2 = min(box1_np[3], box2_np[3])
-    
-    # 检查是否有交集
-    if x2 <= x1 or y2 <= y1:
-        return 0.0
-    
-    # 计算交集面积
-    intersection = (x2 - x1) * (y2 - y1)
-    
-    # 计算各自面积
-    area1 = (box1_np[2] - box1_np[0]) * (box1_np[3] - box1_np[1])
-    area2 = (box2_np[2] - box2_np[0]) * (box2_np[3] - box2_np[1])
-    
-    # 计算并集面积
-    union = area1 + area2 - intersection
-    
-    # 避免除零
-    if union <= 0:
-        return 0.0
-    
-    return intersection / union
-
-
-def simple_nms(boxes, scores, iou_threshold):
-    """
-    简单的NMS实现，作为jt.ops.nms的fallback。
-    
-    Args:
-        boxes (jt.Var): 边界框，形状为[N, 4]，格式为[x1, y1, x2, y2]
-        scores (jt.Var): 置信度分数，形状为[N]
-        iou_threshold (float): IoU阈值
-    
-    Returns:
-        jt.Var: 保留的框的索引
-    """
-    # Input validation
-    if not (hasattr(boxes, "ndim") and hasattr(boxes, "shape")):
-        raise ValueError("boxes must be a Jittor Var or array-like with .ndim and .shape attributes")
-    if not (hasattr(scores, "ndim") and hasattr(scores, "shape")):
-        raise ValueError("scores must be a Jittor Var or array-like with .ndim and .shape attributes")
-    if boxes.ndim != 2 or boxes.shape[1] != 4:
-        raise ValueError(f"boxes must be a 2D tensor with shape [N, 4], but got shape {boxes.shape}")
-    if scores.ndim != 1:
-        raise ValueError(f"scores must be a 1D tensor with shape [N], but got shape {scores.shape}")
-    if boxes.shape[0] != scores.shape[0]:
-        raise ValueError(f"boxes and scores must have the same number of elements in the first dimension, but got {boxes.shape[0]} and {scores.shape[0]}")
-    if boxes.shape[0] == 0:
-        return jt.array([], dtype=jt.int64)
-    
-    # 按分数降序排序
-    if hasattr(scores, 'argsort'):
-        argsort_result = scores.argsort(descending=True)
-        # Jittor的argsort返回(indices, sorted_values)元组
-        if isinstance(argsort_result, tuple):
-            sorted_indices = argsort_result[0]  # 只取索引
-        else:
-            sorted_indices = argsort_result
-    else:
-        # fallback for older jittor versions
-        argsort_result = jt.argsort(scores, descending=True)
-        if isinstance(argsort_result, tuple):
-            sorted_indices = argsort_result[0]
-        else:
-            sorted_indices = argsort_result
-    
-    keep = []
-    
-    while sorted_indices.shape[0] > 0:
-        # 选择分数最高的框
-        current = sorted_indices[0]
-        # 安全地获取索引值
-        if hasattr(current, 'numpy'):
-            current_np = current.numpy()
-            if current_np.size == 1:
-                current_idx = int(current_np.item())
-            else:
-                current_idx = int(current_np[0])
-        else:
-            current_idx = int(current)
-        keep.append(current_idx)
-        
-        if sorted_indices.shape[0] == 1:
-            break
-        
-        # 计算当前框与剩余框的IoU
-        current_box = boxes[current_idx]
-        remaining_indices = sorted_indices[1:]
-        remaining_boxes = boxes[remaining_indices]
-        
-        # 计算IoU
-        ious = []
-        for i in range(remaining_boxes.shape[0]):
-            iou = compute_iou_optimized(current_box, remaining_boxes[i])
-            ious.append(iou)
-        
-        # 过滤掉IoU大于阈值的框
-        ious = np.array(ious)
-        mask = ious <= iou_threshold
-        
-        # 更新剩余索引
-        if np.any(mask):
-            remaining_indices_np = remaining_indices.numpy() if hasattr(remaining_indices, 'numpy') else remaining_indices
-            kept_indices = remaining_indices_np[mask]
-            sorted_indices = jt.array(kept_indices)
-        else:
-            break
-    
-    return jt.array(keep, dtype=jt.int64)

@@ -95,23 +95,50 @@ class AutoBackend(nn.Module):
         super().__init__()
         w = str(weights[0] if isinstance(weights, list) else weights)
         nn_module = isinstance(weights, jt.nn.Module)
-        (
-            pt,
-            pkl,
-            jit,
-            onnx,
-            xml,
-            engine,
-            coreml,
-            saved_model,
-            pb,
-            tflite,
-            edgetpu,
-            tfjs,
-            paddle,
-            ncnn,
-            triton,
-        ) = self._model_type(w)
+        # _model_type() may return a short list (supported-only) or full list of flags.
+        model_types = list(self._model_type(w))
+        if len(model_types) == 15:
+            (
+                pt,
+                pkl,
+                jit,
+                onnx,
+                xml,
+                engine,
+                coreml,
+                saved_model,
+                pb,
+                tflite,
+                edgetpu,
+                tfjs,
+                paddle,
+                ncnn,
+                triton,
+            ) = model_types
+        elif len(model_types) == 5:
+            pt, pkl, jit, torch_pt, triton = model_types
+            pt = pt or torch_pt  # treat PyTorch .pt as pt for now
+            onnx = xml = engine = coreml = saved_model = pb = tflite = edgetpu = tfjs = paddle = ncnn = False
+        else:
+            # Fallback: pad to full length for compatibility
+            model_types = model_types + [False] * (15 - len(model_types))
+            (
+                pt,
+                pkl,
+                jit,
+                onnx,
+                xml,
+                engine,
+                coreml,
+                saved_model,
+                pb,
+                tflite,
+                edgetpu,
+                tfjs,
+                paddle,
+                ncnn,
+                triton,
+            ) = model_types[:15]
         # Only pt, pkl, jit are supported; others are for format detection only
         fp16 &= pt or pkl or jit or nn_module  # FP16
         nhwc = False  # Jittor uses BCHW format
@@ -254,7 +281,10 @@ class AutoBackend(nn.Module):
             for p in model.parameters():
                 p.requires_grad = False
 
-        self.__dict__.update(locals())  # assign all variables to self
+        # Avoid self-referential attribute that breaks jittor's Module.dfs()
+        locals_dict = {k: v for k, v in locals().items() if k != "self"}
+        self.__dict__.update(locals_dict)  # assign all variables to self
+        self.__dict__.pop("self", None)
 
     def execute(self, im, augment=False, visualize=False, embed=None):
         """

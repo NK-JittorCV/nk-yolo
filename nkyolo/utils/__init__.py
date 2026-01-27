@@ -28,8 +28,14 @@ from tqdm import tqdm as tqdm_original
 from nkyolo import __version__
 
 # PyTorch Multi-GPU DDP Constants
-RANK = int(os.getenv("RANK", -1))
-LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))  # https://pytorch.org/docs/stable/elastic/run.html
+# Support both PyTorch DDP and MPI environment variables
+# MPI (OpenMPI) uses: OMPI_COMM_WORLD_RANK, OMPI_COMM_WORLD_LOCAL_RANK
+# PyTorch DDP uses: RANK, LOCAL_RANK
+# Try MPI first, then fall back to PyTorch DDP format
+_rank = os.getenv("OMPI_COMM_WORLD_RANK") or os.getenv("PMI_RANK") or os.getenv("RANK", "-1")
+_local_rank = os.getenv("OMPI_COMM_WORLD_LOCAL_RANK") or os.getenv("PMI_LOCAL_RANK") or os.getenv("LOCAL_RANK", "-1")
+RANK = int(_rank) if _rank != "-1" else -1
+LOCAL_RANK = int(_local_rank) if _local_rank != "-1" else -1
 
 # Other Constants
 ARGV = sys.argv or ["", ""]  # sometimes sys.argv = []

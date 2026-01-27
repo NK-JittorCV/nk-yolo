@@ -17,13 +17,13 @@ batch: 16 # (int) number of images per batch (-1 for AutoBatch)
 imgsz: 640 # (int | list) input images size as int for train and val modes, or list[h,w] for predict and export modes
 save: True # (bool) save train checkpoints and predict results
 save_period: -1 # (int) Save checkpoint every x epochs (disabled if < 1)
-cache: False # (bool) True/ram, disk or False. Use cache for data loading
+cache: False # (bool) True/ram, disk or False. Use cache for data loading (set to True for faster training after first epoch)
 device: # (int | str | list, optional) device to run on, i.e. cuda device=0 or device=0,1,2,3 or device=cpu
 workers: 8 # (int) number of worker threads for data loading (per RANK if DDP)
 project: # (str, optional) project name
 name: # (str, optional) experiment name, results saved to 'project/name' directory
 exist_ok: False # (bool) whether to overwrite existing experiment
-pretrained: True # (bool | str) whether to use a pretrained model (bool) or a model to load weights from (str)
+pretrained: False # (bool | str) whether to use a pretrained model (bool) or a model to load weights from (str)
 optimizer: auto # (str) optimizer to use, choices=[SGD, Adam, Adamax, AdamW, NAdam, RAdam, RMSProp, auto]
 verbose: True # (bool) whether to print verbose output
 seed: 0 # (int) random seed for reproducibility
@@ -52,6 +52,12 @@ save_hybrid: False # (bool) save hybrid version of labels (labels + additional p
 conf: # (float, optional) object confidence threshold for detection (default 0.25 predict, 0.001 val)
 iou: 0.7 # (float) intersection over union (IoU) threshold for NMS
 max_det: 300 # (int) maximum number of detections per image
+multi_label: False # (bool) allow multi-label per box (slower)
+max_nms: 30000 # (int) maximum boxes into NMS
+max_time_img: 0.05 # (float) NMS time limit per image (seconds)
+val_loss: False # (bool) compute validation loss during training (memory heavy)
+final_eval: True # (bool) run final evaluation on best.pt after training
+val_amp: False # (bool) use AMP (FP16) during validation/final_eval
 half: False # (bool) use half precision (FP16)
 dnn: False # (bool) use OpenCV DNN for ONNX inference
 plots: True # (bool) save plots and images during train/val

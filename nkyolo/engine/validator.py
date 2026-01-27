@@ -21,6 +21,7 @@ Usage - formats:
                           yolov8n_ncnn_model         # NCNN
 """
 
+import gc
 import json
 import time
 from pathlib import Path
@@ -35,7 +36,7 @@ from nkyolo.utils import LOGGER, TQDM, callbacks, colorstr, emojis
 from nkyolo.utils.checks import check_imgsz
 from nkyolo.utils.ops import Profile
 
-from nkyolo.utils.jittor_utils import de_parallel
+from nkyolo.utils.jittor_utils import autocast, de_parallel
 
 
 class BaseValidator:
@@ -106,36 +107,54 @@ class BaseValidator:
 
     def __call__(self, trainer=None, model=None):
         """Executes validation process, running inference on dataloader and computing performance metrics."""
+        def _as_bool(val):
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, (int, float)):
+                return val != 0
+            if isinstance(val, str):
+                return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+            return bool(val)
+
         self.training = trainer is not None
         augment = self.args.augment and (not self.training)
         if self.training:
             self.device = trainer.device
             self.data = trainer.data
-            # force FP16 val during training
-            # 修复：Jittor中device是字符串，不是设备对象
-            self.args.half = (self.device != "cpu") and trainer.amp
+            # Follow training AMP/half settings instead of forcing FP32.
+            # Default to disabling AMP in validation unless explicitly enabled via val_amp
+            val_amp = getattr(self.args, "val_amp", False)
+            self.amp = bool(val_amp)
+            self.args.half = bool(val_amp)
+            self.compute_loss = _as_bool(getattr(self.args, "val_loss", False))
             model = trainer.ema.ema or trainer.model
-            model = model.float16() if self.args.half else model.float32()
+            self.model = model
+            # CRITICAL FIX: Don't modify training model precision directly
+            # Use autocast context manager to control precision during validation
+            # This avoids modifying the training model and prevents compilation cache conflicts
+            # model = model.float32()  # REMOVED: This was modifying training model
             # self.model = model
-            # 修复：Jittor的zeros_like()不接受device参数
-            self.loss = jt.zeros_like(trainer.loss_items)
+            # Setup loss buffer only if validation loss is requested
+            self.loss = jt.zeros_like(trainer.loss_items) if self.compute_loss else None
             self.args.plots &= trainer.stopper.possible_stop or (trainer.epoch == trainer.epochs - 1)
             model.eval()
         else:
-            exit()
-            if str(self.args.model).endswith(".yaml"):
+            if str(self.args.model).endswith(".yaml") and (model is None or str(model).endswith(".yaml")):
                 LOGGER.warning("WARNING ⚠️ validating an untrained model YAML will result in 0 mAP.")
             callbacks.add_integration_callbacks(self)
+            # Default to disabling AMP in validation unless explicitly enabled via val_amp
+            val_amp = getattr(self.args, "val_amp", False)
+            self.amp = bool(val_amp)
+            self.args.half = bool(val_amp)
             model = AutoBackend(
                 weights=model or self.args.model,
                 # device=select_device(self.args.device, self.args.batch),
                 dnn=self.args.dnn,
                 data=self.args.data,
-                fp16=self.args.half,
+                fp16=bool(getattr(self.args, "half", False)),
             )
-            # self.model = model
+            self.model = model
             self.device = self.args.device# model.device  # update device
-            self.args.half = model.fp16  # update half
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
             if engine:
@@ -172,6 +191,10 @@ class BaseValidator:
         bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
         self.init_metrics(de_parallel(model))
         self.jdict = []  # empty before each val
+        
+        # 内存管理：定期清理间隔（每 N 个 batch 清理一次）
+        memory_cleanup_interval = getattr(self.args, 'memory_cleanup_interval', 50)
+        
         for batch_i, batch in enumerate(bar):
             self.run_callbacks("on_val_batch_start")
             self.batch_i = batch_i
@@ -181,12 +204,20 @@ class BaseValidator:
 
             # Inference
             with dt[1]:
-                preds = model(batch["img"], augment=augment)
+                # CRITICAL FIX: Use autocast to control precision during validation
+                # Follow training AMP setting when enabled.
+                with autocast(enabled=self.amp):
+                    preds = model(batch["img"], augment=augment)
 
             # Loss
             with dt[2]:
-                if self.training:
-                    self.loss += model.loss(batch, preds)[1]
+                if self.training and self.compute_loss:
+                    # Use autocast to ensure float32 during loss computation
+                    with autocast(enabled=self.amp):
+                        loss_items = model.loss(batch, preds)[1]
+                    self.loss += loss_items
+                    # 及时释放 loss_items 的引用
+                    del loss_items
 
             # Postprocess
             with dt[3]:
@@ -197,6 +228,19 @@ class BaseValidator:
                 self.plot_val_samples(batch, batch_i)
                 self.plot_predictions(batch, preds, batch_i)
 
+            # 内存管理：定期清理内存，防止内存爆炸
+            if (batch_i + 1) % memory_cleanup_interval == 0:
+                # 清理中间变量
+                del preds
+                if not self.training:
+                    # 对于非训练模式，也清理 batch（训练模式需要保留用于 loss）
+                    if batch_i > 0:  # 保留第一个 batch 用于可能的调试
+                        del batch
+                # 强制垃圾回收
+                gc.collect()
+                if jt.has_cuda and "cuda" in str(self.device).lower():
+                    jt.gc()  # Jittor 的内存清理
+
             self.run_callbacks("on_val_batch_end")
         stats = self.get_stats()
         self.check_stats(stats)
@@ -204,9 +248,30 @@ class BaseValidator:
         self.finalize_metrics()
         self.print_results()
         self.run_callbacks("on_val_end")
+        
+        # 内存管理：验证结束后清理内存
         if self.training:
-            model.float32()
-            results = {**stats, **trainer.label_loss_items(self.loss.cpu() / len(self.dataloader), prefix="val")}
+            # CRITICAL FIX: Don't modify training model precision here
+            # This was causing model precision to switch from float16 to float32
+            # which led to compilation cache conflicts in the next epoch
+            # model.float32()  # REMOVED: This was modifying training model
+            
+            # Clear CUDA cache if available (Jittor garbage collection)
+            if jt.has_cuda:
+                jt.gc()
+            
+            if self.compute_loss:
+                # 将 loss 移到 CPU 并转换为 Python 数值，释放 GPU 内存
+                loss_cpu = self.loss.cpu() / len(self.dataloader)
+                results = {**stats, **trainer.label_loss_items(loss_cpu, prefix="val")}
+                # 清理 loss 变量
+                del self.loss, loss_cpu
+            else:
+                results = stats
+            # 强制垃圾回收
+            gc.collect()
+            if jt.has_cuda and "cuda" in str(self.device).lower():
+                jt.gc()
             return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
         else:
             LOGGER.info(
@@ -215,12 +280,23 @@ class BaseValidator:
                 )
             )
             if self.args.save_json and self.jdict:
-                with open(str(self.save_dir / "predictions.json"), "w") as f:
-                    LOGGER.info(f"Saving {f.name}...")
+                # 优化：分批保存大文件，减少内存峰值
+                json_path = str(self.save_dir / "predictions.json")
+                LOGGER.info(f"Saving {json_path}...")
+                with open(json_path, "w") as f:
                     json.dump(self.jdict, f)  # flatten and save
+                # 保存后清理 jdict 以释放内存
+                del self.jdict
+                gc.collect()
                 stats = self.eval_json(stats)  # update stats
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
+            
+            # 最终内存清理
+            gc.collect()
+            if jt.has_cuda and "cuda" in str(self.device).lower():
+                jt.gc()
+            
             return stats
 
     def match_predictions(self, pred_classes, true_classes, iou, use_scipy=False):
@@ -262,7 +338,7 @@ class BaseValidator:
                         # matches = matches[matches[:, 2].argsort()[::-1]]
                         matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
                     correct[matches[:, 1].astype(int), i] = True
-        return jt.tensor(correct, dtype=jt.bool, device=pred_classes.device)
+        return jt.Var(correct).astype(jt.bool)
 
     def add_callback(self, event: str, callback):
         """Appends the given callback."""

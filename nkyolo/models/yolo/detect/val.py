@@ -51,7 +51,17 @@ class DetectionValidator(BaseValidator):
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
         batch["img"] = batch["img"].to(self.device, non_blocking=True)
-        batch["img"] = (batch["img"].half() if self.args.half else batch["img"].float()) / 255
+        param_dtype = None
+        if hasattr(self, "model") and hasattr(self.model, "parameters"):
+            params = self.model.parameters()
+            params_iter = iter(params)
+            first_param = next(params_iter, None)
+            param_dtype = first_param.dtype if first_param is not None else None
+        if param_dtype is not None and "float16" in str(param_dtype):
+            batch["img"] = batch["img"].half()
+        else:
+            batch["img"] = batch["img"].float()
+        batch["img"] = batch["img"] / 255
         # for k in ["batch_idx", "cls", "bboxes"]:
         #     batch[k] = batch[k].to(self.device) # 'list' object has no attribute 'to'
 
@@ -98,9 +108,11 @@ class DetectionValidator(BaseValidator):
             self.args.conf,
             self.args.iou,
             labels=self.lb,
-            multi_label=True,
+            multi_label=self.args.multi_label,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
+            max_nms=self.args.max_nms,
+            max_time_img=self.args.max_time_img,
         )
 
     def _prepare_batch(self, si, batch):
@@ -288,7 +300,20 @@ class DetectionValidator(BaseValidator):
         image_id = int(stem) if stem.isnumeric() else stem
         box = ops.xyxy2xywh(predn[:, :4])  # xywh
         box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
-        for p, b in zip(predn.tolist(), box.tolist()):
+        
+        # 优化：使用列表推导式，并立即转换为 Python 原生类型以释放 GPU 内存
+        # 将 Jittor 张量转换为 numpy 再转换为 list，避免在 GPU 上累积
+        if isinstance(predn, jt.Var):
+            pred_list = predn.cpu().numpy().tolist()
+        else:
+            pred_list = predn.tolist()
+        
+        if isinstance(box, jt.Var):
+            box_list = box.cpu().numpy().tolist()
+        else:
+            box_list = box.tolist()
+        
+        for p, b in zip(pred_list, box_list):
             self.jdict.append(
                 {
                     "image_id": image_id,
@@ -297,6 +322,9 @@ class DetectionValidator(BaseValidator):
                     "score": round(p[4], 5),
                 }
             )
+        
+        # 内存优化：如果 jdict 太大，考虑分批处理（可选）
+        # 这里保持原有逻辑，但在 validator 中已经添加了定期清理
 
     def eval_json(self, stats):
         """Evaluates YOLO output in JSON format and returns performance statistics."""
