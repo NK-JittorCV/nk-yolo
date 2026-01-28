@@ -316,7 +316,7 @@ class Model(nn.Module):
         self.model.load(weights)
         return self
 
-    def save(self, filename: Union[str, Path] = "saved_model.pt") -> None:
+    def save(self, filename: Union[str, Path] = "saved_model.pkl") -> None:
         """
         Saves the current model state to a file.
 
@@ -331,22 +331,23 @@ class Model(nn.Module):
 
         Examples:
             >>> model = Model("yolo11n.pt")
-            >>> model.save("my_model.pt")
+            >>> model.save("my_model.pkl")
         """
         self._check_is_pytorch_model()
-        from copy import deepcopy
         from datetime import datetime
 
         from nkyolo import __version__
+        from nkyolo.utils.jittor_utils import state_dict_to_numpy
 
+        model_state = state_dict_to_numpy(self.model.state_dict(), fp16=True) if isinstance(self.model, nn.Module) else self.model
         updates = {
-            "model": deepcopy(self.model).half() if isinstance(self.model, nn.Module) else self.model,
+            "model": model_state,
             "date": datetime.now().isoformat(),
             "version": __version__,
             "license": "AGPL-3.0 License (https://ultralytics.com/license)",
             "docs": "https://docs.ultralytics.com",
         }
-        jt.save({**self.ckpt, **updates}, filename)
+        jt.save({**(self.ckpt or {}), **updates}, filename)
 
     def info(self, detailed: bool = False, verbose: bool = True):
         """

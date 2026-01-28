@@ -11,10 +11,12 @@ import gc
 import math
 import os
 import pickle
+import shutil
 import subprocess
 import tempfile
 import time
 import warnings
+import importlib.util
 from copy import copy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -50,6 +52,7 @@ from nkyolo.utils.dist import (
 from nkyolo.utils.files import get_latest_run
 from nkyolo.utils.jittor_utils import (
     EarlyStopping,
+    LambdaLR,
     ModelEMA,
     autocast,
     convert_optimizer_state_dict_to_fp16,
@@ -58,7 +61,11 @@ from nkyolo.utils.jittor_utils import (
     select_device,
     strip_optimizer,
     safe_deepcopy_jittor,
+    state_dict_to_jittor,
 )
+
+_TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
+_JT_DISTRIBUTED_AVAILABLE = importlib.util.find_spec("jittor.distributed") is not None
 
 class BaseTrainer:
     """
@@ -86,7 +93,7 @@ class BaseTrainer:
         ema (nn.Module): EMA (Exponential Moving Average) of the model.
         resume (bool): Resume training from a checkpoint.
         lf (nn.Module): Loss function.
-        scheduler (jt.optim.lr_scheduler._LRScheduler): Learning rate scheduler.
+        scheduler (LambdaLR): Learning rate scheduler.
         best_fitness (float): The best fitness value achieved.
         fitness (float): Current fitness value.
         loss (float): Current loss value.
@@ -120,6 +127,7 @@ class BaseTrainer:
         self.validator = None
         self.metrics = None
         self.plots = {}
+        self.freeze_layer_names = []
         init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
 
         # Dirs
@@ -130,7 +138,7 @@ class BaseTrainer:
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
             yaml_save(self.save_dir / "args.yaml", vars(self.args))  # save run args
-        self.last, self.best = self.wdir / "last.pt", self.wdir / "best.pt"  # checkpoint paths
+        self.last, self.best = self.wdir / "last.pkl", self.wdir / "best.pkl"  # checkpoint paths
         self.save_period = self.args.save_period
 
         self.batch_size = self.args.batch
@@ -195,14 +203,12 @@ class BaseTrainer:
             return
         
         # Check if model is PyTorch
-        try:
+        if _TORCH_AVAILABLE:
             import torch
             if isinstance(self.model, torch.nn.Module):
                 self.is_torch = True
                 self.framework = "pytorch"
                 return
-        except (ImportError, AttributeError):
-            pass
         
         # Default to Jittor
         self.is_torch = False
@@ -242,6 +248,25 @@ class BaseTrainer:
                 # This is a fallback - ideally MPI should set WORLD_SIZE
                 world_size = max(world_size, 1)  # At least 1 if RANK is set
 
+        # If dataset is tiny, DDP often deadlocks; fall back to single-process training.
+        if world_size > 1 and not is_mpi_env:
+            total_samples = len(self.trainset) if self.trainset is not None else 0
+            per_rank = math.ceil(total_samples / world_size) if total_samples else 0
+            per_rank_batch = 0
+            if per_rank:
+                per_rank_batch = max(1, min(self.args.batch // world_size, per_rank))
+            num_batches = math.ceil(per_rank / per_rank_batch) if per_rank_batch else 0
+            if per_rank < 2 or num_batches < 2:
+                LOGGER.warning(
+                    f"WARNING ⚠️ DDP disabled due to small dataset "
+                    f"(total={total_samples}, per_rank={per_rank}, batches/rank={num_batches})."
+                )
+                world_size = 1
+                if device_list:
+                    # Force single-device selection to avoid multi-GPU setup.
+                    self.args.device = str(device_list[0])
+                    self.device = select_device(self.args.device, self.args.batch, verbose=False)
+
         # Run subprocess if DDP training and NOT already in MPI environment, else train normally
         if world_size > 1 and not is_mpi_env:
             # Argument checks
@@ -257,16 +282,57 @@ class BaseTrainer:
 
             # Command
             cmd, file, env = generate_ddp_command(world_size, self)
+            LOGGER.info(f'{colorstr("DDP:")} debug command {" ".join(cmd)}')
             try:
-                LOGGER.info(f'{colorstr("DDP:")} debug command {" ".join(cmd)}')
                 subprocess.run(cmd, check=True, env=env)
-            except Exception as e:
-                raise e
             finally:
                 ddp_cleanup(self, str(file))
 
         else:
             self._do_train(world_size)
+
+    def _get_world_size(self, default=1):
+        """Return world size from MPI/torch env vars, or default."""
+        if "OMPI_COMM_WORLD_SIZE" in os.environ:
+            return int(os.environ["OMPI_COMM_WORLD_SIZE"])
+        if "PMI_SIZE" in os.environ:
+            return int(os.environ["PMI_SIZE"])
+        if "WORLD_SIZE" in os.environ:
+            return int(os.environ["WORLD_SIZE"])
+        return default
+
+    def _ddp_barrier(self, tag: str, max_wait: float = 300.0):
+        """Filesystem-based barrier for MPI DDP to keep ranks in sync."""
+        if RANK == -1:
+            return
+        world_size = self._get_world_size(default=1)
+        if world_size <= 1:
+            return
+        barrier_dir = self.save_dir / "_ddp_barrier"
+        barrier_dir.mkdir(parents=True, exist_ok=True)
+        flag = barrier_dir / f"{tag}_rank{RANK}"
+        try:
+            flag.write_text("1")
+        except Exception:
+            # If we can't write, just return to avoid hard deadlock.
+            LOGGER.warning(f"Rank {RANK}: Unable to write barrier flag {flag}")
+            return
+
+        start = time.time()
+        while time.time() - start < max_wait:
+            if all((barrier_dir / f"{tag}_rank{r}").exists() for r in range(world_size)):
+                break
+            time.sleep(0.05)
+        else:
+            LOGGER.warning(f"Rank {RANK}: Barrier '{tag}' timed out after {max_wait}s")
+            return
+
+        if RANK == 0:
+            for r in range(world_size):
+                try:
+                    (barrier_dir / f"{tag}_rank{r}").unlink()
+                except FileNotFoundError:
+                    pass
 
     def _broadcast_object(self, obj, src=0):
         """Broadcast an object from source rank to all ranks in MPI environment.
@@ -305,19 +371,12 @@ class BaseTrainer:
             return obj if RANK == src else None
         
         # Read the broadcasted object
-        try:
-            with open(broadcast_file, 'rb') as f:
-                result = pickle.load(f)
-        except Exception as e:
-            LOGGER.warning(f"Rank {RANK}: Failed to read broadcast file: {e}, using default value")
-            return obj if RANK == src else None
+        with open(broadcast_file, 'rb') as f:
+            result = pickle.load(f)
         
         # Clean up: only rank 0 removes the file
         if RANK == 0:
-            try:
-                broadcast_file.unlink()
-            except Exception:
-                pass
+            broadcast_file.unlink()
         
         return result
 
@@ -327,7 +386,7 @@ class BaseTrainer:
             self.lf = one_cycle(1, self.args.lrf, self.epochs)  # cosine 1->hyp['lrf']
         else:
             self.lf = lambda x: max(1 - x / self.epochs, 0) * (1.0 - self.args.lrf) + self.args.lrf  # linear
-        self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.lf)
+        self.scheduler = LambdaLR(self.optimizer, lr_lambda=self.lf)
 
     def _setup_ddp(self, world_size):
         """Initializes and sets the distributed training parameters for Jittor."""
@@ -340,9 +399,6 @@ class BaseTrainer:
             # Use environment variables to control Jittor compilation behavior
             os.environ["JIT_PARALLEL"] = "0"  # Disable Jittor's parallel JIT compilation
             os.environ["JITTOR_COMPILE_THREADS"] = "1"  # Use single-threaded compilation
-            # Disable Jittor's internal parallel compiler if available
-            if hasattr(jt.flags, 'parallel_compile'):
-                jt.flags.parallel_compile = False
             device_value = getattr(self.args, "device", "")
             device_arg = str(device_value).lower().strip()
             visible_devices = get_visible_devices()
@@ -404,7 +460,7 @@ class BaseTrainer:
             self._setup_model_ddp(world_size)
         
         # Check imgsz
-        gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)
+        gs = max(int(np.max(self.model.stride.numpy())), 32)
         self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
         self.stride = gs
         
@@ -480,7 +536,7 @@ class BaseTrainer:
                 LOGGER.info(f"Freezing layer '{k}'")
                 v.requires_grad = False
             # Ensure trainable parameters have requires_grad=True
-            elif hasattr(v, 'dtype') and v.dtype.is_floating_point:
+            elif isinstance(v, jt.Var) and str(v.dtype).startswith("float"):
                 if not v.requires_grad:
                     v.requires_grad = True
     
@@ -491,30 +547,28 @@ class BaseTrainer:
         
         if self.is_torch:
             # PyTorch AMP setup
-            try:
-                import torch
-                import torch.distributed as dist
-                
-                # Check AMP compatibility on main process
-                if self.amp and RANK in {-1, 0}:
-                    from nkyolo.utils.checks import check_amp
-                    callbacks_backup = callbacks.default_callbacks.copy()
-                    self.amp = check_amp(self.model)
-                    callbacks.default_callbacks = callbacks_backup
-                
-                # Broadcast AMP setting in DDP mode
-                if RANK > -1 and world_size > 1 and dist.is_initialized():
-                    amp_tensor = torch.tensor([int(self.amp)], dtype=torch.int32)
-                    if torch.cuda.is_available():
-                        amp_tensor = amp_tensor.cuda()
-                    dist.broadcast(amp_tensor, src=0)
-                    self.amp = bool(amp_tensor.item())
-                
-                self.amp = bool(self.amp)
-                self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp) if torch.cuda.is_available() else None
-            except (ImportError, AttributeError, RuntimeError):
-                self.amp = False
-                self.scaler = None
+            if not _TORCH_AVAILABLE:
+                raise ModuleNotFoundError("torch is required for PyTorch AMP.")
+            import torch
+            import torch.distributed as dist
+            
+            # Check AMP compatibility on main process
+            if self.amp and RANK in {-1, 0}:
+                from nkyolo.utils.checks import check_amp
+                callbacks_backup = callbacks.default_callbacks.copy()
+                self.amp = check_amp(self.model)
+                callbacks.default_callbacks = callbacks_backup
+            
+            # Broadcast AMP setting in DDP mode
+            if RANK > -1 and world_size > 1 and dist.is_initialized():
+                amp_tensor = torch.tensor([int(self.amp)], dtype=torch.int32)
+                if torch.cuda.is_available():
+                    amp_tensor = amp_tensor.cuda()
+                dist.broadcast(amp_tensor, src=0)
+                self.amp = bool(amp_tensor.item())
+            
+            self.amp = bool(self.amp)
+            self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp) if torch.cuda.is_available() else None
         else:
             # Jittor AMP setup
             # Jittor handles AMP through autocast context manager during training
@@ -528,39 +582,34 @@ class BaseTrainer:
             return
         
         if self.is_torch:
-            # PyTorch DDP setup
-            try:
-                import torch
-                import torch.nn as torch_nn
-                if RANK > -1:
-                    self.model = torch_nn.parallel.DistributedDataParallel(
-                        self.model, device_ids=[RANK], find_unused_parameters=True
-                    )
-            except (ImportError, AttributeError):
-                LOGGER.warning("PyTorch DDP not available, skipping DDP setup")
+            if not _TORCH_AVAILABLE:
+                raise ModuleNotFoundError("torch is required for PyTorch DDP.")
+            import torch
+            import torch.nn as torch_nn
+            if RANK > -1:
+                self.model = torch_nn.parallel.DistributedDataParallel(
+                    self.model, device_ids=[RANK], find_unused_parameters=True
+                )
         else:
-            # Jittor DDP setup
-            # Jittor uses ParallelModel for distributed training
-            try:
-                if hasattr(jt, 'distributed') and hasattr(jt.distributed, 'ParallelModel'):
-                    if RANK > -1:
-                        self.model = jt.distributed.ParallelModel(self.model)
-                        LOGGER.info(f"Jittor ParallelModel initialized for rank {RANK}")
-                else:
-                    # Fallback: Jittor may handle distribution automatically via MPI
-                    # Just ensure model is on the correct device
-                    if RANK >= 0 and jt.has_cuda:
-                        device_id = LOCAL_RANK if LOCAL_RANK >= 0 else RANK
-                        # Model parameters will be automatically distributed
-                        LOGGER.info(f"Jittor distributed training enabled for rank {RANK} on device {device_id}")
-            except Exception as e:
-                LOGGER.warning(f"Jittor DDP setup failed: {e}, continuing without explicit DDP wrapper")
+            if _JT_DISTRIBUTED_AVAILABLE and RANK > -1:
+                from jittor import distributed as jt_dist
+
+                self.model = jt_dist.ParallelModel(self.model)
+                LOGGER.info(f"Jittor ParallelModel initialized for rank {RANK}")
+            elif RANK >= 0 and jt.has_cuda:
+                device_id = LOCAL_RANK if LOCAL_RANK >= 0 else RANK
+                LOGGER.info(f"Jittor distributed training enabled for rank {RANK} on device {device_id}")
 
     def _do_train(self, world_size=1):
         """Train completed, evaluate and plot if specified by arguments."""
         if world_size > 1:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
+        # Clean any stale barrier flags from previous runs.
+        if RANK in {-1, 0}:
+            barrier_dir = self.save_dir / "_ddp_barrier"
+            if barrier_dir.exists():
+                shutil.rmtree(barrier_dir, ignore_errors=True)
 
         nb = len(self.train_loader)  # number of batches per process
         if RANK >= 0:
@@ -570,7 +619,8 @@ class BaseTrainer:
         last_opt_step = -1
         self.epoch_time = None
         self.epoch_time_start = time.time()
-        self.train_time_start = time.time()
+        # Delay timing start until first batch finishes to exclude JIT compile time.
+        self.train_time_start = None
         self.run_callbacks("on_train_start")
         LOGGER.info(
             f'Image sizes {self.args.imgsz} train, {self.args.imgsz} val\n'
@@ -592,9 +642,7 @@ class BaseTrainer:
 
             self._model_train()
             # Jittor handles distributed sampling automatically via MPI
-            # No need to set sampler epoch manually
-            if RANK != -1 and hasattr(self.train_loader, 'sampler') and hasattr(self.train_loader.sampler, 'set_epoch'):
-                self.train_loader.sampler.set_epoch(epoch)
+            # Jittor dataloader does not require sampler epoch updates
             pbar = enumerate(self.train_loader)
             # Update dataloader attributes (optional)
             if epoch == (self.epochs - self.args.close_mosaic):
@@ -629,6 +677,8 @@ class BaseTrainer:
                     self.tloss = (
                         (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
+                if self.train_time_start is None:
+                    self.train_time_start = time.time()
 
                 # Backward (use optimizer.backward(loss) instead of loss.backward())
                 if self.scaler is not None:
@@ -671,6 +721,9 @@ class BaseTrainer:
 
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
+            if RANK != -1:
+                # Keep all ranks in sync before rank0-only work.
+                self._ddp_barrier(f"epoch_{epoch}_pre")
             if RANK in {-1, 0}:
                 final_epoch = epoch + 1 >= self.epochs
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
@@ -688,13 +741,16 @@ class BaseTrainer:
                 if self.args.save or final_epoch:
                     self.save_model()
                     self.run_callbacks("on_model_save")
+            if RANK != -1:
+                # Wait for rank0 to finish validation/saving before next epoch.
+                self._ddp_barrier(f"epoch_{epoch}_post")
 
             # Scheduler
             t = time.time()
             self.epoch_time = t - self.epoch_time_start
             self.epoch_time_start = t
             if self.args.time:
-                mean_epoch_time = (t - self.train_time_start) / (epoch - self.start_epoch + 1)
+                mean_epoch_time = (t - (self.train_time_start or t)) / (epoch - self.start_epoch + 1)
                 self.epochs = self.args.epochs = math.ceil(self.args.time * 3600 / mean_epoch_time)
                 self._setup_scheduler()
                 self.scheduler.last_epoch = self.epoch  # do not move
@@ -710,8 +766,8 @@ class BaseTrainer:
             epoch += 1
 
         if RANK in {-1, 0}:
-            # Do final val with best.pt
-            seconds = time.time() - self.train_time_start
+            # Do final val with best.pkl
+            seconds = time.time() - (self.train_time_start or time.time())
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
             if getattr(self.args, "final_eval", True):
                 self.final_eval()
@@ -754,10 +810,9 @@ class BaseTrainer:
         """Set model in training mode."""
         self.model.train()
         # Freeze BN stat for frozen layers
-        if hasattr(self, 'freeze_layer_names'):
-            for n, m in self.model.named_modules():
-                if any(filter(lambda f: f in n, self.freeze_layer_names)) and isinstance(m, nn.BatchNorm2d):
-                    m.eval()
+        for n, m in self.model.named_modules():
+            if any(filter(lambda f: f in n, self.freeze_layer_names)) and isinstance(m, nn.BatchNorm2d):
+                m.eval()
 
     def _clear_memory(self, threshold: float = None):
         """Clear accelerator memory by calling garbage collector (Jittor uses jt.gc() per official docs)."""
@@ -780,15 +835,10 @@ class BaseTrainer:
         """Save model training checkpoints with additional metadata."""
 
         def _half_state_dict(model):
-            """Create an FP16 copy of a model state dict without mutating the model."""
-            state = model.state_dict()
-            half_state = {}
-            for k, v in state.items():
-                if isinstance(v, jt.Var):
-                    half_state[k] = v.half()
-                else:
-                    half_state[k] = v
-            return half_state
+            """Create a portable FP16 state dict without mutating the model."""
+            from nkyolo.utils.jittor_utils import state_dict_to_numpy
+
+            return state_dict_to_numpy(model.state_dict(), fp16=True)
         
         # Prepare checkpoint data
         checkpoint_data = {
@@ -805,17 +855,19 @@ class BaseTrainer:
             "version": __version__,
             "license": "AGPL-3.0 (https://ultralytics.com/license)",
             "docs": "https://docs.ultralytics.com",
-            "model_yaml": getattr(self.ema.ema, "yaml", None),  # save model config for model reconstruction
+            "model_yaml": self.ema.ema.yaml,  # save model config for model reconstruction
+            "names": self.model.names,
+            "nc": self.model.nc,
         }
 
         # Save checkpoints directly to files
-        jt.save(checkpoint_data, str(self.last))  # save last.pt, jittor.save(params_dict, path: str) only saves parameters, not instantiated model
+        jt.save(checkpoint_data, str(self.last))  # save last.pkl (portable Jittor checkpoint)
         if self.best_fitness == self.fitness:
-            jt.save(checkpoint_data, str(self.best))  # save best.pt
+            jt.save(checkpoint_data, str(self.best))  # save best.pkl
         if (self.save_period > 0) and (self.epoch % self.save_period == 0):
-            jt.save(checkpoint_data, str(self.wdir / f"epoch{self.epoch}.pt"))  # save epoch, i.e. 'epoch3.pt'
+            jt.save(checkpoint_data, str(self.wdir / f"epoch{self.epoch}.pkl"))  # save epoch, i.e. 'epoch3.pkl'
         # if self.args.close_mosaic and self.epoch == (self.epochs - self.args.close_mosaic - 1):
-        #    jt.save(checkpoint_data, str(self.wdir / "last_mosaic.pt"))  # save mosaic checkpoint
+        #    jt.save(checkpoint_data, str(self.wdir / "last_mosaic.pkl"))  # save mosaic checkpoint
 
     def get_dataset(self):
         """
@@ -823,20 +875,19 @@ class BaseTrainer:
 
         Returns None if data format is not recognized.
         """
-        try:
-            if self.args.task == "classify":
-                data = check_cls_dataset(self.args.data)
-            elif self.args.data.split(".")[-1] in {"yaml", "yml"} or self.args.task in {
-                "detect",
-                "segment",
-                "pose",
-                "obb",
-            }:
-                data = check_det_dataset(self.args.data)
-                if "yaml_file" in data:
-                    self.args.data = data["yaml_file"]  # for validating 'yolo train data=url.zip' usage
-        except Exception as e:
-            raise RuntimeError(emojis(f"Dataset '{clean_url(self.args.data)}' error ❌ {e}")) from e
+        if self.args.task == "classify":
+            data = check_cls_dataset(self.args.data)
+        elif self.args.data.split(".")[-1] in {"yaml", "yml"} or self.args.task in {
+            "detect",
+            "segment",
+            "pose",
+            "obb",
+        }:
+            data = check_det_dataset(self.args.data)
+            if "yaml_file" in data:
+                self.args.data = data["yaml_file"]  # for validating 'yolo train data=url.zip' usage
+        else:
+            raise ValueError(emojis(f"Dataset '{clean_url(self.args.data)}' error ❌ unsupported format"))
         self.data = data
         return data["train"], data.get("val") or data.get("test")
 
@@ -847,7 +898,8 @@ class BaseTrainer:
 
         cfg, weights = self.model, None
         ckpt = None
-        if str(self.model).endswith(".pt"):
+        model_path = str(self.model)
+        if Path(model_path).suffix.lower() in {".pt", ".pth", ".pkl"}:
             weights, ckpt = attempt_load_one_weight(self.model)
             cfg = weights.yaml
         elif isinstance(self.args.pretrained, (str, Path)):
@@ -957,7 +1009,7 @@ class BaseTrainer:
                 if f is self.last:
                     ckpt = strip_optimizer(f)
                 elif f is self.best:
-                    k = "train_results"  # update best.pt train_metrics from last.pt
+                    k = "train_results"  # update best.pkl train_metrics from last.pkl
                     strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
                     LOGGER.info(f"\nValidating {f}...")
                     self.validator.args.plots = self.args.plots
@@ -969,32 +1021,29 @@ class BaseTrainer:
         """Check if resume checkpoint exists and update arguments accordingly."""
         resume = self.args.resume
         if resume:
-            try:
-                exists = isinstance(resume, (str, Path)) and Path(resume).exists()
-                last = Path(check_file(resume) if exists else get_latest_run())
-
-                # Check that resume data YAML exists, otherwise strip to force re-download of dataset
-                ckpt_args = attempt_load_weights(last).args
-                if not Path(ckpt_args["data"]).exists():
-                    ckpt_args["data"] = self.args.data
-
-                resume = True
-                self.args = get_cfg(ckpt_args)
-                self.args.model = self.args.resume = str(last)  # reinstate model
-                for k in (
-                    "imgsz",
-                    "batch",
-                    "device",
-                    "close_mosaic",
-                ):  # allow arg updates to reduce memory or update device on resume
-                    if k in overrides:
-                        setattr(self.args, k, overrides[k])
-
-            except Exception as e:
+            exists = isinstance(resume, (str, Path)) and Path(resume).exists()
+            last = Path(check_file(resume) if exists else get_latest_run())
+            if not last.exists():
                 raise FileNotFoundError(
                     "Resume checkpoint not found. Please pass a valid checkpoint to resume from, "
-                    "i.e. 'yolo train resume model=path/to/last.pt'"
-                ) from e
+                    "i.e. 'yolo train resume model=path/to/last.pkl'"
+                )
+
+            ckpt_args = attempt_load_weights(last).args
+            if not Path(ckpt_args["data"]).exists():
+                ckpt_args["data"] = self.args.data
+
+            resume = True
+            self.args = get_cfg(ckpt_args)
+            self.args.model = self.args.resume = str(last)  # reinstate model
+            for k in (
+                "imgsz",
+                "batch",
+                "device",
+                "close_mosaic",
+            ):
+                if k in overrides:
+                    setattr(self.args, k, overrides[k])
         self.resume = resume
 
     def resume_training(self, ckpt):
@@ -1007,7 +1056,7 @@ class BaseTrainer:
             self.optimizer.load_state_dict(ckpt["optimizer"])  # optimizer
             best_fitness = ckpt["best_fitness"]
         if self.ema and ckpt.get("ema"):
-            self.ema.ema.load_state_dict(ckpt["ema"].float().state_dict())  # EMA
+            self.ema.ema.load_state_dict(state_dict_to_jittor(ckpt["ema"]))  # EMA
             self.ema.updates = ckpt["updates"]
         assert start_epoch > 0, (
             f"{self.args.model} training to {self.epochs} epochs is finished, nothing to resume.\n"
@@ -1026,11 +1075,8 @@ class BaseTrainer:
 
     def _close_dataloader_mosaic(self):
         """Update dataloaders to stop using mosaic augmentation."""
-        if hasattr(self.train_loader.dataset, "mosaic"):
-            self.train_loader.dataset.mosaic = False
-        if hasattr(self.train_loader.dataset, "close_mosaic"):
-            LOGGER.info("Closing dataloader mosaic")
-            self.train_loader.dataset.close_mosaic(hyp=copy(self.args))
+        LOGGER.info("Closing dataloader mosaic")
+        self.train_loader.dataset.close_mosaic(hyp=copy(self.args))
 
     def build_optimizer(self, model, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
         """

@@ -77,8 +77,8 @@ class BaseDataset(Dataset):
         self.labels = self.get_labels()
         self.update_labels(include_class=classes)  # single_cls and include_class
         
-        # In MPI distributed training, split data per process
-        # Each process should only see its portion of the data
+        # In MPI distributed training, split data per process.
+        # Ensure all ranks get the same number of samples to avoid DDP deadlocks.
         if self.split_by_rank and RANK >= 0:
             # Get world size from MPI environment
             if "OMPI_COMM_WORLD_SIZE" in os.environ:
@@ -89,22 +89,28 @@ class BaseDataset(Dataset):
                 world_size = int(os.environ["WORLD_SIZE"])
             else:
                 world_size = 1
-            
+
             if world_size > 1:
-                # Split data: each rank gets its portion
                 total_len = len(self.labels)
-                per_rank = total_len // world_size
-                start_idx = RANK * per_rank
-                # Last rank gets any remaining samples
-                end_idx = start_idx + per_rank if RANK < world_size - 1 else total_len
-                
-                # Slice data for this rank
-                self.im_files = self.im_files[start_idx:end_idx]
-                self.labels = self.labels[start_idx:end_idx]
-                
-                LOGGER.info(f"{self.prefix}Rank {RANK}/{world_size-1}: Split dataset - "
-                           f"total: {total_len}, per_rank: ~{per_rank}, "
-                           f"this rank: [{start_idx}:{end_idx}] = {len(self.labels)} samples")
+                if total_len == 0:
+                    LOGGER.warning(f"{self.prefix}Rank {RANK}: Empty dataset after label loading.")
+                # Use ceil to keep per-rank lengths equal; wrap to pad if needed.
+                per_rank = math.ceil(total_len / world_size) if total_len else 0
+                if total_len and total_len % world_size != 0:
+                    LOGGER.warning(
+                        f"{self.prefix}DDP: total samples {total_len} not divisible by world_size {world_size}. "
+                        "Padding samples per-rank to keep lengths equal."
+                    )
+                if per_rank:
+                    start_idx = RANK * per_rank
+                    indices = [(start_idx + i) % total_len for i in range(per_rank)] if total_len else []
+                    self.im_files = [self.im_files[i] for i in indices]
+                    self.labels = [self.labels[i] for i in indices]
+                    LOGGER.info(
+                        f"{self.prefix}Rank {RANK}/{world_size-1}: Split dataset - "
+                        f"total: {total_len}, per_rank: {per_rank}, "
+                        f"this rank: {len(self.labels)} samples"
+                    )
         
         self.ni = len(self.labels)  # number of images for this process
         self.rect = rect
@@ -136,6 +142,10 @@ class BaseDataset(Dataset):
 
         # Transforms
         self.transforms = self.build_transforms(hyp=hyp)
+
+    def close_mosaic(self, hyp):
+        """No-op for datasets without mosaic augmentation."""
+        return None
 
     def get_img_files(self, img_path):
         """Read image files."""

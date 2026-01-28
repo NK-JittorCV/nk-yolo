@@ -5,6 +5,7 @@ import math
 import os
 import random
 import time
+import importlib.util
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
@@ -24,6 +25,10 @@ from nkyolo.utils import (
     __version__,
     colorstr,
 )
+
+_TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
+if _TORCH_AVAILABLE:
+    import torch
 
 
 @contextmanager
@@ -60,15 +65,14 @@ def get_cpu_info():
     from nkyolo.utils import PERSISTENT_CACHE  # avoid circular import error
 
     if "cpu_info" not in PERSISTENT_CACHE:
-        try:
+        if importlib.util.find_spec("cpuinfo") is not None:
             import cpuinfo  # pip install py-cpuinfo
 
             k = "brand_raw", "hardware_raw", "arch_string_raw"  # keys sorted by preference
             info = cpuinfo.get_cpu_info()  # info dict
-            string = info.get(k[0] if k[0] in info else k[1] if k[1] in info else k[2], "unknown")
+            key = k[0] if k[0] in info else k[1] if k[1] in info else k[2]
+            string = info.get(key, "unknown")
             PERSISTENT_CACHE["cpu_info"] = string.replace("(R)", "").replace("CPU ", "").replace("@ ", "")
-        except Exception:
-            pass
     return PERSISTENT_CACHE.get("cpu_info", "unknown")
 
 
@@ -205,9 +209,9 @@ def model_info(model, detailed=False, verbose=True, imgsz=640):
             )
 
     flops = get_flops(model, imgsz)
-    fused = " (fused)" if getattr(model, "is_fused", lambda: False)() else ""
+    fused = " (fused)" if model.is_fused() else ""
     fs = f", {flops:.1f} GFLOPs" if flops else ""
-    yaml_file = getattr(model, "yaml_file", "") or getattr(model, "yaml", {}).get("yaml_file", "")
+    yaml_file = model.yaml_file or model.yaml.get("yaml_file", "")
     model_name = Path(yaml_file).stem.replace("yolo", "YOLO") or "Model"
     LOGGER.info(f"{model_name} summary{fused}: {n_l:,} layers, {n_p:,} parameters, {n_g:,} gradients{fs}")
     return n_l, n_p, n_g, flops
@@ -216,6 +220,47 @@ def model_info(model, detailed=False, verbose=True, imgsz=640):
 def get_num_params(model):
     """Return the total number of parameters in a YOLO model."""
     return sum(x.numel() for x in model.parameters())
+
+
+def state_dict_to_numpy(state_dict, fp16=False):
+    """Convert a state_dict of tensors to numpy arrays for portable checkpointing."""
+    out = {}
+    for k, v in state_dict.items():
+        if isinstance(v, jt.Var):
+            arr = v.numpy()
+        elif _TORCH_AVAILABLE and isinstance(v, torch.Tensor):
+            arr = v.detach().cpu().numpy()
+        elif isinstance(v, np.ndarray):
+            arr = v
+        else:
+            out[k] = v
+            continue
+        if arr.dtype == np.float64:
+            arr = arr.astype(np.float32)
+        if fp16 and arr.dtype == np.float32:
+            arr = arr.astype(np.float16)
+        out[k] = arr
+    return out
+
+
+def state_dict_to_jittor(state_dict):
+    """Convert a state_dict of numpy/torch tensors to Jittor tensors."""
+    out = {}
+    for k, v in state_dict.items():
+        if isinstance(v, jt.Var):
+            out[k] = v
+        elif isinstance(v, np.ndarray):
+            if v.dtype in (np.float16, np.float64):
+                v = v.astype(np.float32)
+            out[k] = jt.array(v)
+        elif _TORCH_AVAILABLE and isinstance(v, torch.Tensor):
+            arr = v.detach().cpu().numpy()
+            if arr.dtype in (np.float16, np.float64):
+                arr = arr.astype(np.float32)
+            out[k] = jt.array(arr)
+        else:
+            out[k] = v
+    return out
 
 
 def get_num_gradients(model):
@@ -268,67 +313,31 @@ def calculate_layer_flops(layer, input_shape):
 
 
 def get_flops(model, imgsz=640):
-    """Return a YOLO model's FLOPs (calculated using unified profile tool).
-    
-    Automatically detects whether model is PyTorch or Jittor and uses appropriate tool.
-    
-    Args:
-        model: Model (PyTorch or Jittor)
-        imgsz: Image size (int or list)
-    
-    Returns:
-        float: FLOPs in GFLOPs
-    """
-    try:
-        from nkyolo.utils.jittor_profile import profile as unified_profile
-        
-        model = de_parallel(model)
-        p = list(model.parameters())[1]
-        if not isinstance(imgsz, list):
-            imgsz = [imgsz, imgsz]  # expand if int/float
-        
-        # Use stride size for input tensor
-        stride = max(int(model.stride.max()), 32) if hasattr(model, "stride") else 32  # max stride
-        
-        # Check if model is PyTorch or Jittor to create appropriate input tensor
-        try:
-            import torch
-            if isinstance(p, torch.Tensor):
-                # PyTorch model
-                im = torch.empty((1, p.shape[1], stride, stride))
-            else:
-                # Jittor model
-                im = jt.empty((1, p.shape[1], stride, stride))
-        except ImportError:
-            # Jittor only
-            im = jt.empty((1, p.shape[1], stride, stride))
-        
-        try:
-            # Use actual image size for more accurate calculation
-            try:
-                import torch
-                if isinstance(p, torch.Tensor):
-                    im_full = torch.empty((1, p.shape[1], *imgsz))
-                else:
-                    im_full = jt.empty((1, p.shape[1], *imgsz))
-            except ImportError:
-                im_full = jt.empty((1, p.shape[1], *imgsz))
-            
-            flops_result, _ = unified_profile(model, inputs=[im_full], verbose=False)
-            flops = flops_result / 1e9  # Convert to GFLOPs
-            return flops
-        except Exception:
-            # Fallback: use stride size
-            flops_result, _ = unified_profile(model, inputs=[im], verbose=False)
-            # Scale to actual image size
-            base_flops = flops_result / 1e9
-            flops = base_flops * imgsz[0] / stride * imgsz[1] / stride
-            return flops
-    except Exception:
+    """Return a YOLO model's FLOPs (GFLOPs) using the unified profile tool."""
+    from nkyolo.utils.jittor_profile import profile as unified_profile
+
+    model = de_parallel(model)
+    params = list(model.parameters())
+    if not params:
         return 0.0
+    p = params[0]
+    if not isinstance(imgsz, list):
+        imgsz = [imgsz, imgsz]
+    h, w = int(imgsz[0]), int(imgsz[1])
+
+    if _TORCH_AVAILABLE and isinstance(p, torch.Tensor):
+        im_full = torch.empty((1, int(p.shape[1]), h, w))
+    else:
+        ch = int(model.yaml.get("ch", 3))
+        im_full = jt.empty(1, ch, h, w)
+
+    flops_result, _ = unified_profile(model, inputs=[im_full], verbose=False)
+    return flops_result / 1e9
 
 def time_sync():
     """Return Jittor-accurate time."""
+    if jt.flags.use_cuda:
+        jt.sync_all(True)
     return time.time()
 
 def initialize_weights(model):
@@ -464,61 +473,17 @@ def safe_deepcopy_jittor(obj):
         Deep copy of the object, handling Jittor-specific objects
     """
     
-    def _safe_deepcopy(obj, memo=None):
-        if memo is None:
-            memo = {}
-        
-        # Handle Jittor Var objects
-        if isinstance(obj, jt.Var):
-            return obj.clone()
-        
-        # Handle Jittor Module objects
-        if isinstance(obj, jt.nn.Module):
-            # For Jittor modules, we need to be more careful about initialization
-            # Try to create a new instance, but if it fails, just return the original
-            try:
-                # Create a new instance of the same class
-                new_obj = obj.__class__(verbose=False)
-                # Copy state dict manually
-                state_dict = obj.state_dict()
-                new_state_dict = {}
-                for key, value in state_dict.items():
-                    if isinstance(value, jt.Var):
-                        new_state_dict[key] = value.clone()
-                    else:
-                        new_state_dict[key] = deepcopy(value, memo)
-                new_obj.load_state_dict(new_state_dict)
-                return new_obj
-            except Exception:
-                # If we can't create a new instance, return the original object
-                # This is a fallback for modules that require specific initialization
-                return obj
-        
-        # Handle dictionaries
-        if isinstance(obj, dict):
-            new_dict = {}
-            for key, value in obj.items():
-                new_key = _safe_deepcopy(key, memo)
-                new_value = _safe_deepcopy(value, memo)
-                new_dict[new_key] = new_value
-            return new_dict
-        
-        # Handle lists and tuples
-        if isinstance(obj, (list, tuple)):
-            return type(obj)(_safe_deepcopy(item, memo) for item in obj)
-        
-        # Handle sets
-        if isinstance(obj, set):
-            return set(_safe_deepcopy(item, memo) for item in obj)
-        
-        # For other objects, try regular deepcopy
-        try:
-            return deepcopy(obj, memo)
-        except (TypeError, ValueError):
-            # If deepcopy fails, return the object as-is (for immutable objects)
-            return obj
-    
-    return _safe_deepcopy(obj)
+    if isinstance(obj, jt.Var):
+        return obj.clone()
+    if isinstance(obj, dict):
+        return {safe_deepcopy_jittor(k): safe_deepcopy_jittor(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [safe_deepcopy_jittor(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(safe_deepcopy_jittor(v) for v in obj)
+    if isinstance(obj, set):
+        return {safe_deepcopy_jittor(v) for v in obj}
+    return deepcopy(obj)
 
 
 class ModelEMA:
@@ -529,7 +494,7 @@ class ModelEMA:
 
     def __init__(self, model, decay=0.9999, tau=2000, updates=0):
         """Initialize EMA for 'model' with given arguments."""
-        self.ema = safe_deepcopy_jittor(de_parallel(model)).eval()  # FP32 EMA
+        self.ema = de_parallel(model).clone().eval()  # FP32 EMA
         self.updates = updates  # number of EMA updates
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp
         
@@ -557,12 +522,12 @@ class ModelEMA:
             copy_attr(self.ema, model, include, exclude)
 
 
-def strip_optimizer(f: Union[str, Path] = "best.pt", s: str = "", updates: dict = None) -> dict:
+def strip_optimizer(f: Union[str, Path] = "best.pkl", s: str = "", updates: dict = None) -> dict:
     """
     Strip optimizer from 'f' to finalize training, optionally save as 's'.
 
     Args:
-        f (str): file path to model to strip the optimizer from. Default is 'best.pt'.
+        f (str): file path to model to strip the optimizer from. Default is 'best.pkl'.
         s (str): file path to save the model with stripped optimizer to. If not provided, 'f' will be overwritten.
         updates (dict): a dictionary of updates to overlay onto the checkpoint before saving.
 
@@ -574,20 +539,18 @@ def strip_optimizer(f: Union[str, Path] = "best.pt", s: str = "", updates: dict 
         from pathlib import Path
         from nkyolo.utils.torch_utils import strip_optimizer
 
-        for f in Path("path/to/model/checkpoints").rglob("*.pt"):
+        for f in Path("path/to/model/checkpoints").rglob("*.pkl"):
             strip_optimizer(f)
         ```
 
     Note:
         Use `nkyolo.nn.torch_safe_load` for missing modules with `x = torch_safe_load(f)[0]`
     """
-    try:
-        x = jt.load(str(f))
-        assert isinstance(x, dict), "checkpoint is not a Python dictionary"
-        assert "model" in x, "'model' missing from checkpoint"
-    except Exception as e:
-        LOGGER.warning(f"WARNING ⚠️ Skipping {f}, not a valid NK-YOLO model: {e}")
-        return {}
+    x = jt.load(str(f))
+    if not isinstance(x, dict):
+        raise TypeError(f"Checkpoint '{f}' is not a dictionary.")
+    if "model" not in x and "ema" not in x:
+        raise KeyError(f"Checkpoint '{f}' has no model/ema weights.")
 
     metadata = {
         "date": datetime.now().isoformat(),
@@ -596,20 +559,11 @@ def strip_optimizer(f: Union[str, Path] = "best.pt", s: str = "", updates: dict 
         "docs": "https://docs.ultralytics.com",
     }
 
-    # Update model
-    if x.get("ema"):
-        x["model"] = x["ema"]  # replace model with EMA
-    if hasattr(x["model"], "args"):
-        x["model"].args = dict(x["model"].args)  # convert from IterableSimpleNamespace to dict
-    if hasattr(x["model"], "criterion"):
-        x["model"].criterion = None  # strip loss criterion
-    x["model"] = {k: v.half() if isinstance(v, jt.Var) else v for k, v in x["model"].items()}
-    # x["model"].half()  # to FP16
-    for name, param in x["model"].items():
-        if isinstance(param, jt.Var):
-            param.requires_grad = False
-    # for p in x["model"].parameters():
-    #     p.requires_grad = False
+    # Update model weights
+    model_weights = x.get("ema") or x.get("model")
+    if isinstance(model_weights, nn.Module):
+        model_weights = model_weights.state_dict()
+    x["model"] = state_dict_to_numpy(model_weights, fp16=True)
 
     # Update other keys
     args = {**DEFAULT_CFG_DICT, **x.get("train_args", {})}  # combine args
@@ -621,7 +575,7 @@ def strip_optimizer(f: Union[str, Path] = "best.pt", s: str = "", updates: dict 
 
     # Save
     combined = {**metadata, **x, **(updates or {})}
-    jt.save(combined, str(s) or  str(f))  # combine dicts (prefer to the right)
+    jt.save(combined, str(s) or str(f))  # combine dicts (prefer to the right)
     mb = os.path.getsize(str(s) or  str(f)) / 1e6  # file size
     LOGGER.info(f"Optimizer stripped from {f},{f' saved as {s},' if s else ''} {mb:.1f}MB")
     return combined
@@ -633,18 +587,12 @@ def convert_optimizer_state_dict_to_fp16(state_dict):
     
     This method aims to reduce storage size without altering 'param_groups' as they contain non-tensor data.
     """
-    import jittor as jt
-    
     # Handle PyTorch-style optimizers with 'state' key
     if "state" in state_dict:
         for state in state_dict["state"].values():
             for k, v in state.items():
-                if k != "step" and isinstance(v, jt.Var):
-                    if hasattr(v, 'dtype') and str(v.dtype).startswith('float32'):
-                        if isinstance(v, jt.Var):
-                            state[k] = v.half()
-                        else:
-                            state[k] = v.half()
+                if k != "step" and isinstance(v, jt.Var) and str(v.dtype).startswith("float32"):
+                    state[k] = v.half()
     
     # Handle Jittor optimizers that have 'defaults' key instead of 'state'
     # Jittor optimizers typically don't have tensor states that need conversion
@@ -744,14 +692,6 @@ class LambdaLR:
         self.base_lrs = state_dict['base_lrs']
         self.last_epoch = state_dict['last_epoch']
 
-# Add lr_scheduler namespace to Jittor optim module if it doesn't exist
-if not hasattr(jt.optim, 'lr_scheduler'):
-    class LRScheduler:
-        LambdaLR = LambdaLR
-    
-    jt.optim.lr_scheduler = LRScheduler
-
-
 def profile(input, ops, n=10, device=None):
     """
     NK-YOLO speed, memory and FLOPs profiler for Jittor.
@@ -773,97 +713,48 @@ def profile(input, ops, n=10, device=None):
     )
 
     for x in input if isinstance(input, list) else [input]:
-        # Convert to Jittor Var if needed
         if not isinstance(x, jt.Var):
             x = jt.array(x)
-        
-        # Move to device if specified
         if device is not None:
             if isinstance(device, str):
-                if device == "cuda" and jt.has_cuda:
+                if device == "cuda":
                     x = x.cuda()
                 elif device == "cpu":
                     x = x.cpu()
             else:
                 x = x.to(device)
-        
-        x.requires_grad = True
-        
-        for m in ops if isinstance(ops, list) else [ops]:
-            # Move model to device if specified
-            if device is not None:
-                if hasattr(m, "to"):
-                    if isinstance(device, str):
-                        if device == "cuda" and jt.has_cuda:
-                            m = m.cuda()
-                        elif device == "cpu":
-                            m = m.cpu()
-                    else:
-                        m = m.to(device)
-            
-            # Convert to half precision if input is half
-            if hasattr(m, "half") and isinstance(x, jt.Var) and x.dtype == jt.float16:
-                m = m.half()
-            
-            tf, tb, t = 0, 0, [0, 0, 0]  # dt forward, backward
-            
-            # Calculate FLOPs using unified profile method (auto-detects framework)
-            try:
-                if isinstance(m, nn.Module):
-                    from nkyolo.utils.jittor_profile import profile as unified_profile
-                    flops_result, _ = unified_profile(m, inputs=[x], verbose=False)
-                    flops = flops_result / 1e9  # Convert to GFLOPs
-                else:
-                    # For lambda functions or other operations, FLOPs calculation is not available
-                    flops = 0
-            except Exception:
-                flops = 0
 
-            try:
-                # Clear CUDA cache before profiling
-                if jt.has_cuda:
-                    jt.cuda.empty_cache()
-                    mem_start = jt.cuda.memory_allocated() / 1e9  # GB
-                else:
-                    mem_start = 0
-                
-                for _ in range(n):
-                    t[0] = time_sync()
-                    y = m(x)
-                    t[1] = time_sync()
-                    try:
-                        # Calculate backward pass
-                        loss = (sum(yi.sum() for yi in y) if isinstance(y, list) else y).sum()
-                        loss.backward()
-                        t[2] = time_sync()
-                        # Clear gradients after backward pass
-                        if hasattr(x, 'grad'):
-                            x.grad = None
-                        if isinstance(m, nn.Module):
-                            for param in m.parameters():
-                                if param.grad is not None:
-                                    param.grad = None
-                    except Exception:  # no backward method
-                        t[2] = float("nan")
-                    tf += (t[1] - t[0]) * 1000 / n  # ms per op forward
-                    tb += (t[2] - t[1]) * 1000 / n  # ms per op backward
-                
-                # Calculate memory usage
-                if jt.has_cuda:
-                    mem = max(0, jt.cuda.memory_allocated() / 1e9 - mem_start)  # GB
-                else:
-                    mem = 0
-                
-                # Get shapes
-                s_in = tuple(x.shape) if isinstance(x, jt.Var) else "list"
-                s_out = tuple(y.shape) if isinstance(y, jt.Var) else ("list" if isinstance(y, list) else str(type(y)))
-                
-                # Count parameters
-                p = sum(x.numel() for x in m.parameters()) if isinstance(m, nn.Module) else 0
-                
-                LOGGER.info(f"{p:12}{flops:12.4g}{mem:>14.3f}{tf:14.4g}{tb:14.4g}{str(s_in):>24s}{str(s_out):>24s}")
-                results.append([p, flops, mem, tf, tb, s_in, s_out])
-            except Exception as e:
-                LOGGER.info(e)
-                results.append(None)
+        x.requires_grad = True
+
+        for m in ops if isinstance(ops, list) else [ops]:
+            if not isinstance(m, nn.Module):
+                raise TypeError("profile() expects nn.Module instances.")
+            if device is not None:
+                m = m.to(device)
+            if x.dtype == jt.float16:
+                m = m.half()
+
+            from nkyolo.utils.jittor_profile import profile as unified_profile
+
+            flops_result, _ = unified_profile(m, inputs=[x], verbose=False)
+            flops = flops_result / 1e9
+
+            tf = tb = 0.0
+            for _ in range(n):
+                t0 = time_sync()
+                y = m(x)
+                t1 = time_sync()
+                loss = (sum(yi.sum() for yi in y) if isinstance(y, list) else y).sum()
+                loss.backward()
+                t2 = time_sync()
+                tf += (t1 - t0) * 1000 / n
+                tb += (t2 - t1) * 1000 / n
+
+            s_in = tuple(x.shape)
+            s_out = tuple(y.shape) if isinstance(y, jt.Var) else ("list" if isinstance(y, list) else str(type(y)))
+            p = sum(v.numel() for v in m.parameters())
+            mem = 0
+
+            LOGGER.info(f"{p:12}{flops:12.4g}{mem:>14.3f}{tf:14.4g}{tb:14.4g}{str(s_in):>24s}{str(s_out):>24s}")
+            results.append([p, flops, mem, tf, tb, s_in, s_out])
     return results

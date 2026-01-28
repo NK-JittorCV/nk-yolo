@@ -12,7 +12,7 @@ from nkyolo.data import build_dataloader, build_yolo_dataset
 from nkyolo.engine.trainer import BaseTrainer
 from nkyolo.models import yolo
 from nkyolo.nn.tasks import DetectionModel
-from nkyolo.utils import LOGGER, RANK
+from nkyolo.utils import LOGGER, RANK, colorstr
 from nkyolo.utils.plotting import plot_images, plot_labels, plot_results
 
 class DetectionTrainer(BaseTrainer):
@@ -76,12 +76,9 @@ class DetectionTrainer(BaseTrainer):
         """
         img = batch["img"].to(self.device, non_blocking=True)
         # Align input dtype with model parameters to avoid mixed-precision conv errors.
-        param_dtype = None
-        if hasattr(self.model, "parameters"):
-            params = self.model.parameters()
-            params_iter = iter(params)
-            first_param = next(params_iter, None)
-            param_dtype = first_param.dtype if first_param is not None else None
+        params_iter = iter(self.model.parameters())
+        first_param = next(params_iter, None)
+        param_dtype = first_param.dtype if first_param is not None else None
         if param_dtype is not None and "float16" in str(param_dtype):
             img = img.half()
         else:
@@ -167,7 +164,7 @@ class DetectionTrainer(BaseTrainer):
             str: Formatted string with column headers (Epoch, GPU_mem (if available), losses, Instances, Size).
         """
         # Check if memory is available
-        memory_str = self._get_memory_str() if hasattr(self, '_get_memory_str') else ""
+        memory_str = self._get_memory_str()
         has_memory = bool(memory_str)
         
         headers = ["Epoch"]
@@ -175,8 +172,9 @@ class DetectionTrainer(BaseTrainer):
             headers.append("GPU_mem")
         headers.extend(self.loss_names)
         headers.extend(["Instances", "Size"])
-        
-        return ("\n" + "%11s" * len(headers)) % tuple(headers)
+
+        header = " ".join(f"{h:>11}" for h in headers)
+        return "\n" + colorstr("bold", header)
 
     def plot_training_samples(self, batch, ni):
         """Plots training samples with annotations.

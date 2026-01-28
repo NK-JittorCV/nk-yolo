@@ -71,6 +71,16 @@ class InfiniteDataset(Dataset):
         """Get item at index, cycling through dataset if index exceeds length."""
         return self.dataset[index % len(self.dataset)]
 
+    def close_mosaic(self, hyp):
+        """Forward mosaic-closing to the wrapped dataset if supported."""
+        if hasattr(self.dataset, "close_mosaic"):
+            result = self.dataset.close_mosaic(hyp)
+            # Keep wrapper in sync with any updated transforms.
+            if hasattr(self.dataset, "transforms"):
+                self.transforms = self.dataset.transforms
+            return result
+        return None
+
     def collate_batch(self, batch):
         """Collate batch using custom collate function."""
         return self.collate_fn(batch)

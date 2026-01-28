@@ -2,6 +2,7 @@
 # Refer to https://github.com/ultralytics/ultralytics/blob/main/ultralytics/nn/tasks.py
 
 import contextlib
+import importlib.util
 import pickle
 import re
 import types
@@ -88,13 +89,24 @@ from nkyolo.utils.jittor_utils import (
     intersect_dicts,
     model_info,
     scale_img,
+    state_dict_to_jittor,
     time_sync,
 )
+
+_TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
+if _TORCH_AVAILABLE:
+    import torch
 
 
 
 class BaseModel(nn.Module):
     """The BaseModel class serves as a base class for all the models in the NK-YOLO family."""
+
+    def __init__(self):
+        super().__init__()
+        self.criterion = None
+        self.clip_model = None
+        self.yaml_file = ""
 
     def execute(self, x, *args, **kwargs):
         """
@@ -208,13 +220,13 @@ class BaseModel(nn.Module):
         """
         if not self.is_fused():
             for m in self.model.modules():
-                if isinstance(m, (Conv, Conv2, DWConv)) and hasattr(m, "bn"):
+                if isinstance(m, (Conv, Conv2, DWConv)):
                     if isinstance(m, Conv2):
                         m.fuse_convs()
                     m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                     delattr(m, "bn")  # remove batchnorm
                     m.execute = m.execute_fuse  # update execute
-                if isinstance(m, ConvTranspose) and hasattr(m, "bn"):
+                if isinstance(m, ConvTranspose):
                     m.conv_transpose = fuse_deconv_and_bn(m.conv_transpose, m.bn)
                     delattr(m, "bn")  # remove batchnorm
                     m.execute = m.execute_fuse  # update execute
@@ -267,10 +279,8 @@ class BaseModel(nn.Module):
         if isinstance(m, (Detect, WorldDetect, v10Detect)):  # includes all Detect subclasses
             m.stride = fn(m.stride)
             m.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
-            if hasattr(m, "anchors"):
-                m.anchors = fn(m.anchors)
-            if hasattr(m, "strides"):
-                m.strides = fn(m.strides)
+            m.anchors = fn(m.anchors)
+            m.strides = fn(m.strides)
         return self
 
     def load(self, weights, verbose=True):
@@ -284,9 +294,18 @@ class BaseModel(nn.Module):
         
         # 1. 取出权重 state_dict
         if isinstance(weights, dict):
-            csd = weights["model"].state_dict()
+            model_data = weights.get("model", weights)
         else:
-            csd = weights.state_dict()
+            model_data = weights
+
+        if isinstance(model_data, nn.Module):
+            csd = model_data.state_dict()
+        elif isinstance(model_data, dict):
+            csd = model_data
+        else:
+            raise TypeError(f"Unsupported weights type: {type(model_data)}")
+
+        csd = state_dict_to_jittor(csd)
 
         # 2. 过滤掉 shape 不匹配的键
         model_sd = self.state_dict()
@@ -323,7 +342,7 @@ class BaseModel(nn.Module):
             batch (dict): Batch to compute loss on
             preds (jt.Var | List[jt.Var]): Predictions.
         """
-        if getattr(self, "criterion", None) is None:
+        if self.criterion is None:
             self.criterion = self.init_criterion()
 
         preds = self.execute(batch["img"]) if preds is None else preds
@@ -332,6 +351,10 @@ class BaseModel(nn.Module):
     def init_criterion(self):
         """Initialize the loss criterion for the BaseModel."""
         raise NotImplementedError("compute_loss() needs to be implemented by task heads")
+
+    def clone(self):
+        """Return a detached copy of the model."""
+        raise NotImplementedError("clone() must be implemented by derived model classes.")
 
 
 class DetectionModel(BaseModel):
@@ -348,6 +371,7 @@ class DetectionModel(BaseModel):
         """
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
+        self.yaml_file = self.yaml.get("yaml_file", "")
         if self.yaml["backbone"][0][2] == "Silence":
             LOGGER.warning(
                 "WARNING ⚠️ YOLOv9 `Silence` module is deprecated in favor of nn.Identity. "
@@ -363,7 +387,7 @@ class DetectionModel(BaseModel):
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
-        self.end2end = getattr(self.model[-1], "end2end", False)
+        self.end2end = self.model[-1].end2end
 
         # Build strides
         m = self.model[-1]  # Detect()
@@ -403,8 +427,7 @@ class DetectionModel(BaseModel):
             m.stride = jt.Var([s / x.shape[-2] for x in _execute(jt.zeros(1, ch, s, s))])  # execute
             m.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
             self.stride = m.stride
-            if hasattr(m, "bias_init"):
-                m.bias_init()  # only run once
+            m.bias_init()  # only run once
         else:
             self.stride = jt.Var([32])  # default stride for i.e. RTDETR
             self.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
@@ -415,9 +438,22 @@ class DetectionModel(BaseModel):
             self.info()
             LOGGER.info("")
 
+    def clone(self):
+        """Clone the detection model using its YAML config and weights."""
+        model = self.__class__(
+            cfg=deepcopy(self.yaml),
+            ch=self.yaml.get("ch", 3),
+            nc=self.yaml.get("nc"),
+            verbose=False,
+        )
+        model.load_state_dict(self.state_dict())
+        model.names = deepcopy(self.names)
+        model.inplace = self.inplace
+        return model
+
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference and train outputs."""
-        if getattr(self, "end2end", False) or self.__class__.__name__ != "DetectionModel":
+        if self.end2end or self.__class__.__name__ != "DetectionModel":
             LOGGER.warning("WARNING ⚠️ Model does not support 'augment=True', reverting to single-scale prediction.")
             return self._predict_once(x)
         img_size = x.shape[-2:]  # height, width
@@ -458,7 +494,7 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
-        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+        return E2EDetectLoss(self) if self.end2end else v8DetectionLoss(self)
 
 
 class OBBModel(DetectionModel):
@@ -540,7 +576,8 @@ class ClassificationModel(BaseModel):
     @staticmethod
     def reshape_outputs(model, nc):
         """Update a TorchVision classification model to class count 'n' if required."""
-        name, m = list((model.model if hasattr(model, "model") else model).named_children())[-1]  # last module
+        base = model.model if isinstance(model, ClassificationModel) else model
+        name, m = list(base.named_children())[-1]  # last module
         if isinstance(m, Classify):  # YOLO Classify() head
             if m.linear.out_features != nc:
                 m.linear = nn.Linear(m.linear.in_features, nc)
@@ -615,7 +652,7 @@ class RTDETRDetectionModel(DetectionModel):
         Returns:
             (tuple): A tuple containing the total loss and main three losses in a tensor.
         """
-        if not hasattr(self, "criterion"):
+        if self.criterion is None:
             self.criterion = self.init_criterion()
 
         img = batch["img"]
@@ -699,15 +736,11 @@ class WorldModel(DetectionModel):
 
     def set_classes(self, text, batch=80, cache_clip_model=True):
         """Set classes in advance so that model could do offline-inference without clip model."""
-        try:
-            import clip
-        except ImportError:
+        if importlib.util.find_spec("clip") is None:
             check_requirements("git+https://github.com/ultralytics/CLIP.git")
-            import clip
+        import clip
 
-        if (
-            not getattr(self, "clip_model", None) and cache_clip_model
-        ):  # for backwards compatibility of models lacking clip_model attribute
+        if self.clip_model is None and cache_clip_model:
             self.clip_model = clip.load("ViT-B/32")[0]
         model = self.clip_model if cache_clip_model else clip.load("ViT-B/32")[0]
         device = next(model.parameters()).device
@@ -771,7 +804,7 @@ class WorldModel(DetectionModel):
             batch (dict): Batch to compute loss on.
             preds (jt.Var | List[jt.Var]): Predictions.
         """
-        if not hasattr(self, "criterion"):
+        if self.criterion is None:
             self.criterion = self.init_criterion()
 
         if preds is None:
@@ -879,507 +912,257 @@ class SafeUnpickler(pickle.Unpickler):
         else:
             return SafeClass
 
-#TODO:这里改的有点拿不准
+
+def _sidecar_yaml_path(weight):
+    path = Path(weight)
+    for ext in (".yaml", ".yml"):
+        candidate = path.with_suffix(ext)
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+
+def _normalize_yaml_config(yaml_config, args):
+    if isinstance(yaml_config, str):
+        yaml_config = yaml_model_load(yaml_config)
+    if not isinstance(yaml_config, dict):
+        raise TypeError(f"model_yaml must be a dict or str, got {type(yaml_config)}: {yaml_config}")
+    yaml_config = deepcopy(yaml_config)
+    if "ch" not in yaml_config:
+        yaml_config["ch"] = 3
+    if "nc" not in yaml_config:
+        yaml_config["nc"] = args.get("nc", 80) if args else 80
+    if "scales" in yaml_config and isinstance(yaml_config["scales"], dict):
+        scale = yaml_config.get("scale")
+        if not scale and args:
+            scale = args.get("scale")
+        if not scale:
+            scale = next(iter(yaml_config["scales"].keys()))
+        yaml_config["scale"] = scale
+    return yaml_config
+
+
+def _build_model_from_yaml(task, yaml_config):
+    if task == "detect":
+        return DetectionModel(cfg=yaml_config, verbose=False)
+    raise NotImplementedError(f"Task '{task}' is not implemented yet.")
+
+
+def _load_state_dict_strict(model, state_dict):
+    model_keys = set(model.state_dict().keys())
+    state_keys = set(state_dict.keys())
+    missing = model_keys - state_keys
+    unexpected = state_keys - model_keys
+    if unexpected:
+        droppable_suffixes = (".anchors", ".strides")
+        droppable = {k for k in state_dict.keys() if k.endswith(droppable_suffixes)}
+        if unexpected.issubset(droppable):
+            for k in droppable:
+                state_dict.pop(k, None)
+        else:
+            # Be permissive with extra keys in checkpoints; they are not used by the model.
+            for k in list(unexpected):
+                state_dict.pop(k, None)
+    # Recompute after cleanup.
+    state_keys = set(state_dict.keys())
+    missing = model_keys - state_keys
+    unexpected = state_keys - model_keys
+    if missing or unexpected:
+        raise RuntimeError(
+            f"State dict keys mismatch. Missing: {len(missing)}, unexpected: {len(unexpected)}."
+        )
+    model.load_state_dict(state_dict)
+
+
+def _to_numpy(obj):
+    if isinstance(obj, dict):
+        return {k: _to_numpy(v) for k, v in obj.items()}
+    if isinstance(obj, jt.Var):
+        return obj.numpy()
+    if _TORCH_AVAILABLE and isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().numpy()
+    if isinstance(obj, np.ndarray):
+        return obj
+    return obj
+
+
+def _torch_safe_load(weight):
+    if not _TORCH_AVAILABLE:
+        raise ModuleNotFoundError("torch is required to load .pt/.pth weights. Please install torch.")
+    from nkyolo.utils.downloads import attempt_download_asset
+
+    file = attempt_download_asset(weight)
+    return torch.load(file, map_location="cpu"), file
+
+
+def _extract_torch_state(ckpt):
+    if isinstance(ckpt, torch.nn.Module):
+        return ckpt.state_dict(), ckpt.yaml, {}
+    if not isinstance(ckpt, dict):
+        raise TypeError(f"Unsupported torch checkpoint type: {type(ckpt)}")
+    train_args = ckpt.get("train_args", {})
+    model_yaml = ckpt.get("model_yaml") or ckpt.get("yaml")
+    model_obj = ckpt.get("ema") or ckpt.get("model")
+    state_source = None
+    if isinstance(model_obj, torch.nn.Module):
+        model_yaml = model_obj.yaml
+        state_source = model_obj.state_dict()
+    elif isinstance(model_obj, dict):
+        state_source = model_obj
+    elif isinstance(ckpt.get("state_dict"), dict):
+        state_source = ckpt.get("state_dict")
+    elif isinstance(ckpt.get("model_state_dict"), dict):
+        state_source = ckpt.get("model_state_dict")
+    if state_source is None:
+        raise ValueError("No state_dict found in torch checkpoint.")
+    return state_source, model_yaml, train_args
+
 def jittor_safe_load(weight, safe_only=False):
     """
-    Attempts to load a Jittor model with the jt.load() function. If a ModuleNotFoundError is raised, it catches the
-    error, logs a warning message, and attempts to install the missing module via the check_requirements() function.
-    After installation, the function again attempts to load the model using jt.load().
+    Load a Jittor checkpoint saved in .pkl format.
 
     Args:
-        weight (str): The file path of the Jittor model.
+        weight (str): Path to the Jittor checkpoint (.pkl).
         safe_only (bool): If True, replace unknown classes with SafeClass during loading.
 
-    Example:
-    ```python
-    from nkyolo.nn.tasks import jittor_safe_load
-
-    ckpt, file = jittor_safe_load("path/to/best.pt", safe_only=True)
-    ```
-
     Returns:
-        ckpt (dict): The loaded model checkpoint.
-        file (str): The loaded filename
+        ckpt (dict): Loaded checkpoint.
+        file (str): Resolved file path.
     """
     from nkyolo.utils.downloads import attempt_download_asset
-    check_suffix(file=weight, suffix=(".pt", ".pkl"))
-    file = attempt_download_asset(weight)  # search online if missing locally
-    try:
-        with temporary_modules(
-            modules={
-                "nkyolo.yolo.utils": "nkyolo.utils",
-                "nkyolo.yolo.v8": "nkyolo.models.yolo",
-                "nkyolo.yolo.data": "nkyolo.data",
-            },
-            attributes={
-                "nkyolo.nn.modules.block.Silence": "jittor.nn.Identity",  # YOLOv9e
-                "nkyolo.nn.tasks.YOLOv10DetectionModel": "nkyolo.nn.tasks.DetectionModel",  # YOLOv10
-                "nkyolo.utils.loss.v10DetectLoss": "nkyolo.utils.loss.E2EDetectLoss",  # YOLOv10
-            },
-        ):
-            if safe_only:
-                # Load via custom pickle module
-                safe_pickle = types.ModuleType("safe_pickle")
-                safe_pickle.Unpickler = SafeUnpickler
-                safe_pickle.load = lambda file_obj: SafeUnpickler(file_obj).load()
-                with open(file, "rb") as f:
-                    ckpt = jt.load(f, pickle_module=safe_pickle)
-            else:
-                ckpt = jt.load(file)
 
-    except ModuleNotFoundError as e:  # e.name is missing module name
-        if e.name == "models":
-            raise TypeError(
-                emojis(
-                    f"ERROR ❌️ {weight} appears to be a YOLO model originally trained with "
-                    f"https://github.com/ultralytics/yolov5.\nThis model is NOT compatible with "
-                    f"NK-YOLO (supports YOLOv5, v8, v9, v10, v11, etc.)."
-                    f"\nRecommend fixes are to train a new model using the latest 'NK-YOLO' package or to "
-                    f"run a command with an official YOLO model, i.e. 'yolo predict model=yolov8n.pt'"
-                )
-            ) from e
-        LOGGER.warning(
-            f"WARNING ⚠️ {weight} appears to require '{e.name}', which is not in NK-YOLO requirements."
-            f"\nAutoInstall will run now for '{e.name}' but this feature will be removed in the future."
-            f"\nRecommend fixes are to train a new model using the latest 'NK-YOLO' package (supports YOLOv5, v8, v9, v10, v11, etc.) or to "
-            f"run a command with an official YOLO model, i.e. 'yolo predict model=yolov8n.pt'"
-        )
-        check_requirements(e.name)  # install missing module
-        ckpt = jt.load(file)
-    # print('before:',ckpt)
-    # 保护 model_yaml 和其他非权重配置，避免被转换为 numpy
-    protected_keys = {"model_yaml", "train_args", "train_metrics", "train_results"}
-    protected_data = {k: ckpt.pop(k) for k in protected_keys if k in ckpt}
-    
-    def _to_numpy(obj):      # 转化tensor数据类型
-        if isinstance(obj, dict):
-            return {k: _to_numpy(v) for k, v in obj.items()}
-        elif hasattr(obj, 'detach'):        # Tensor with detach method
-            return obj.detach().cpu().numpy()
+    check_suffix(file=weight, suffix=(".pkl",))
+    file = attempt_download_asset(weight)
+    with temporary_modules(
+        modules={
+            "nkyolo.yolo.utils": "nkyolo.utils",
+            "nkyolo.yolo.v8": "nkyolo.models.yolo",
+            "nkyolo.yolo.data": "nkyolo.data",
+        },
+        attributes={
+            "nkyolo.nn.modules.block.Silence": "jittor.nn.Identity",  # YOLOv9e
+            "nkyolo.nn.tasks.YOLOv10DetectionModel": "nkyolo.nn.tasks.DetectionModel",  # YOLOv10
+            "nkyolo.utils.loss.v10DetectLoss": "nkyolo.utils.loss.E2EDetectLoss",  # YOLOv10
+        },
+    ):
+        if safe_only:
+            safe_pickle = types.ModuleType("safe_pickle")
+            safe_pickle.Unpickler = SafeUnpickler
+            safe_pickle.load = lambda file_obj: SafeUnpickler(file_obj).load()
+            with open(file, "rb") as f:
+                ckpt = jt.load(f, pickle_module=safe_pickle)
         else:
-            return obj
-    ckpt = _to_numpy(ckpt)
-    
-    # 恢复受保护的配置数据
-    ckpt.update(protected_data)
+            ckpt = jt.load(file)
 
+    if isinstance(ckpt, nn.Module):
+        ckpt = {"model": ckpt.state_dict()}
     if not isinstance(ckpt, dict):
-        # File is likely a YOLO instance saved with i.e. jt.save(model, "saved_model.pt")
-        LOGGER.warning(
-            f"WARNING ⚠️ The file '{weight}' appears to be improperly saved or formatted. "
-            f"For optimal results, use model.save('filename.pt') to correctly save YOLO models."
+        raise TypeError(
+            f"Checkpoint '{weight}' is not a valid dictionary. Use model.save('filename.pkl') for NK-YOLO checkpoints."
         )
-        ckpt = {"model": ckpt.model}
 
+    protected_keys = {"model_yaml", "train_args", "train_metrics", "train_results", "names", "nc"}
+    protected_data = {k: ckpt.pop(k) for k in protected_keys if k in ckpt}
+    ckpt = _to_numpy(ckpt)
+    ckpt.update(protected_data)
     return ckpt, file
+
+def _load_weight_entry(weight, device=None, inplace=True, fuse=False):
+    if isinstance(weight, nn.Module):
+        model = weight
+        ckpt = {}
+        weight_path = ""
+        args = DEFAULT_CFG_DICT
+    else:
+        weight_path = str(weight)
+        suffix = Path(weight_path).suffix.lower()
+        if suffix == ".pkl":
+            ckpt, weight_path = jittor_safe_load(weight_path)
+            args = {**DEFAULT_CFG_DICT, **ckpt.get("train_args", {})}
+            yaml_config = ckpt.get("model_yaml")
+            if yaml_config is None:
+                raise ValueError(f"Checkpoint '{weight_path}' is missing model_yaml. Re-save as .pkl with NK-YOLO.")
+            yaml_config = _normalize_yaml_config(yaml_config, args)
+            model = _build_model_from_yaml(args.get("task", "detect"), yaml_config)
+            state_source = ckpt.get("ema") or ckpt.get("model")
+            if state_source is None:
+                raise KeyError(f"Checkpoint '{weight_path}' has no model/ema weights.")
+            jittor_state = state_dict_to_jittor(state_source)
+            _load_state_dict_strict(model, jittor_state)
+        elif suffix in {".pt", ".pth"}:
+            if not _TORCH_AVAILABLE and suffix == ".pt":
+                raise ModuleNotFoundError("torch is required to load .pt weights. Please install torch.")
+            if not _TORCH_AVAILABLE and suffix == ".pth":
+                sidecar = _sidecar_yaml_path(weight_path)
+                if not sidecar:
+                    raise ModuleNotFoundError(
+                        "torch is required to load .pth weights without a sidecar YAML. "
+                        "Provide model.yaml next to the .pth file."
+                    )
+                args = DEFAULT_CFG_DICT
+                yaml_config = _normalize_yaml_config(sidecar, args)
+                model = _build_model_from_yaml(args.get("task", "detect"), yaml_config)
+                model.load(weight_path)  # Jittor native loader for torch .pth state dict
+                ckpt = {"model_yaml": yaml_config, "train_args": args}
+            else:
+                ckpt, weight_path = _torch_safe_load(weight_path)
+                state_source, model_yaml, train_args = _extract_torch_state(ckpt)
+                if not model_yaml:
+                    sidecar = _sidecar_yaml_path(weight_path)
+                    if sidecar:
+                        model_yaml = sidecar
+                if not model_yaml:
+                    raise ValueError(f"Torch checkpoint '{weight_path}' is missing model_yaml/yaml.")
+                args = {**DEFAULT_CFG_DICT, **train_args}
+                yaml_config = _normalize_yaml_config(model_yaml, args)
+                model = _build_model_from_yaml(args.get("task", "detect"), yaml_config)
+                jittor_state = state_dict_to_jittor(state_source)
+                _load_state_dict_strict(model, jittor_state)
+                ckpt = {"model_yaml": model_yaml, "train_args": train_args}
+        else:
+            raise ValueError(f"Unsupported weights suffix '{suffix}'. Use .pkl (Jittor) or .pt/.pth (PyTorch).")
+
+    model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}
+    model.pt_path = weight_path
+    model.task = guess_model_task(model)
+    model.inplace = inplace
+    if isinstance(ckpt, dict):
+        if "names" in ckpt and ckpt["names"] is not None:
+            model.names = ckpt["names"]
+        if "nc" in ckpt and ckpt["nc"] is not None:
+            model.nc = ckpt["nc"]
+    if device is not None and _TORCH_AVAILABLE:
+        # Only torch models support .to()
+        if isinstance(model, torch.nn.Module):
+            model.to(device)
+    if fuse:
+        model = model.fuse()
+    model.eval()
+    return model, ckpt
+
 
 def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     """Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a."""
-    def _load_state_dict_compat(model, state_dict, strict=True):
-        """Load state dict with optional strict handling for Jittor's API."""
-        load_fn = model.load_state_dict
-        supports_strict = False
-        if hasattr(load_fn, "__code__"):
-            supports_strict = "strict" in load_fn.__code__.co_varnames
-        else:
-            text_sig = getattr(load_fn, "__text_signature__", "") or ""
-            supports_strict = "strict" in text_sig
-
-        if not supports_strict and strict:
-            # Manual strictness check for common key mismatches
-            if hasattr(model, "state_dict"):
-                def _normalize_keys(keys):
-                    keys = set(keys)
-                    if keys and all(k.startswith("module.") for k in keys):
-                        keys = {k[7:] for k in keys}
-                    return keys
-
-                model_keys = _normalize_keys(model.state_dict().keys())
-                state_keys = _normalize_keys(state_dict.keys())
-                missing = model_keys - state_keys
-                unexpected = state_keys - model_keys
-                if missing or unexpected:
-                    # Allow known non-parameter buffers to be dropped when only unexpected keys exist.
-                    if not missing and unexpected:
-                        droppable_suffixes = (".anchors", ".strides")
-                        droppable = {k for k in state_dict.keys() if k.endswith(droppable_suffixes)}
-                        droppable_norm = _normalize_keys(droppable)
-                        if unexpected.issubset(droppable_norm) and droppable:
-                            LOGGER.warning(
-                                f"WARNING ⚠️ Dropping non-parameter keys from checkpoint: {sorted(droppable)}"
-                            )
-                            for k in droppable:
-                                state_dict.pop(k, None)
-                            return load_fn(state_dict)
-                    raise RuntimeError(
-                        f"State dict keys mismatch (strict=True). Missing: {len(missing)}, unexpected: {len(unexpected)}."
-                    )
-        return load_fn(state_dict, strict=strict) if supports_strict else load_fn(state_dict)
-
     ensemble = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
-        ckpt, w = jittor_safe_load(w)  # load ckpt
-        args = {**DEFAULT_CFG_DICT, **ckpt["train_args"]} if "train_args" in ckpt else None  # combined args
-        
-        # 检查是否有保存的模型配置信息
-        if "model_yaml" in ckpt and ckpt["model_yaml"] is not None:
-            # 使用保存的yaml配置重建模型
-            from nkyolo.nn.tasks import DetectionModel
-            
-            # 根据任务类型创建相应的模型
-            task = args.get("task", "detect") if args else "detect"
-            yaml_config = ckpt["model_yaml"]
-            
-            # 处理 model_yaml：可能是字符串路径或字典
-            if isinstance(yaml_config, str):
-                # 如果是字符串路径，需要先加载
-                LOGGER.info(f"Loading model_yaml from path: {yaml_config}")
-                yaml_config = yaml_model_load(yaml_config)
-            elif isinstance(yaml_config, dict):
-                # 如果是字典，确保包含必要的字段
-                if "backbone" not in yaml_config or "head" not in yaml_config:
-                    LOGGER.warning(
-                        f"WARNING ⚠️ model_yaml dict missing required fields (backbone/head). "
-                        f"Attempting to use as-is, but model may fail to load."
-                    )
-                # 确保字典格式正确，添加必要的默认值
-                if "ch" not in yaml_config:
-                    yaml_config["ch"] = 3
-                if "nc" not in yaml_config:
-                    yaml_config["nc"] = 80  # 默认 COCO 类别数
-                
-                # 如果使用 scales 字典，确保 scale 键存在且正确
-                if "scales" in yaml_config and isinstance(yaml_config["scales"], dict):
-                    if "scale" not in yaml_config:
-                        # 如果没有 scale，尝试从 train_args 中推断
-                        scale = args.get("scale") if args else None
-                        if not scale:
-                            # 使用 scales 的第一个键作为默认值
-                            scale = tuple(yaml_config["scales"].keys())[0]
-                            LOGGER.warning(
-                                f"WARNING ⚠️ No 'scale' found in model_yaml. Using first scale from scales dict: '{scale}'. "
-                                f"This may cause shape mismatch if incorrect."
-                            )
-                        yaml_config["scale"] = scale
-                    LOGGER.info(
-                        f"Using saved model_yaml config (dict format) with nc={yaml_config.get('nc')}, ch={yaml_config.get('ch')}, "
-                        f"scale={yaml_config.get('scale', 'N/A')}, scales={list(yaml_config.get('scales', {}).keys()) if yaml_config.get('scales') else 'N/A'}"
-                    )
-                else:
-                    # 如果没有 scales，检查是否有 width_multiple 和 depth_multiple
-                    width = yaml_config.get("width_multiple", "N/A")
-                    depth = yaml_config.get("depth_multiple", "N/A")
-                    LOGGER.info(
-                        f"Using saved model_yaml config (dict format) with nc={yaml_config.get('nc')}, ch={yaml_config.get('ch')}, "
-                        f"width_multiple={width}, depth_multiple={depth}"
-                    )
-            else:
-                raise ValueError(
-                    f"model_yaml must be a dict or str, got {type(yaml_config)}: {yaml_config}"
-                )
-            
-            if task == "detect":
-                model = DetectionModel(cfg=yaml_config, verbose=False)
-            elif task in ["segment", "pose", "obb", "classify", "RTDETRDecoder"]:
-                # TODO: Other tasks (segment, pose, obb, classify, RTDETR) are not yet implemented
-                raise NotImplementedError(
-                    f"TODO: {task} task is not implemented yet. Only 'detect' task is currently supported."
-                )
-            else:
-                # 默认使用DetectionModel
-                model = DetectionModel(cfg=yaml_config, verbose=False)
-            
-            # 加载权重 - 转换为 Jittor 格式并直接加载
-            if ckpt.get("ema"):
-                # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
-                ema_weights = {}
-                for k, v in ckpt["ema"].items():
-                    if isinstance(v, np.ndarray):
-                        if v.dtype in [np.float16, np.float64]:
-                            v = v.astype(np.float32)
-                        ema_weights[k] = jt.array(v)
-                    else:
-                        ema_weights[k] = v
-                # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-                _load_state_dict_compat(model, ema_weights, strict=True)
-            elif ckpt.get("model"):
-                # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
-                model_weights = {}
-                for k, v in ckpt["model"].items():
-                    if isinstance(v, np.ndarray):
-                        if v.dtype in [np.float16, np.float64]:
-                            v = v.astype(np.float32)
-                        model_weights[k] = jt.array(v)
-                    else:
-                        model_weights[k] = v
-                # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-                _load_state_dict_compat(model, model_weights, strict=True)
-        else:
-            # 原有的加载逻辑（向后兼容）
-            model_data = ckpt.get("ema") or ckpt["model"]
-            if isinstance(model_data, dict):
-                # 如果是权重字典（例如 .pkl 文件），需要重新构建模型
-                from nkyolo.nn.tasks import DetectionModel
-                
-                # 对于 .pkl 文件，使用默认的 YOLOv11 配置
-                if w.endswith('.pkl'):
-                    model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
-                else:
-                    # 对于其他格式，使用通用配置或抛出错误
-                    raise ValueError(f"Cannot handle weight dictionary format for file: {w}")
-                
-                # 转换权重格式为 Jittor 并直接加载（model_data 已经是 numpy 格式）
-                jittor_weights = {}
-                for k, v in model_data.items():
-                    if isinstance(v, np.ndarray):
-                        if v.dtype in [np.float16, np.float64]:
-                            v = v.astype(np.float32)
-                        jittor_weights[k] = jt.array(v)
-                    else:
-                        jittor_weights[k] = v
-                # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-                _load_state_dict_compat(model, jittor_weights, strict=True)
-            else:
-                # 如果是模型对象
-                model = model_data.float()  # FP32 model
+        model, _ = _load_weight_entry(w, device=device, inplace=inplace, fuse=fuse)
+        ensemble.append(model)
 
-        # Model compatibility updates
-        model.args = args  # attach args to model
-        model.pt_path = w  # attach *.pt file path to model
-        model.task = guess_model_task(model)
-        if not hasattr(model, "stride"):
-            model.stride = jt.Var([32.0])
-            model.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
-
-        # Append
-        ensemble.append(model.fuse().eval() if fuse and hasattr(model, "fuse") else model.eval())  # model in eval mode
-
-    # Module updates
-    for m in ensemble.modules():
-        if hasattr(m, "inplace"):
-            m.inplace = inplace
-        elif isinstance(m, nn.Upsample) and not hasattr(m, "recompute_scale_factor"):
-            m.recompute_scale_factor = None
-
-    # Return model
     if len(ensemble) == 1:
         return ensemble[-1]
 
-    # Return ensemble
     LOGGER.info(f"Ensemble created with {weights}\n")
-    for k in "names", "nc", "yaml":
-        setattr(ensemble, k, getattr(ensemble[0], k))
+    ensemble.names = ensemble[0].names
+    ensemble.nc = ensemble[0].nc
+    ensemble.yaml = ensemble[0].yaml
     ensemble.stride = ensemble[int(jt.argmax(jt.Var([m.stride.max() for m in ensemble])))].stride
     assert all(ensemble[0].nc == m.nc for m in ensemble), f"Models differ in class counts {[m.nc for m in ensemble]}"
     return ensemble
 
 
 def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
-
     """Loads a single model weights."""
-    ckpt, weight = jittor_safe_load(weight)  # load ckpt
-    args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
-    
-    # 检查是否有保存的模型配置信息
-    if "model_yaml" in ckpt and ckpt["model_yaml"] is not None:
-        # 使用保存的yaml配置重建模型
-        from nkyolo.nn.tasks import DetectionModel
-        
-        # 根据任务类型创建相应的模型
-        task = args.get("task", "detect")
-        yaml_config = ckpt["model_yaml"]
-        
-        # 处理 model_yaml：可能是字符串路径或字典
-        if isinstance(yaml_config, str):
-            # 如果是字符串路径，需要先加载
-            LOGGER.info(f"Loading model_yaml from path: {yaml_config}")
-            yaml_config = yaml_model_load(yaml_config)
-        elif isinstance(yaml_config, dict):
-            # 如果是字典，确保包含必要的字段
-            if "backbone" not in yaml_config or "head" not in yaml_config:
-                LOGGER.warning(
-                    f"WARNING ⚠️ model_yaml dict missing required fields (backbone/head). "
-                    f"Attempting to use as-is, but model may fail to load."
-                )
-            # 确保字典格式正确，添加必要的默认值
-            if "ch" not in yaml_config:
-                yaml_config["ch"] = 3
-            if "nc" not in yaml_config:
-                yaml_config["nc"] = 80  # 默认 COCO 类别数
-            
-            # 如果使用 scales 字典，确保 scale 键存在且正确
-            if "scales" in yaml_config and isinstance(yaml_config["scales"], dict):
-                if "scale" not in yaml_config:
-                    # 如果没有 scale，尝试从权重文件名或 train_args 中推断
-                    scale = args.get("scale") if args else None
-                    if not scale and "train_args" in ckpt:
-                        scale = ckpt["train_args"].get("scale")
-                    if not scale:
-                        # 使用 scales 的第一个键作为默认值
-                        scale = tuple(yaml_config["scales"].keys())[0]
-                        LOGGER.warning(
-                            f"WARNING ⚠️ No 'scale' found in model_yaml. Using first scale from scales dict: '{scale}'. "
-                            f"This may cause shape mismatch if incorrect."
-                        )
-                    yaml_config["scale"] = scale
-                LOGGER.info(
-                    f"Using saved model_yaml config (dict format) with nc={yaml_config.get('nc')}, ch={yaml_config.get('ch')}, "
-                    f"scale={yaml_config.get('scale', 'N/A')}, scales={list(yaml_config.get('scales', {}).keys()) if yaml_config.get('scales') else 'N/A'}"
-                )
-            else:
-                # 如果没有 scales，检查是否有 width_multiple 和 depth_multiple
-                width = yaml_config.get("width_multiple", "N/A")
-                depth = yaml_config.get("depth_multiple", "N/A")
-                LOGGER.info(
-                    f"Using saved model_yaml config (dict format) with nc={yaml_config.get('nc')}, ch={yaml_config.get('ch')}, "
-                    f"width_multiple={width}, depth_multiple={depth}"
-                )
-        else:
-            raise ValueError(
-                f"model_yaml must be a dict or str, got {type(yaml_config)}: {yaml_config}"
-            )
-        
-        if task == "detect":
-            model = DetectionModel(cfg=yaml_config, verbose=False)
-        elif task in ["segment", "pose", "obb", "classify", "RTDETRDecoder"]:
-            # TODO: Other tasks (segment, pose, obb, classify, RTDETR) are not yet implemented
-            raise NotImplementedError(
-                f"TODO: {task} task is not implemented yet. Only 'detect' task is currently supported."
-            )
-        else:
-            # 默认使用DetectionModel
-            model = DetectionModel(cfg=yaml_config, verbose=False)
-        
-        # 确保模型的 yaml 属性正确设置（使用保存的配置）
-        if isinstance(yaml_config, dict):
-            model.yaml = yaml_config.copy()  # 使用副本，避免修改原始配置
-        
-        # 输出详细的配置信息用于调试
-        yaml_info = f"nc={model.yaml.get('nc')}, ch={model.yaml.get('ch')}"
-        if "scales" in model.yaml and isinstance(model.yaml["scales"], dict):
-            scale = model.yaml.get("scale", "N/A")
-            scales_info = list(model.yaml["scales"].keys())
-            if scale != "N/A" and scale in model.yaml["scales"]:
-                depth, width, _ = model.yaml["scales"][scale]
-                yaml_info += f", scale={scale}, width={width}, depth={depth}, available_scales={scales_info}"
-            else:
-                yaml_info += f", scale={scale}, available_scales={scales_info}"
-        else:
-            width = model.yaml.get("width_multiple", "N/A")
-            depth = model.yaml.get("depth_multiple", "N/A")
-            yaml_info += f", width_multiple={width}, depth_multiple={depth}"
-        LOGGER.info(f"Model created with saved model_yaml: {yaml_info}")
-        
-        # 加载权重 - 转换为 Jittor 格式并直接加载
-        if ckpt.get("ema"):
-            # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
-            ema_weights = {}
-            for k, v in ckpt["ema"].items():
-                if isinstance(v, np.ndarray):
-                    if v.dtype in [np.float16, np.float64]:
-                        v = v.astype(np.float32)
-                    ema_weights[k] = jt.array(v)
-                else:
-                    ema_weights[k] = v
-            # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-            model.load_state_dict(ema_weights, strict=True)
-        elif ckpt.get("model"):
-            # 转换权重格式为 Jittor（ckpt 已经是 numpy 格式）
-            model_weights = {}
-            for k, v in ckpt["model"].items():
-                if isinstance(v, np.ndarray):
-                    if v.dtype in [np.float16, np.float64]:
-                        v = v.astype(np.float32)
-                    model_weights[k] = jt.array(v)
-                else:
-                    model_weights[k] = v
-            # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-            model.load_state_dict(model_weights, strict=True)
-        
-        model = model.to(device).float()  # FP32 model
-    else:
-        # 原有的加载逻辑（向后兼容）- 没有 model_yaml 时使用默认配置
-        LOGGER.warning(
-            f"WARNING ⚠️ No model_yaml found in checkpoint. Using default config. "
-            f"This may cause shape mismatch if the model architecture differs."
-        )
-        model_data = ckpt.get("ema") or ckpt["model"]
-        if isinstance(model_data, dict):
-            # 如果是权重字典，需要重新构建模型
-            from nkyolo.nn.tasks import DetectionModel
-            LOGGER.info(f"Using default config: nkyolo/cfg/models/11/yolo11.yaml")
-            model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
-            
-            # 转换权重字典中的 tensor 到 Jittor，确保使用 float32（model_data 已经是 numpy 格式）
-            jittor_state_dict = {}
-            for k, v in model_data.items():
-                if isinstance(v, np.ndarray):
-                    if v.dtype in [np.float16, np.float64]:
-                        v = v.astype(np.float32)
-                    jittor_state_dict[k] = jt.array(v)
-                elif hasattr(v, 'detach'):  # tensor with detach method
-                    numpy_val = v.detach().cpu().numpy()
-                    # 确保所有浮点权重都是 float32
-                    if numpy_val.dtype in [np.float16, np.float64]:
-                        numpy_val = numpy_val.astype(np.float32)
-                    jittor_state_dict[k] = jt.array(numpy_val)
-                else:
-                    jittor_state_dict[k] = v
-            
-            # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-            model.load_state_dict(jittor_state_dict, strict=True)
-        else:
-            # 如果是模型对象，需要转换模型到 Jittor
-            # 直接转换权重
-            from nkyolo.nn.tasks import DetectionModel
-            model = DetectionModel(cfg="nkyolo/cfg/models/11/yolo11.yaml", verbose=False)
-            
-            # 转换权重到 Jittor，确保使用 float32
-            source_state_dict = model_data.state_dict()
-            jittor_state_dict = {}
-            for k, v in source_state_dict.items():
-                if isinstance(v, np.ndarray):
-                    if v.dtype in [np.float16, np.float64]:
-                        v = v.astype(np.float32)
-                    jittor_state_dict[k] = jt.array(v)
-                elif hasattr(v, 'detach'):  # tensor with detach method
-                    numpy_val = v.detach().cpu().numpy()
-                    # 确保所有浮点权重都是 float32
-                    if numpy_val.dtype in [np.float16, np.float64]:
-                        numpy_val = numpy_val.astype(np.float32)
-                    jittor_state_dict[k] = jt.array(numpy_val)
-                else:
-                    jittor_state_dict[k] = v
-            
-            # 直接使用 load_state_dict 进行严格加载，确保完全匹配
-            model.load_state_dict(jittor_state_dict, strict=True)
-
-    # Model compatibility updates
-    model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
-    model.pt_path = weight  # attach *.pt file path to model
-    model.task = guess_model_task(model)
-
-    if not hasattr(model, "stride"):
-        model.stride = jt.array([32.0])
-        model.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
-
-    # 模型转换为评估模式并移动到指定设备
-    if fuse and hasattr(model, "fuse"):
-        model = model.fuse()
-    model.eval()
-    if device is not None:
-        model.to(device)
-
-    # 模块更新
-    for m in model.modules():
-        if hasattr(m, "inplace"):
-            m.inplace = inplace
-        # Jittor的Upsample可能有不同的参数名，这里根据实际情况调整
-        elif isinstance(m, nn.Upsample) and not hasattr(m, "recompute_scale_factor"):
-            m.recompute_scale_factor = None  # 兼容性处理
-
-    # 返回模型和检查点
-    return model, ckpt
+    return _load_weight_entry(weight, device=device, inplace=inplace, fuse=fuse)
 
 
 def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
@@ -1425,10 +1208,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 if act in activation_mapping:
                     Conv.default_act = activation_mapping[act]()
                 else:
-                    try:
-                        Conv.default_act = getattr(nn, act)()
-                    except AttributeError:
+                    if act not in nn.__dict__:
                         raise ValueError(f"Activation function '{act}' not found in jittor.nn")
+                    Conv.default_act = getattr(nn, act)()
             else:
                 Conv.default_act = act
 
@@ -1593,11 +1375,9 @@ def guess_model_scale(model_path):
     Returns:
         (str): The size character of the model's scale (n, s, m, l, or x).
     """
-    try:
-        # Match patterns like yolov8n, yolov11s, yolo-e-m, etc.
-        return re.search(r"yolo(e-)?[v]?\d+([nslmx])", Path(model_path).stem).group(2)
-    except AttributeError:
-        return ""
+    # Match patterns like yolov8n, yolov11s, yolo-e-m, etc.
+    match = re.search(r"yolo(e-)?[v]?\d+([nslmx])", Path(model_path).stem)
+    return match.group(2) if match else ""
 
 
 def guess_model_task(model):
