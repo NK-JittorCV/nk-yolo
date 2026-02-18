@@ -125,9 +125,48 @@ class YOLODataset(BaseDataset):
         """Returns dictionary of labels for YOLO training."""
         self.label_files = img2label_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix(".jittor_cache")
-        cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.jittor_cache file
-        assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
-        assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
+        cache = None
+        exists = False
+        current_hash = get_hash(self.label_files + self.im_files)
+        candidate_paths = (
+            cache_path,
+            cache_path.with_suffix(".cache"),
+            cache_path.with_suffix(".npy"),
+            cache_path.with_suffix(".cache.npy"),
+        )
+        cache_file_found = any(p.exists() for p in candidate_paths)
+
+        if cache_file_found:
+            cache = load_dataset_cache_file(cache_path)
+            version_ok = isinstance(cache, dict) and cache.get("version") == DATASET_CACHE_VERSION
+            hash_ok = isinstance(cache, dict) and cache.get("hash") == current_hash
+            labels_ok = isinstance(cache, dict) and isinstance(cache.get("labels"), list)
+            results = cache.get("results") if isinstance(cache, dict) else None
+            results_ok = isinstance(results, (tuple, list)) and len(results) == 5
+            exists = version_ok and hash_ok and labels_ok and results_ok
+            if not exists and LOCAL_RANK in {-1, 0}:
+                LOGGER.warning(f"{self.prefix}Dataset cache is stale or invalid, rebuilding: {cache_path}")
+
+        use_mpi = bool(getattr(jt, "in_mpi", False))
+        mpi_mod = jt.compile_extern.mpi if use_mpi else None
+        mpi_world = mpi_mod.world_size() if mpi_mod else 1
+        mpi_rank = mpi_mod.world_rank() if mpi_mod else -1
+
+        if not exists:
+            if use_mpi and mpi_world > 1:
+                if mpi_rank == 0:
+                    cache = self.cache_labels(cache_path)
+                mpi_mod.mpi_barrier()
+                if mpi_rank != 0:
+                    cache = load_dataset_cache_file(cache_path)
+            else:
+                cache = self.cache_labels(cache_path)
+
+        cache_version_ok = isinstance(cache, dict) and cache.get("version") == DATASET_CACHE_VERSION
+        cache_hash_ok = isinstance(cache, dict) and cache.get("hash") == current_hash
+        if not (cache_version_ok and cache_hash_ok):
+            raise RuntimeError(f"{self.prefix}Dataset cache check failed after rebuild: {cache_path}")
+
         # Display cache
         nf, nm, ne, nc, n = cache.pop("results")  # found, missing, empty, corrupt, total
         if exists and LOCAL_RANK in {-1, 0}:

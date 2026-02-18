@@ -1,12 +1,11 @@
-# COCO 2017 Dataset Configuration
+# Local COCO128 subset generated from existing COCO train2017 labels.
+# This config is offline-friendly and does not trigger auto-download.
 
-# Train/val/test sets
 path: /home/ubuntu/fishworld/project/data/coco
-train: images/train2017
-val: images/val2017
-test: images/test2017
+train: coco128_train.txt
+val: coco128_val.txt
+test:
 
-# Classes
 names:
   0: person
   1: bicycle
@@ -91,5 +90,4 @@ names:
 
 nc: 80
 
-# Keep empty in offline environment to avoid automatic download attempts.
 download:
