@@ -92,66 +92,59 @@ def benchmark(
     t0 = time.time()
     for i, (name, format, suffix, cpu, gpu) in enumerate(zip(*export_formats().values())):
         emoji, filename = "❌", None  # export defaults
-        try:
-            # Checks
-            if i == 7:  # TF GraphDef
-                assert model.task != "obb", "TensorFlow GraphDef not supported for OBB task"
-            elif i == 9:  # Edge TPU
-                assert LINUX and not ARM64, "Edge TPU export only supported on non-aarch64 Linux"
-            elif i in {5, 10}:  # CoreML and TF.js
-                assert MACOS or LINUX, "CoreML and TF.js export only supported on macOS and Linux"
-                assert not IS_RASPBERRYPI, "CoreML and TF.js export not supported on Raspberry Pi"
-                assert not IS_JETSON, "CoreML and TF.js export not supported on NVIDIA Jetson"
-            if i in {5}:  # CoreML
-                assert not IS_PYTHON_3_12, "CoreML not supported on Python 3.12"
-            if i in {6, 7, 8}:  # TF SavedModel, TF GraphDef, and TFLite
-                assert not isinstance(model, YOLOWorld), "YOLOWorldv2 TensorFlow exports not supported by onnx2tf yet"
-            if i in {9, 10}:  # TF EdgeTPU and TF.js
-                assert not isinstance(model, YOLOWorld), "YOLOWorldv2 TensorFlow exports not supported by onnx2tf yet"
-            if i in {11}:  # Paddle
-                assert not isinstance(model, YOLOWorld), "YOLOWorldv2 Paddle exports not supported yet"
-                assert not is_end2end, "End-to-end models not supported by PaddlePaddle yet"
-                assert LINUX or MACOS, "Windows Paddle exports not supported yet"
-            if i in {12}:  # NCNN
-                assert not isinstance(model, YOLOWorld), "YOLOWorldv2 NCNN exports not supported yet"
-            if "cpu" in device.type:
-                assert cpu, "inference not supported on CPU"
-            if "cuda" in device.type:
-                assert gpu, "inference not supported on GPU"
+        # Checks
+        if i == 7:  # TF GraphDef
+            assert model.task != "obb", "TensorFlow GraphDef not supported for OBB task"
+        elif i == 9:  # Edge TPU
+            assert LINUX and not ARM64, "Edge TPU export only supported on non-aarch64 Linux"
+        elif i in {5, 10}:  # CoreML and TF.js
+            assert MACOS or LINUX, "CoreML and TF.js export only supported on macOS and Linux"
+            assert not IS_RASPBERRYPI, "CoreML and TF.js export not supported on Raspberry Pi"
+            assert not IS_JETSON, "CoreML and TF.js export not supported on NVIDIA Jetson"
+        if i in {5}:  # CoreML
+            assert not IS_PYTHON_3_12, "CoreML not supported on Python 3.12"
+        if i in {6, 7, 8}:  # TF SavedModel, TF GraphDef, and TFLite
+            assert not isinstance(model, YOLOWorld), "YOLOWorldv2 TensorFlow exports not supported by onnx2tf yet"
+        if i in {9, 10}:  # TF EdgeTPU and TF.js
+            assert not isinstance(model, YOLOWorld), "YOLOWorldv2 TensorFlow exports not supported by onnx2tf yet"
+        if i in {11}:  # Paddle
+            assert not isinstance(model, YOLOWorld), "YOLOWorldv2 Paddle exports not supported yet"
+            assert not is_end2end, "End-to-end models not supported by PaddlePaddle yet"
+            assert LINUX or MACOS, "Windows Paddle exports not supported yet"
+        if i in {12}:  # NCNN
+            assert not isinstance(model, YOLOWorld), "YOLOWorldv2 NCNN exports not supported yet"
+        if "cpu" in device.type:
+            assert cpu, "inference not supported on CPU"
+        if "cuda" in device.type:
+            assert gpu, "inference not supported on GPU"
 
-            # Export
-            if format == "-":
-                filename = model.ckpt_path or model.cfg
-                exported_model = model  # PyTorch format
-            else:
-                filename = model.export(imgsz=imgsz, format=format, half=half, int8=int8, device=device, verbose=False)
-                exported_model = YOLO(filename, task=model.task)
-                assert suffix in str(filename), "export failed"
-            emoji = "❎"  # indicates export succeeded
+        # Export
+        if format == "-":
+            filename = model.ckpt_path or model.cfg
+            exported_model = model  # PyTorch format
+        else:
+            filename = model.export(imgsz=imgsz, format=format, half=half, int8=int8, device=device, verbose=False)
+            exported_model = YOLO(filename, task=model.task)
+            assert suffix in str(filename), "export failed"
+        emoji = "❎"  # indicates export succeeded
 
-            # Predict
-            assert model.task != "pose" or i != 7, "GraphDef Pose inference is not supported"
-            assert i not in {9, 10}, "inference not supported"  # Edge TPU and TF.js are unsupported
-            assert i != 5 or platform.system() == "Darwin", "inference only supported on macOS>=10.13"  # CoreML
-            if i in {12}:
-                assert not is_end2end, "End-to-end torch.topk operation is not supported for NCNN prediction yet"
-            exported_model.predict(ASSETS / "bus.jpg", imgsz=imgsz, device=device, half=half)
+        # Predict
+        assert model.task != "pose" or i != 7, "GraphDef Pose inference is not supported"
+        assert i not in {9, 10}, "inference not supported"  # Edge TPU and TF.js are unsupported
+        assert i != 5 or platform.system() == "Darwin", "inference only supported on macOS>=10.13"  # CoreML
+        if i in {12}:
+            assert not is_end2end, "End-to-end torch.topk operation is not supported for NCNN prediction yet"
+        exported_model.predict(ASSETS / "bus.jpg", imgsz=imgsz, device=device, half=half)
 
-            # Validate
-            data = data or TASK2DATA[model.task]  # task to dataset, i.e. coco8.yaml for task=detect
-            key = TASK2METRIC[model.task]  # task to metric, i.e. metrics/mAP50-95(B) for task=detect
-            results = exported_model.val(
-                data=data, batch=1, imgsz=imgsz, plots=False, device=device, half=half, int8=int8, verbose=False
-            )
-            metric, speed = results.results_dict[key], results.speed["inference"]
-            fps = round(1000 / (speed + eps), 2)  # frames per second
-            y.append([name, "✅", round(file_size(filename), 1), round(metric, 4), round(speed, 2), fps])
-        except Exception as e:
-            if verbose:
-                assert type(e) is AssertionError, f"Benchmark failure for {name}: {e}"
-            LOGGER.warning(f"ERROR ❌️ Benchmark failure for {name}: {e}")
-            y.append([name, emoji, round(file_size(filename), 1), None, None, None])  # mAP, t_inference
-
+        # Validate
+        data = data or TASK2DATA[model.task]  # task to dataset, i.e. coco8.yaml for task=detect
+        key = TASK2METRIC[model.task]  # task to metric, i.e. metrics/mAP50-95(B) for task=detect
+        results = exported_model.val(
+            data=data, batch=1, imgsz=imgsz, plots=False, device=device, half=half, int8=int8, verbose=False
+        )
+        metric, speed = results.results_dict[key], results.speed["inference"]
+        fps = round(1000 / (speed + eps), 2)  # frames per second
+        y.append([name, "✅", round(file_size(filename), 1), round(metric, 4), round(speed, 2), fps])
     # Print results
     check_yolo(device=device)  # print system info
     df = pd.DataFrame(y, columns=["Format", "Status❔", "Size (MB)", key, "Inference time (ms/im)", "FPS"])
@@ -216,18 +209,14 @@ class RF100Benchmark:
 
         with open(ds_link_txt) as file:
             for line in file:
-                try:
-                    _, url, workspace, project, version = re.split("/+", line.strip())
-                    self.ds_names.append(project)
-                    proj_version = f"{project}-{version}"
-                    if not Path(proj_version).exists():
-                        self.rf.workspace(workspace).project(project).version(version).download("yolov8")
-                    else:
-                        print("Dataset already downloaded.")
-                    self.ds_cfg_list.append(Path.cwd() / proj_version / "data.yaml")
-                except Exception:
-                    continue
-
+                _, url, workspace, project, version = re.split("/+", line.strip())
+                self.ds_names.append(project)
+                proj_version = f"{project}-{version}"
+                if not Path(proj_version).exists():
+                    self.rf.workspace(workspace).project(project).version(version).download("yolov8")
+                else:
+                    print("Dataset already downloaded.")
+                self.ds_cfg_list.append(Path.cwd() / proj_version / "data.yaml")
         return self.ds_names, self.ds_cfg_list
 
     @staticmethod

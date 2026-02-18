@@ -174,12 +174,9 @@ class Annotator:
         if self.pil:  # use PIL
             self.im = im if input_is_pil else Image.fromarray(im)
             self.draw = ImageDraw.Draw(self.im)
-            try:
-                font = check_font("Arial.Unicode.ttf" if non_ascii else font)
-                size = font_size or max(round(sum(self.im.size) / 2 * 0.035), 12)
-                self.font = ImageFont.truetype(str(font), size)
-            except Exception:
-                self.font = ImageFont.load_default()
+            font = check_font("Arial.Unicode.ttf" if non_ascii else font)
+            size = font_size or max(round(sum(self.im.size) / 2 * 0.035), 12)
+            self.font = ImageFont.truetype(str(font), size)
             # Deprecation fix for w, h = getsize(string) -> _, _, w, h = getbox(string)
             if check_version(pil_version, "9.2.0"):
                 self.font.getsize = lambda x: self.font.getbbox(x)[2:4]  # text width, height
@@ -526,10 +523,7 @@ class Annotator:
         """Show the annotated image."""
         im = Image.fromarray(np.asarray(self.im)[..., ::-1])  # Convert numpy array to PIL Image with RGB to BGR
         if IS_COLAB or IS_KAGGLE:  # can not use IS_JUPYTER as will run for all ipython environments
-            try:
-                display(im)  # noqa - display() function only available in ipython environments
-            except ImportError as e:
-                LOGGER.warning(f"Unable to display image in Jupyter notebooks: {e}")
+            display(im)  # noqa - display() function only available in ipython environments
         else:
             im.show(title=title)
 
@@ -861,6 +855,7 @@ class Annotator:
 @plt_settings()
 def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     """Plot training labels including class histograms and box statistics."""
+    import os  # local import to keep global imports minimal
     import pandas  # scope for faster 'import nkyolo'
     import seaborn  # scope for faster 'import nkyolo'
 
@@ -871,8 +866,25 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     # Plot dataset labels
     LOGGER.info(f"Plotting labels to {save_dir / 'labels.jpg'}... ")
     nc = int(cls.max() + 1)  # number of classes
-    boxes = boxes[:1000000]  # limit to 1M boxes
-    x = pandas.DataFrame(boxes, columns=["x", "y", "width", "height"])
+    boxes = boxes[:1000000]  # hard cap to avoid excessive memory
+
+    # Subsample for plotting to avoid seaborn pairplot stalls on large datasets.
+    # Control via env var NKYOLO_PLOT_MAX (0 disables subsampling).
+    max_points = int(os.getenv("NKYOLO_PLOT_MAX", 20000))
+    boxes_plot = boxes
+    cls_plot = cls
+    if max_points > 0 and len(boxes_plot) > max_points:
+        rng = np.random.default_rng(0)
+        idx = rng.choice(len(boxes_plot), size=max_points, replace=False)
+        boxes_plot = boxes_plot[idx]
+        if len(cls_plot) == len(boxes):
+            cls_plot = cls_plot[idx]
+        LOGGER.info(
+            f"Plotting labels: sampled {len(boxes_plot)} of {len(boxes)} boxes for speed "
+            f"(set NKYOLO_PLOT_MAX=0 to disable)."
+        )
+
+    x = pandas.DataFrame(boxes_plot, columns=["x", "y", "width", "height"])
 
     # Seaborn correlogram
     seaborn.pairplot(x, corner=True, diag_kind="auto", kind="hist", diag_kws=dict(bins=50), plot_kws=dict(pmax=0.9))
@@ -894,11 +906,12 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     seaborn.histplot(x, x="width", y="height", ax=ax[3], bins=50, pmax=0.9)
 
     # Rectangles
-    boxes[:, 0:2] = 0.5  # center
-    boxes = ops.xywh2xyxy(boxes) * 1000
+    boxes_plot = boxes_plot.copy()
+    boxes_plot[:, 0:2] = 0.5  # center
+    boxes_plot = ops.xywh2xyxy(boxes_plot) * 1000
     img = Image.fromarray(np.ones((1000, 1000, 3), dtype=np.uint8) * 255)
-    for cls, box in zip(cls[:500], boxes[:500]):
-        ImageDraw.Draw(img).rectangle(box, width=1, outline=colors(cls))  # plot
+    for cls_i, box in zip(cls_plot[:500], boxes_plot[:500]):
+        ImageDraw.Draw(img).rectangle(box, width=1, outline=colors(cls_i))  # plot
     ax[1].imshow(img)
     ax[1].axis("off")
 
@@ -1120,12 +1133,9 @@ def plot_images(
                             mask = mask.astype(bool)
                         else:
                             mask = image_masks[j].astype(bool)
-                        try:
-                            im[y : y + h, x : x + w, :][mask] = (
-                                im[y : y + h, x : x + w, :][mask] * 0.4 + np.array(color) * 0.6
-                            )
-                        except Exception:
-                            pass
+                        im[y : y + h, x : x + w, :][mask] = (
+                            im[y : y + h, x : x + w, :][mask] * 0.4 + np.array(color) * 0.6
+                        )
                 annotator.fromarray(im)
     if not save:
         return np.asarray(annotator.im)
@@ -1176,20 +1186,17 @@ def plot_results(file="path/to/results.csv", dir="", segment=False, pose=False, 
     files = list(save_dir.glob("results*.csv"))
     assert len(files), f"No results.csv files found in {save_dir.resolve()}, nothing to plot."
     for f in files:
-        try:
-            data = pd.read_csv(f)
-            s = [x.strip() for x in data.columns]
-            x = data.values[:, 0]
-            for i, j in enumerate(index):
-                y = data.values[:, j].astype("float")
-                # y[y == 0] = np.nan  # don't show zero values
-                ax[i].plot(x, y, marker=".", label=f.stem, linewidth=2, markersize=8)  # actual results
-                ax[i].plot(x, gaussian_filter1d(y, sigma=3), ":", label="smooth", linewidth=2)  # smoothing line
-                ax[i].set_title(s[j], fontsize=12)
-                # if j in {8, 9, 10}:  # share train and val loss y axes
-                #     ax[i].get_shared_y_axes().join(ax[i], ax[i - 5])
-        except Exception as e:
-            LOGGER.warning(f"WARNING: Plotting error for {f}: {e}")
+        data = pd.read_csv(f)
+        s = [x.strip() for x in data.columns]
+        x = data.values[:, 0]
+        for i, j in enumerate(index):
+            y = data.values[:, j].astype("float")
+            # y[y == 0] = np.nan  # don't show zero values
+            ax[i].plot(x, y, marker=".", label=f.stem, linewidth=2, markersize=8)  # actual results
+            ax[i].plot(x, gaussian_filter1d(y, sigma=3), ":", label="smooth", linewidth=2)  # smoothing line
+            ax[i].set_title(s[j], fontsize=12)
+            # if j in {8, 9, 10}:  # share train and val loss y axes
+            #     ax[i].get_shared_y_axes().join(ax[i], ax[i - 5])
     ax[1].legend()
     fname = save_dir / "results.png"
     fig.savefig(fname, dpi=200)

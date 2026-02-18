@@ -92,55 +92,55 @@ def generate_ddp_file(trainer):
 # This file is executed by mpirun, which sets MPI environment variables
 # Each MPI process will use its own device based on LOCAL_RANK
 import os
-# Set Jittor compile environment early to avoid multi-process cache races/segfaults
+
+# Resolve rank/local-rank before importing Jittor to ensure CUDA_VISIBLE_DEVICES is set early.
 _rank_env = os.environ.get("OMPI_COMM_WORLD_RANK") or os.environ.get("PMI_RANK") or os.environ.get("RANK") or "0"
-try:
-    _rank_id = int(_rank_env)
-except Exception:
-    _rank_id = 0
+_local_rank_env = (
+    os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+    or os.environ.get("PMI_LOCAL_RANK")
+    or os.environ.get("LOCAL_RANK")
+    or "0"
+)
+_rank_id = int(_rank_env) if (_rank_env.isdigit() or (_rank_env.startswith("-") and _rank_env[1:].isdigit())) else 0
+_local_rank_id = int(_local_rank_env) if (_local_rank_env.isdigit() or (_local_rank_env.startswith("-") and _local_rank_env[1:].isdigit())) else 0
+
+# Set Jittor compile environment early to avoid multi-process cache races/segfaults
 os.environ.setdefault("JIT_PARALLEL", "0")
 os.environ.setdefault("JITTOR_COMPILE_THREADS", "1")
-_cache_root = os.environ.get("JITTOR_CACHE_PATH", "/tmp/jittor_cache")
-os.environ["JITTOR_CACHE_PATH"] = f"{{_cache_root}}_rank{{_rank_id}}"
+_cache_root = os.environ.get("JITTOR_CACHE_PATH") or os.path.expanduser("~/.cache/jittor")
+_rank_cache = f"{{_cache_root}}_rank{{_rank_id}}"
+os.environ["JITTOR_CACHE_PATH"] = _rank_cache
+os.makedirs(_rank_cache, exist_ok=True)
+os.makedirs(os.path.join(_rank_cache, "jit"), exist_ok=True)
+
 overrides = {overrides_dict}
 device_list = {device_list_str}
 
+# In MPI, CUDA_VISIBLE_DEVICES should list all GPUs used by the job.
+# LOCAL_RANK selects the device internally; do NOT narrow per rank.
+device_value = overrides.get("device", "")
+device_arg = str(device_value).lower().strip()
+force_cpu = device_arg in {{"cpu", "mps"}} or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1"
+if force_cpu:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+elif device_list:
+    existing = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not existing or existing == "-1":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in device_list)
+
 if __name__ == "__main__":
     from {module} import {name}
-    from nkyolo.utils import DEFAULT_CFG_DICT, RANK, LOCAL_RANK
+    from nkyolo.utils import DEFAULT_CFG_DICT
     import jittor as jt
     
-    # CRITICAL: Disable Jittor's parallel compilation in MPI environments to prevent segfaults
-    # Multiple MPI processes compiling operators simultaneously causes memory corruption
-    # This must be set BEFORE any Jittor operations that trigger compilation
-    if RANK >= 0:
-        # Disable parallel compilation to avoid segfaults in multi-process environments
-        # Use environment variables to control Jittor compilation behavior
-        os.environ["JIT_PARALLEL"] = "0"  # Disable Jittor's parallel JIT compilation
-        os.environ["JITTOR_COMPILE_THREADS"] = "1"  # Use single-threaded compilation
-        # Disable Jittor's internal parallel compiler if available
+    # Disable Jittor's internal parallel compiler if available
+    if _rank_id >= 0:
         if hasattr(jt.flags, 'parallel_compile'):
             jt.flags.parallel_compile = False
-    
-    # In MPI environment, set CUDA_VISIBLE_DEVICES per process based on LOCAL_RANK
-    # Map LOCAL_RANK to the correct GPU from the user-specified device list
-    # This ensures each process uses the correct GPU from device="0,1" or device="2,3", etc.
-    if RANK >= 0:
-        # Get device ID for this process from the device list
-        # LOCAL_RANK is the index into the device_list (0, 1, 2, ...)
-        local_rank = LOCAL_RANK if LOCAL_RANK >= 0 else RANK
-        if device_list and local_rank < len(device_list):
-            # Use the GPU ID from the user-specified device list
-            device_id = device_list[local_rank]
-        else:
-            # Fallback: use LOCAL_RANK as GPU ID (for backward compatibility)
-            device_id = local_rank
-        
-        # Set CUDA_VISIBLE_DEVICES so this process only sees its assigned GPU
-        # Jittor will see the GPU as device 0 after CUDA_VISIBLE_DEVICES is set
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
-        # Set device in overrides for logging purposes
-        overrides['device'] = str(device_id)
+        if hasattr(jt.flags, 'use_parallel_op_compiler'):
+            jt.flags.use_parallel_op_compiler = 0
+        if hasattr(jt.flags, 'cache_path') and os.environ.get("JITTOR_CACHE_PATH"):
+            jt.flags.cache_path = os.environ["JITTOR_CACHE_PATH"]
 
     cfg = DEFAULT_CFG_DICT.copy()
     cfg.update(save_dir='')   # handle the extra key 'save_dir'
@@ -172,15 +172,7 @@ def generate_ddp_command(world_size, trainer):
     import subprocess
 
     # Check if mpirun is available
-    try:
-        subprocess.run(["mpirun", "--version"], capture_output=True, check=True, timeout=5)
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        raise RuntimeError(
-            "mpirun is not available. Please install OpenMPI or MPICH to use multi-GPU training.\n"
-            "Installation: sudo apt-get install openmpi-bin openmpi-common libopenmpi-dev (Ubuntu/Debian)\n"
-            "              or: brew install open-mpi (macOS)"
-        )
-
+    subprocess.run(["mpirun", "--version"], capture_output=True, check=True, timeout=5)
     if not trainer.resume:
         shutil.rmtree(trainer.save_dir)  # remove the save_dir
     file = generate_ddp_file(trainer)

@@ -66,7 +66,7 @@ class DFL(nn.Module):
         """Initialize a convolutional layer with a given number of input channels."""
         super().__init__()
         self.conv = nn.Conv2d(c1, 1, 1, bias=False)
-        self.conv.weight.requires_grad = False  # DFL is a fixed layer, not trainable
+        self.conv.weight.stop_grad()  # DFL is a fixed layer, not trainable
         x = jt.arange(c1, dtype=jt.float32)
         self.conv.weight.data[:] = x.view(1, c1, 1, 1).numpy()
         self.c1 = c1
@@ -1154,11 +1154,7 @@ class TorchVision(nn.Module):
 
         super().__init__()
         # Load model from Jittor (replace torchvision with appropriate Jittor model loading mechanism)
-        try:
-            self.m = jt.models.__dict__[model](pretrained=weights != "DEFAULT")
-        except KeyError:
-            raise ValueError(f"Model {model} is not available in Jittor.")
-
+        self.m = jt.models.__dict__[model](pretrained=weights != "DEFAULT")
         if unwrap:
             layers = list(self.m.children())[:-truncate]
             if isinstance(layers[0], jt.nn.Sequential):  # Second-level for some models

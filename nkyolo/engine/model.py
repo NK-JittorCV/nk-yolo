@@ -2,6 +2,7 @@
 # Refer to https://github.com/ultralytics/ultralytics/blob/main/ultralytics/engine/model.py
 
 import inspect
+import os
 from pathlib import Path
 from typing import List, Union
 
@@ -24,6 +25,7 @@ from nkyolo.utils import (
     emojis,
     yaml_load,
 )
+from nkyolo.utils.dist import parse_device_list
 
 
 class Model(nn.Module):
@@ -640,8 +642,17 @@ class Model(nn.Module):
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
         if not args.get("resume"):  # manually set model only if not resuming
-            self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
-            self.model = self.trainer.model
+            is_mpi_env = (
+                "OMPI_COMM_WORLD_SIZE" in os.environ
+                or "PMI_SIZE" in os.environ
+                or "WORLD_SIZE" in os.environ
+                or (RANK >= 0 and "LOCAL_RANK" in os.environ)
+            )
+            device_list = parse_device_list(args.get("device", ""))
+            spawn_ddp = (len(device_list) > 1) and not is_mpi_env
+            if not spawn_ddp:
+                self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
+                self.model = self.trainer.model
 
         self.trainer.hub_session = self.session  # attach optional HUB session
         self.trainer.train()
@@ -883,15 +894,7 @@ class Model(nn.Module):
             - This method is typically used internally by other methods of the Model class.
             - The task_map attribute should be properly initialized with the correct mappings for each task.
         """
-        try:
-            return self.task_map[self.task][key]
-        except Exception as e:
-            name = self.__class__.__name__
-            mode = inspect.stack()[1][3]  # get the function name.
-            raise NotImplementedError(
-                emojis(f"WARNING ⚠️ '{name}' model does not support '{mode}' mode for '{self.task}' task yet.")
-            ) from e
-
+        return self.task_map[self.task][key]
     @property
     def task_map(self) -> dict:
         """

@@ -53,18 +53,13 @@ def is_url(url, check=False):
         valid = is_url("https://www.example.com")
         ```
     """
-    try:
-        url = str(url)
-        result = parse.urlparse(url)
-        assert all([result.scheme, result.netloc])  # check if is url
-        if check:
-            with request.urlopen(url) as response:
-                return response.getcode() == 200  # check if exists online
-        return True
-    except Exception:
-        return False
-
-
+    url = str(url)
+    result = parse.urlparse(url)
+    assert all([result.scheme, result.netloc])  # check if is url
+    if check:
+        with request.urlopen(url) as response:
+            return response.getcode() == 200  # check if exists online
+    return True
 def delete_dsstore(path, files_to_delete=(".DS_Store", "__MACOSX")):
     """
     Deletes all ".DS_store" files under a specified directory.
@@ -209,12 +204,8 @@ def check_disk_space(url="https://ultralytics.com/assets/coco8.zip", path=Path.c
     Returns:
         (bool): True if there is sufficient disk space, False otherwise.
     """
-    try:
-        r = requests.head(url)  # response
-        assert r.status_code < 400, f"URL error for {url}: {r.status_code} {r.reason}"  # check response
-    except Exception:
-        return True  # requests issue, default to True
-
+    r = requests.head(url)  # response
+    assert r.status_code < 400, f"URL error for {url}: {r.status_code} {r.reason}"  # check response
     # Check file size
     gib = 1 << 30  # bytes per GiB
     data = int(r.headers.get("Content-Length", 0)) / gib  # file size (GB)
@@ -331,40 +322,32 @@ def safe_download(
         f.parent.mkdir(parents=True, exist_ok=True)  # make directory if missing
         check_disk_space(url, path=f.parent)
         for i in range(retry + 1):
-            try:
-                if curl or i > 0:  # curl download with retry, continue
-                    s = "sS" * (not progress)  # silent
-                    r = subprocess.run(["curl", "-#", f"-{s}L", url, "-o", f, "--retry", "3", "-C", "-"]).returncode
-                    assert r == 0, f"Curl return value {r}"
-                else:  # urllib download
-                    method = "torch"
-                    if method == "torch":
-                        jt.hub.download_url_to_file(url, f, progress=progress)
-                    else:
-                        with request.urlopen(url) as response, TQDM(
-                            total=int(response.getheader("Content-Length", 0)),
-                            desc=desc,
-                            disable=not progress,
-                            unit="B",
-                            unit_scale=True,
-                            unit_divisor=1024,
-                        ) as pbar:
-                            with open(f, "wb") as f_opened:
-                                for data in response:
-                                    f_opened.write(data)
-                                    pbar.update(len(data))
+            if curl or i > 0:  # curl download with retry, continue
+                s = "sS" * (not progress)  # silent
+                r = subprocess.run(["curl", "-#", f"-{s}L", url, "-o", f, "--retry", "3", "-C", "-"]).returncode
+                assert r == 0, f"Curl return value {r}"
+            else:  # urllib download
+                method = "torch"
+                if method == "torch":
+                    jt.hub.download_url_to_file(url, f, progress=progress)
+                else:
+                    with request.urlopen(url) as response, TQDM(
+                        total=int(response.getheader("Content-Length", 0)),
+                        desc=desc,
+                        disable=not progress,
+                        unit="B",
+                        unit_scale=True,
+                        unit_divisor=1024,
+                    ) as pbar:
+                        with open(f, "wb") as f_opened:
+                            for data in response:
+                                f_opened.write(data)
+                                pbar.update(len(data))
 
-                if f.exists():
-                    if f.stat().st_size > min_bytes:
-                        break  # success
-                    f.unlink()  # remove partial downloads
-            except Exception as e:
-                if i == 0 and not is_online():
-                    raise ConnectionError(emojis(f"❌  Download failure for {uri}. Environment is not online.")) from e
-                elif i >= retry:
-                    raise ConnectionError(emojis(f"❌  Download failure for {uri}. Retry limit reached.")) from e
-                LOGGER.warning(f"⚠️ Download failure, retrying {i + 1}/{retry} {uri}...")
-
+            if f.exists():
+                if f.stat().st_size > min_bytes:
+                    break  # success
+                f.unlink()  # remove partial downloads
     if unzip and f.exists() and f.suffix in {"", ".zip", ".tar", ".gz"}:
         from zipfile import is_zipfile
 

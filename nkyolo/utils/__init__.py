@@ -318,13 +318,11 @@ def plt_settings(rcparams=None, backend="Agg"):
                 plt.switch_backend(backend)
 
             # Plot with backend and always revert to original backend
-            try:
-                with plt.rc_context(rcparams):
-                    result = func(*args, **kwargs)
-            finally:
-                if switch:
-                    plt.close("all")
-                    plt.switch_backend(original_backend)
+            with plt.rc_context(rcparams):
+                result = func(*args, **kwargs)
+            if switch:
+                plt.close("all")
+                plt.switch_backend(original_backend)
             return result
 
         return wrapper
@@ -366,21 +364,16 @@ def set_logging(name="LOGGING_NAME", verbose=True):
                 """Sets up logging with UTF-8 encoding and configurable verbosity."""
                 return emojis(super().format(record))
 
-        try:
-            # Attempt to reconfigure stdout to use UTF-8 encoding if possible
-            if hasattr(sys.stdout, "reconfigure"):
-                sys.stdout.reconfigure(encoding="utf-8")
-            # For environments where reconfigure is not available, wrap stdout in a TextIOWrapper
-            elif hasattr(sys.stdout, "buffer"):
-                import io
+        # Attempt to reconfigure stdout to use UTF-8 encoding if possible
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        # For environments where reconfigure is not available, wrap stdout in a TextIOWrapper
+        elif hasattr(sys.stdout, "buffer"):
+            import io
 
-                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-            else:
-                formatter = CustomFormatter("%(message)s")
-        except Exception as e:
-            print(f"Creating custom formatter for non UTF-8 environments due to {e}")
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+        else:
             formatter = CustomFormatter("%(message)s")
-
     # Create and configure the StreamHandler with the appropriate formatter and level
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
@@ -531,12 +524,10 @@ def read_device_model() -> str:
     Returns:
         (str): Model file contents if read successfully or empty string otherwise.
     """
-    try:
-        with open("/proc/device-tree/model") as f:
-            return f.read()
-    except Exception:
+    path = Path("/proc/device-tree/model")
+    if not path.exists():
         return ""
-
+    return path.read_text()
 
 def is_ubuntu() -> bool:
     """
@@ -545,13 +536,10 @@ def is_ubuntu() -> bool:
     Returns:
         (bool): True if OS is Ubuntu, False otherwise.
     """
-    try:
-        with open("/etc/os-release") as f:
-            return "ID=ubuntu" in f.read()
-    except FileNotFoundError:
+    path = Path("/etc/os-release")
+    if not path.exists():
         return False
-
-
+    return "ID=ubuntu" in path.read_text()
 def is_colab():
     """
     Check if the current script is running inside a Google Colab notebook.
@@ -589,13 +577,8 @@ def is_docker() -> bool:
     Returns:
         (bool): True if the script is running inside a Docker container, False otherwise.
     """
-    try:
-        with open("/proc/self/cgroup") as f:
-            return "docker" in f.read()
-    except Exception:
-        return False
-
-
+    with open("/proc/self/cgroup") as f:
+        return "docker" in f.read()
 def is_raspberrypi() -> bool:
     """
     Determines if the Python environment is running on a Raspberry Pi by checking the device model information.
@@ -624,17 +607,18 @@ def is_online() -> bool:
     Returns:
         (bool): True if connection is successful, False otherwise.
     """
-    try:
-        assert str(os.getenv("YOLO_OFFLINE", "")).lower() != "true"  # check if ENV var YOLO_OFFLINE="True"
-        import socket
-
-        for dns in ("1.1.1.1", "8.8.8.8"):  # check Cloudflare and Google DNS
-            socket.create_connection(address=(dns, 80), timeout=2.0).close()
-            return True
-    except Exception:
+    if str(os.getenv("YOLO_OFFLINE", "")).lower() == "true":
         return False
+    import socket
 
-
+    for dns in ("1.1.1.1", "8.8.8.8"):  # check Cloudflare and Google DNS
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2.0)
+        err = sock.connect_ex((dns, 80))
+        sock.close()
+        if err == 0:
+            return True
+    return False
 def is_pip_package(filepath: str = __name__) -> bool:
     """
     Determines if the file at the given filepath is part of a pip package.
@@ -719,13 +703,8 @@ def get_git_origin_url():
         (str | None): The origin URL of the git repository or None if not git directory.
     """
     if IS_GIT_DIR:
-        try:
-            origin = subprocess.check_output(["git", "config", "--get", "remote.origin.url"])
-            return origin.decode().strip()
-        except subprocess.CalledProcessError:
-            return None
-
-
+        origin = subprocess.check_output(["git", "config", "--get", "remote.origin.url"])
+        return origin.decode().strip()
 def get_git_branch():
     """
     Returns the current git branch name. If not in a git repository, returns None.
@@ -734,13 +713,8 @@ def get_git_branch():
         (str | None): The current git branch name or None if not a git directory.
     """
     if IS_GIT_DIR:
-        try:
-            origin = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-            return origin.decode().strip()
-        except subprocess.CalledProcessError:
-            return None
-
-
+        origin = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        return origin.decode().strip()
 def get_default_args(func):
     """
     Returns a dictionary of default arguments for a function.
@@ -763,13 +737,8 @@ def get_ubuntu_version():
         (str): Ubuntu version or None if not an Ubuntu OS.
     """
     if is_ubuntu():
-        try:
-            with open("/etc/os-release") as f:
-                return re.search(r'VERSION_ID="(\d+\.\d+)"', f.read())[1]
-        except (FileNotFoundError, AttributeError):
-            return None
-
-
+        with open("/etc/os-release") as f:
+            return re.search(r'VERSION_ID="(\d+\.\d+)"', f.read())[1]
 def get_user_config_dir(sub_dir="nkyolo"):
     """
     Return the appropriate config directory based on the environment operating system.
@@ -951,15 +920,7 @@ class Retry(contextlib.ContextDecorator):
             """Applies retries to the decorated function or method."""
             self._attempts = 0
             while self._attempts < self.times:
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    self._attempts += 1
-                    print(f"Retry {self._attempts}/{self.times} failed: {e}")
-                    if self._attempts >= self.times:
-                        raise e
-                    time.sleep(self.delay * (2**self._attempts))  # exponential backoff delay
-
+                return func(*args, **kwargs)
         return wrapped_func
 
 
@@ -1013,11 +974,7 @@ def set_sentry():
     ):
         return
     # If sentry_sdk package is not installed then return and do not use Sentry
-    try:
-        import sentry_sdk  # noqa
-    except ImportError:
-        return
-
+    import sentry_sdk  # noqa
     def before_send(event, hint):
         """
         Modify the event before sending it to Sentry based on specific exception types and messages.
@@ -1093,24 +1050,14 @@ class JSONDict(dict):
 
     def _load(self):
         """Load the data from the JSON file into the dictionary."""
-        try:
-            if self.file_path.exists():
-                with open(self.file_path) as f:
-                    self.update(json.load(f))
-        except json.JSONDecodeError:
-            print(f"Error decoding JSON from {self.file_path}. Starting with an empty dictionary.")
-        except Exception as e:
-            print(f"Error reading from {self.file_path}: {e}")
-
+        if self.file_path.exists():
+            with open(self.file_path) as f:
+                self.update(json.load(f))
     def _save(self):
         """Save the current state of the dictionary to the JSON file."""
-        try:
-            self.file_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.file_path, "w") as f:
-                json.dump(dict(self), f, indent=2, default=self._json_default)
-        except Exception as e:
-            print(f"Error writing to {self.file_path}: {e}")
-
+        self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.file_path, "w") as f:
+            json.dump(dict(self), f, indent=2, default=self._json_default)
     @staticmethod
     def _json_default(obj):
         """Handle JSON serialization of Path objects."""

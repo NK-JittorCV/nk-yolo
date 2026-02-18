@@ -44,15 +44,13 @@ class InfiniteDataset(Dataset):
         super().__init__()
         self.dataset = dataset
         
-        # In MPI distributed training, Jittor automatically splits data per process
-        # len(dataset) already returns the size for this process's data subset
-        # Don't set total_len explicitly - let Jittor handle it automatically in MPI mode
-        # This ensures each process only sees its portion of the data
+        # In MPI, Jittor shards data internally at iteration time.
+        # Keep total_len as the global dataset length; per-rank slicing is handled by Jittor.
         dataset_len = len(dataset)
         
         # Set dataset attributes with correct values from the start
         self.set_attrs(
-            total_len=dataset_len,  # This is already the per-process size in MPI mode
+            total_len=dataset_len,  # Global length; Jittor will shard per rank in MPI mode
             batch_size=batch_size,
             shuffle=shuffle,
             drop_last=drop_last,
@@ -180,8 +178,7 @@ class InfiniteDataLoader:
         self.buffer_size = buffer_size
         
         # Calculate number of batches
-        # In distributed training, dataset is already split per process in BaseDataset
-        # So len(dataset) already returns the size for this process's data subset
+        # In MPI, Jittor shards internally; len(dataset) returns the global dataset length.
         dataset_size = len(dataset)
         self.num_batches = dataset_size // batch_size
         if not drop_last and dataset_size % batch_size != 0:
@@ -221,10 +218,7 @@ class InfiniteDataLoader:
 
     def __next__(self):
         """Get next batch."""
-        try:
-            batch = next(self.iterator)
-        except StopIteration:
-            raise StopIteration
+        batch = next(self.iterator)
         return batch
 
     def reset(self):
@@ -270,6 +264,9 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     else:
         stride = int(stride)
 
+    # Jittor MPI automatically shards datasets per rank. Avoid manual splitting in MPI mode.
+    split_by_rank = (mode == "train") and (not getattr(jt, "in_mpi", False))
+
     return YOLODataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
@@ -286,7 +283,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         classes=cfg.classes,
         data=data,
         fraction=cfg.fraction if mode == "train" else 1.0,
-        split_by_rank=(mode == "train"),
+        split_by_rank=split_by_rank,
     )
 
 

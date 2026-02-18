@@ -13,6 +13,7 @@ from typing import Optional
 import cv2
 import numpy as np
 import psutil
+import jittor as jt
 from jittor.dataset import Dataset
 
 from nkyolo.data.utils import FORMATS_HELP_MSG, HELP_URL, IMG_FORMATS
@@ -77,9 +78,9 @@ class BaseDataset(Dataset):
         self.labels = self.get_labels()
         self.update_labels(include_class=classes)  # single_cls and include_class
         
-        # In MPI distributed training, split data per process.
-        # Ensure all ranks get the same number of samples to avoid DDP deadlocks.
-        if self.split_by_rank and RANK >= 0:
+        # In MPI distributed training, Jittor Dataset already shards data per process.
+        # Only do manual splitting when not running under MPI.
+        if self.split_by_rank and RANK >= 0 and not getattr(jt, "in_mpi", False):
             # Get world size from MPI environment
             if "OMPI_COMM_WORLD_SIZE" in os.environ:
                 world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
@@ -149,26 +150,23 @@ class BaseDataset(Dataset):
 
     def get_img_files(self, img_path):
         """Read image files."""
-        try:
-            f = []  # image files
-            for p in img_path if isinstance(img_path, list) else [img_path]:
-                p = Path(p)  # os-agnostic
-                if p.is_dir():  # dir
-                    f += glob.glob(str(p / "**" / "*.*"), recursive=True)
-                    # F = list(p.rglob('*.*'))  # pathlib
-                elif p.is_file():  # file
-                    with open(p) as t:
-                        t = t.read().strip().splitlines()
-                        parent = str(p.parent) + os.sep
-                        f += [x.replace("./", parent) if x.startswith("./") else x for x in t]  # local to global path
-                        # F += [p.parent / x.lstrip(os.sep) for x in t]  # local to global path (pathlib)
-                else:
-                    raise FileNotFoundError(f"{self.prefix}{p} does not exist")
-            im_files = sorted(x.replace("/", os.sep) for x in f if x.split(".")[-1].lower() in IMG_FORMATS)
-            # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in IMG_FORMATS])  # pathlib
-            assert im_files, f"{self.prefix}No images found in {img_path}. {FORMATS_HELP_MSG}"
-        except Exception as e:
-            raise FileNotFoundError(f"{self.prefix}Error loading data from {img_path}\n{HELP_URL}") from e
+        f = []  # image files
+        for p in img_path if isinstance(img_path, list) else [img_path]:
+            p = Path(p)  # os-agnostic
+            if p.is_dir():  # dir
+                f += glob.glob(str(p / "**" / "*.*"), recursive=True)
+                # F = list(p.rglob('*.*'))  # pathlib
+            elif p.is_file():  # file
+                with open(p) as t:
+                    t = t.read().strip().splitlines()
+                    parent = str(p.parent) + os.sep
+                    f += [x.replace("./", parent) if x.startswith("./") else x for x in t]  # local to global path
+                    # F += [p.parent / x.lstrip(os.sep) for x in t]  # local to global path (pathlib)
+            else:
+                raise FileNotFoundError(f"{self.prefix}{p} does not exist")
+        im_files = sorted(x.replace("/", os.sep) for x in f if x.split(".")[-1].lower() in IMG_FORMATS)
+        # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in IMG_FORMATS])  # pathlib
+        assert im_files, f"{self.prefix}No images found in {img_path}. {FORMATS_HELP_MSG}"
         if self.fraction < 1:
             im_files = im_files[: round(len(im_files) * self.fraction)]  # retain a fraction of the dataset
         return im_files
@@ -197,12 +195,7 @@ class BaseDataset(Dataset):
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
         if im is None:  # not cached in RAM
             if fn.exists():  # load npy
-                try:
-                    im = np.load(fn)
-                except Exception as e:
-                    LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
-                    Path(fn).unlink(missing_ok=True)
-                    im = cv2.imread(f)  # BGR
+                im = np.load(fn)
             else:  # read image
                 im = cv2.imread(f)  # BGR
             if im is None:

@@ -89,16 +89,14 @@ def spaces_in_path(path):
                 tmp_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, tmp_path)
 
-            try:
-                # Yield the temporary path
-                yield str(tmp_path) if string else tmp_path
+            # Yield the temporary path
+            yield str(tmp_path) if string else tmp_path
 
-            finally:
-                # Copy file/directory back
-                if tmp_path.is_dir():
-                    shutil.copytree(tmp_path, path, dirs_exist_ok=True)
-                elif tmp_path.is_file():
-                    shutil.copy2(tmp_path, path)  # Copy back the file
+            # Copy file/directory back
+            if tmp_path.is_dir():
+                shutil.copytree(tmp_path, path, dirs_exist_ok=True)
+            elif tmp_path.is_file():
+                shutil.copy2(tmp_path, path)  # Copy back the file
 
     else:
         # If there are no spaces, just yield the original path

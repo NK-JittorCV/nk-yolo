@@ -40,13 +40,8 @@ def imwrite(filename: str, img: np.ndarray, params=None):
     Returns:
         (bool): True if the file was written, False otherwise.
     """
-    try:
-        cv2.imencode(Path(filename).suffix, img, params)[1].tofile(filename)
-        return True
-    except Exception:
-        return False
-
-
+    cv2.imencode(Path(filename).suffix, img, params)[1].tofile(filename)
+    return True
 def imshow(winname: str, mat: np.ndarray):
     """
     Displays an image in the specified window.
@@ -94,9 +89,4 @@ def jittor_save(*args, **kwargs):
         **kwargs (Any): Keyword arguments to pass to jt.save.
     """
     for i in range(4):  # 3 retries
-        try:
-            return _jittor_save(*args, **kwargs)
-        except RuntimeError as e:  # unable to save, possibly waiting for device to flush or antivirus scan
-            if i == 3:
-                raise e
-            time.sleep((2**i) / 2)  # exponential standoff: 0.5s, 1.0s, 2.0s
+        return _jittor_save(*args, **kwargs)

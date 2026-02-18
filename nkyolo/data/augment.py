@@ -2,6 +2,7 @@
 # Refer to https://github.com/ultralytics/ultralytics/blob/main/ultralytics/data/augment.py
 
 import math
+import os
 import random
 from copy import deepcopy
 from typing import Tuple, Union, Any
@@ -1936,82 +1937,86 @@ class Albumentations:
         self.transform = None
         prefix = colorstr("albumentations: ")
 
-        try:
-            import albumentations as A
+        os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+        import albumentations as A
 
-            check_version(A.__version__, "1.0.3", hard=True)  # version requirement
+        check_version(A.__version__, "1.0.3", hard=True)  # version requirement
 
-            # List of possible spatial transforms
-            spatial_transforms = {
-                "Affine",
-                "BBoxSafeRandomCrop",
-                "CenterCrop",
-                "CoarseDropout",
-                "Crop",
-                "CropAndPad",
-                "CropNonEmptyMaskIfExists",
-                "D4",
-                "ElasticTransform",
-                "Flip",
-                "GridDistortion",
-                "GridDropout",
-                "HorizontalFlip",
-                "Lambda",
-                "LongestMaxSize",
-                "MaskDropout",
-                "MixUp",
-                "Morphological",
-                "NoOp",
-                "OpticalDistortion",
-                "PadIfNeeded",
-                "Perspective",
-                "PiecewiseAffine",
-                "PixelDropout",
-                "RandomCrop",
-                "RandomCropFromBorders",
-                "RandomGridShuffle",
-                "RandomResizedCrop",
-                "RandomRotate90",
-                "RandomScale",
-                "RandomSizedBBoxSafeCrop",
-                "RandomSizedCrop",
-                "Resize",
-                "Rotate",
-                "SafeRotate",
-                "ShiftScaleRotate",
-                "SmallestMaxSize",
-                "Transpose",
-                "VerticalFlip",
-                "XYMasking",
-            }  # from https://albumentations.ai/docs/getting_started/transforms_and_targets/#spatial-level-transforms
+        # List of possible spatial transforms
+        spatial_transforms = {
+            "Affine",
+            "BBoxSafeRandomCrop",
+            "CenterCrop",
+            "CoarseDropout",
+            "Crop",
+            "CropAndPad",
+            "CropNonEmptyMaskIfExists",
+            "D4",
+            "ElasticTransform",
+            "Flip",
+            "GridDistortion",
+            "GridDropout",
+            "HorizontalFlip",
+            "Lambda",
+            "LongestMaxSize",
+            "MaskDropout",
+            "MixUp",
+            "Morphological",
+            "NoOp",
+            "OpticalDistortion",
+            "PadIfNeeded",
+            "Perspective",
+            "PiecewiseAffine",
+            "PixelDropout",
+            "RandomCrop",
+            "RandomCropFromBorders",
+            "RandomGridShuffle",
+            "RandomResizedCrop",
+            "RandomRotate90",
+            "RandomScale",
+            "RandomSizedBBoxSafeCrop",
+            "RandomSizedCrop",
+            "Resize",
+            "Rotate",
+            "SafeRotate",
+            "ShiftScaleRotate",
+            "SmallestMaxSize",
+            "Transpose",
+            "VerticalFlip",
+            "XYMasking",
+        }  # from https://albumentations.ai/docs/getting_started/transforms_and_targets/#spatial-level-transforms
 
-            # Transforms
-            T = [
-                A.Blur(p=0.01),
-                A.MedianBlur(p=0.01),
-                A.ToGray(p=0.01),
-                A.CLAHE(p=0.01),
-                A.RandomBrightnessContrast(p=0.0),
-                A.RandomGamma(p=0.0),
-                A.ImageCompression(quality_lower=75, p=0.0),
-            ]
+        # Transforms
+        T = [
+            A.Blur(p=0.01),
+            A.MedianBlur(p=0.01),
+            A.ToGray(p=0.01),
+            A.CLAHE(p=0.01),
+            A.RandomBrightnessContrast(p=0.0),
+            A.RandomGamma(p=0.0),
+            A.ImageCompression(quality_lower=75, p=0.0),
+        ]
 
-            # Compose transforms
-            self.contains_spatial = any(transform.__class__.__name__ in spatial_transforms for transform in T)
-            self.transform = (
-                A.Compose(T, bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"]))
-                if self.contains_spatial
-                else A.Compose(T)
-            )
-            if hasattr(self.transform, "set_random_seed"):
-                # Required for deterministic transforms in albumentations>=1.4.21
-                self.transform.set_random_seed(jittor.random.get_seed())
-            LOGGER.info(prefix + ", ".join(f"{x}".replace("always_apply=False, ", "") for x in T if x.p))
-        except ImportError:  # package not installed, skip
-            pass
-        except Exception as e:
-            LOGGER.info(f"{prefix}{e}")
+        # Compose transforms
+        active = [t for t in T if getattr(t, "p", 0)]
+        self.contains_spatial = any(t.__class__.__name__ in spatial_transforms for t in active)
 
+        compose_kwargs = {}
+        if self.contains_spatial:
+            compose_kwargs["bbox_params"] = A.BboxParams(format="yolo", label_fields=["class_labels"])
+
+        if active and check_version(A.__version__, ">=1.4.21"):
+            # Deterministic transforms for albumentations>=1.4.21
+            seed_text = os.getenv("NKYOLO_GLOBAL_SEED", "")
+            if seed_text.lstrip("-").isdigit():
+                compose_kwargs["seed"] = int(seed_text)
+
+        self.transform = A.Compose(T, **compose_kwargs)
+        active_str = ", ".join(f"{x}".replace("always_apply=False, ", "") for x in active) if active else "None"
+        LOGGER.info(prefix + active_str)
+        print(prefix + active_str)
+        
+        
     def __call__(self, labels):
         """
         Applies Albumentations transformations to input labels.

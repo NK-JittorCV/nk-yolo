@@ -22,6 +22,7 @@ from nkyolo.utils import (
     DEFAULT_CFG_DICT,
     DEFAULT_CFG_KEYS,
     PYTHON_VERSION,
+    RANK,
     __version__,
     colorstr,
 )
@@ -53,12 +54,10 @@ def autocast(enabled: bool, device: str = "cuda"):
     else:
         jt.flags.auto_mixed_precision_level = 0
     
-    try:
-        yield
-    finally:
-        # 恢复之前的精度设置，而不是总是设为 0
-        # 这样可以保持跨 epoch 的精度一致性
-        jt.flags.auto_mixed_precision_level = prev_amp_level
+    yield
+    # 恢复之前的精度设置，而不是总是设为 0
+    # 这样可以保持跨 epoch 的精度一致性
+    jt.flags.auto_mixed_precision_level = prev_amp_level
 
 def get_cpu_info():
     """Return a string with system CPU information, i.e. 'Apple M2'."""
@@ -317,6 +316,14 @@ def get_flops(model, imgsz=640):
     from nkyolo.utils.jittor_profile import profile as unified_profile
 
     model = de_parallel(model)
+    disable_flops = str(os.getenv("NKYOLO_NO_FLOPS", "")).lower() in ("1", "true", "yes")
+    force_flops = str(os.getenv("NKYOLO_FORCE_FLOPS", "")).lower() in ("1", "true", "yes")
+    if disable_flops and not force_flops:
+        return 0.0
+    if not force_flops:
+        for m in model.modules():
+            if hasattr(m, "f"):
+                return 0.0
     params = list(model.parameters())
     if not params:
         return 0.0
@@ -328,8 +335,28 @@ def get_flops(model, imgsz=640):
     if _TORCH_AVAILABLE and isinstance(p, torch.Tensor):
         im_full = torch.empty((1, int(p.shape[1]), h, w))
     else:
-        ch = int(model.yaml.get("ch", 3))
-        im_full = jt.empty(1, ch, h, w)
+        yaml = model.yaml if isinstance(getattr(model, "yaml", None), dict) else {}
+        ch = yaml.get("ch", None)
+        if isinstance(ch, (list, tuple)) and ch:
+            ch = ch[0]
+        if not isinstance(ch, (int, np.integer)) or ch <= 0:
+            ch = None
+        if ch is None and hasattr(model, "modules"):
+            for m in model.modules():
+                in_ch = getattr(m, "in_channels", None)
+                if isinstance(in_ch, (int, np.integer)) and in_ch > 0:
+                    ch = int(in_ch)
+                    break
+        if ch is None:
+            for p_i in params:
+                shape = getattr(p_i, "shape", None)
+                if isinstance(shape, (list, tuple)) and len(shape) >= 2:
+                    ch = int(shape[1])
+                    if ch > 0:
+                        break
+        if ch is None:
+            ch = 3
+        im_full = jt.empty(1, int(ch), h, w)
 
     flops_result, _ = unified_profile(model, inputs=[im_full], verbose=False)
     return flops_result / 1e9
@@ -398,10 +425,7 @@ def scale_img(img, ratio=1.0, same_shape=False, gs=32):
 def copy_attr(a, b, include=(), exclude=()):
     """Copies attributes from object 'b' to object 'a', with options to include/exclude certain attributes."""
     for k, v in b.__dict__.items():
-        if (len(include) and k not in include) or k.startswith("_") or k in exclude:
-            continue
-        else:
-            setattr(a, k, v)
+        setattr(a, k, v)
 
 
 def intersect_dicts(da, db, exclude=()):
@@ -436,6 +460,7 @@ def one_cycle(y1=0.0, y2=1.0, steps=100):
 
 def init_seeds(seed=0, deterministic=False):
     """Initialize RNG seeds and configure deterministic settings for Jittor."""
+    os.environ["NKYOLO_GLOBAL_SEED"] = str(int(seed))
     # Set Python's random seed
     random.seed(seed)
     
@@ -491,35 +516,39 @@ class ModelEMA:
     Updated Exponential Moving Average (EMA) from https://github.com/rwightman/pytorch-image-models.
     Keeps a moving average of everything in the model state_dict (parameters and buffers).
     """
-
     def __init__(self, model, decay=0.9999, tau=2000, updates=0):
         """Initialize EMA for 'model' with given arguments."""
-        self.ema = de_parallel(model).clone().eval()  # FP32 EMA
-        self.updates = updates  # number of EMA updates
+        # Only keep EMA on rank0 (or single-process) to avoid multi-rank duplication.
+        self.enabled = RANK in (-1, 0)
+
+        self.ema = None
+        self.updates = updates if self.enabled else 0  # number of EMA updates
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp
-        
-        # Disable gradient computation for EMA model parameters
+        if not self.enabled:
+            return
+        self.ema = deepcopy(model).eval()
         for p in self.ema.parameters():
-            p.requires_grad = False  # Use requires_grad property instead of requires_grad_()
-            
-        self.enabled = True
+            p.stop_grad()
 
     def update(self, model):
         """Update EMA parameters."""
-        if self.enabled:
-            self.updates += 1
-            d = self.decay(self.updates)
-
-            msd = de_parallel(model).state_dict()  # model state_dict
+        if not self.enabled or self.ema is None:
+            return
+        
+        self.updates += 1
+        with jt.no_grad():
+            msd = model.state_dict()
+            d = self.decay(self.updates) if callable(self.decay) else self.decay
             for k, v in self.ema.state_dict().items():
-                if isinstance(v, jt.Var) and str(v.dtype).startswith(('float', 'half')):  # FP16 and FP32
-                    if k in msd:  # 检查键是否存在
-                        v.update(v * d + (1 - d) * msd[k].detach())
+                if v.dtype.is_float() and k in msd:
+                    v.update(v * d + (1 - d) * msd[k].detach())
+                    v.sync() 
 
     def update_attr(self, model, include=(), exclude=("process_group", "reducer")):
         """Updates attributes and saves stripped model with optimizer removed."""
-        if self.enabled:
+        if self.enabled and self.ema is not None:
             copy_attr(self.ema, model, include, exclude)
+
 
 
 def strip_optimizer(f: Union[str, Path] = "best.pkl", s: str = "", updates: dict = None) -> dict:
@@ -724,7 +753,7 @@ def profile(input, ops, n=10, device=None):
             else:
                 x = x.to(device)
 
-        x.requires_grad = True
+        x.start_grad()
 
         for m in ops if isinstance(ops, list) else [ops]:
             if not isinstance(m, nn.Module):

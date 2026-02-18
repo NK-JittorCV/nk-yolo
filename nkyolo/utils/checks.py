@@ -95,13 +95,7 @@ def parse_version(version="0.0.0") -> tuple:
     Returns:
         (tuple): Tuple of integers representing the numeric part of the version and the extra string, i.e. (2, 0, 1)
     """
-    try:
-        return tuple(map(int, re.findall(r"\d+", version)[:3]))  # '2.0.1+cpu' -> (2, 0, 1)
-    except Exception as e:
-        LOGGER.warning(f"WARNING ⚠️ failure for parse_version({version}), returning (0, 0, 0): {e}")
-        return 0, 0, 0
-
-
+    return tuple(map(int, re.findall(r"\d+", version)[:3]))  # '2.0.1+cpu' -> (2, 0, 1)
 def is_ascii(s) -> bool:
     """
     Check if a string is composed of only ASCII characters.
@@ -214,15 +208,8 @@ def check_version(
         LOGGER.warning(f"WARNING ⚠️ invalid check_version({current}, {required}) requested, please check values.")
         return True
     elif not current[0].isdigit():  # current is package name rather than version string, i.e. current='nkyolo'
-        try:
-            name = current  # assigned package name to 'name' arg
-            current = metadata.version(current)  # get version string from package name
-        except metadata.PackageNotFoundError as e:
-            if hard:
-                raise ModuleNotFoundError(emojis(f"WARNING ⚠️ {current} package is required but not installed")) from e
-            else:
-                return False
-
+        name = current  # assigned package name to 'name' arg
+        current = metadata.version(current)  # get version string from package name
     if not required:  # if required is '' or None
         return True
 
@@ -238,7 +225,11 @@ def check_version(
     result = True
     c = parse_version(current)  # '1.2.3' -> (1, 2, 3)
     for r in required.strip(",").split(","):
-        op, version = re.match(r"([^0-9]*)([\d.]+)", r).groups()  # split '>=22.04' -> ('>=', '22.04')
+        m = re.match(r"([^0-9]*)([\d.]+)", r)  # split '>=22.04' -> ('>=', '22.04')
+        if not m:
+            LOGGER.warning(f"WARNING ⚠️ invalid requirement '{r}' in check_version({current}, {required})")
+            continue
+        op, version = m.groups()
         if not op:
             op = ">="  # assume >= if no op passed
         v = parse_version(version)  # '1.2.3' -> (1, 2, 3)
@@ -273,15 +264,13 @@ def check_latest_pypi_version(package_name="nkyolo"):
     Returns:
         (str): The latest version of the package.
     """
-    try:
-        requests.packages.urllib3.disable_warnings()  # Disable the InsecureRequestWarning
-        response = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=3)
-        if response.status_code == 200:
-            return response.json()["info"]["version"]
-    except Exception:
-        return None
-
-
+    requests.packages.urllib3.disable_warnings()  # Disable the InsecureRequestWarning
+    response = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=3)
+    if response.status_code == 200:
+        info = response.json().get("info", {})
+        version = info.get("version", "")
+        return version if isinstance(version, str) else ""
+    return ""
 def check_pip_update_available():
     """
     Checks if a new version of the NK-YOLO package is available on PyPI.
@@ -290,17 +279,14 @@ def check_pip_update_available():
         (bool): True if an update is available, False otherwise.
     """
     if ONLINE and IS_PIP_PACKAGE:
-        try:
-            from nkyolo import __version__
+        from nkyolo import __version__
 
-            latest = check_latest_pypi_version()
-            if check_version(__version__, f"<{latest}"):  # check if current version is < latest version
-                LOGGER.info(
-                    f"Update with 'pip install -U nkyolo'"
-                )
-                return True
-        except Exception:
-            pass
+        latest = check_latest_pypi_version()
+        if latest and latest[0].isdigit() and check_version(__version__, f"<{latest}"):
+            LOGGER.info(
+                f"Update with 'pip install -U nkyolo'"
+            )
+            return True
     return False
 
 
@@ -389,11 +375,7 @@ def check_requirements(requirements=ROOT.parent / "requirements.txt", exclude=()
         r_stripped = r.split("/")[-1].replace(".git", "")  # replace git+https://org/repo.git -> 'repo'
         match = re.match(r"([a-zA-Z0-9-_]+)([<>!=~]+.*)?", r_stripped)
         name, required = match[1], match[2].strip() if match[2] else ""
-        try:
-            assert check_version(metadata.version(name), required)  # exception if requirements not met
-        except (AssertionError, metadata.PackageNotFoundError):
-            pkgs.append(r)
-
+        assert check_version(metadata.version(name), required)  # exception if requirements not met
     @Retry(times=2, delay=1)
     def attempt_install(packages, commands):
         """Attempt pip install command with retries on failure."""
@@ -404,18 +386,14 @@ def check_requirements(requirements=ROOT.parent / "requirements.txt", exclude=()
         if install and AUTOINSTALL:  # check environment variable
             n = len(pkgs)  # number of packages updates
             LOGGER.info(f"{prefix} nkyolo requirement{'s' * (n > 1)} {pkgs} not found, attempting AutoUpdate...")
-            try:
-                t = time.time()
-                assert ONLINE, "AutoUpdate skipped (offline)"
-                LOGGER.info(attempt_install(s, cmds))
-                dt = time.time() - t
-                LOGGER.info(
-                    f"{prefix} AutoUpdate success ✅ {dt:.1f}s, installed {n} package{'s' * (n > 1)}: {pkgs}\n"
-                    f"{prefix} ⚠️ {colorstr('bold', 'Restart runtime or rerun command for updates to take effect')}\n"
-                )
-            except Exception as e:
-                LOGGER.warning(f"{prefix} ❌ {e}")
-                return False
+            t = time.time()
+            assert ONLINE, "AutoUpdate skipped (offline)"
+            LOGGER.info(attempt_install(s, cmds))
+            dt = time.time() - t
+            LOGGER.info(
+                f"{prefix} AutoUpdate success ✅ {dt:.1f}s, installed {n} package{'s' * (n > 1)}: {pkgs}\n"
+                f"{prefix} ⚠️ {colorstr('bold', 'Restart runtime or rerun command for updates to take effect')}\n"
+            )
         else:
             return False
 
@@ -548,21 +526,14 @@ def check_is_path_safe(basedir, path):
 
 def check_imshow(warn=False):
     """Check if environment supports image displays."""
-    try:
-        if LINUX:
-            assert not IS_COLAB and not IS_KAGGLE
-            assert "DISPLAY" in os.environ, "The DISPLAY environment variable isn't set."
-        cv2.imshow("test", np.zeros((8, 8, 3), dtype=np.uint8))  # show a small 8-pixel image
-        cv2.waitKey(1)
-        cv2.destroyAllWindows()
-        cv2.waitKey(1)
-        return True
-    except Exception as e:
-        if warn:
-            LOGGER.warning(f"WARNING ⚠️ Environment does not support cv2.imshow() or PIL Image.show()\n{e}")
-        return False
-
-
+    if LINUX:
+        assert not IS_COLAB and not IS_KAGGLE
+        assert "DISPLAY" in os.environ, "The DISPLAY environment variable isn't set."
+    cv2.imshow("test", np.zeros((8, 8, 3), dtype=np.uint8))  # show a small 8-pixel image
+    cv2.waitKey(1)
+    cv2.destroyAllWindows()
+    cv2.waitKey(1)
+    return True
 def check_yolo(verbose=True, device=""):
     """Return a human-readable YOLO software and hardware summary."""
     import psutil
@@ -581,12 +552,9 @@ def check_yolo(verbose=True, device=""):
         ram = psutil.virtual_memory().total
         total, used, free = shutil.disk_usage("/")
         s = f"({os.cpu_count()} CPUs, {ram / gib:.1f} GB RAM, {(total - free) / gib:.1f}/{total / gib:.1f} GB disk)"
-        try:
-            from IPython import display
+        from IPython import display
 
-            display.clear_output()  # clear display if notebook
-        except ImportError:
-            pass
+        display.clear_output()  # clear display if notebook
     else:
         s = ""
 
@@ -623,12 +591,8 @@ def collect_system_info():
 
     package_info = {}
     for r in parse_requirements(package="nkyolo"):
-        try:
-            current = metadata.version(r.name)
-            is_met = "✅ " if check_version(current, str(r.specifier), name=r.name, hard=True) else "❌ "
-        except metadata.PackageNotFoundError:
-            current = "(not installed)"
-            is_met = "❌ "
+        current = metadata.version(r.name)
+        is_met = "✅ " if check_version(current, str(r.specifier), name=r.name, hard=True) else "❌ "
         package_info[r.name] = f"{is_met}{current}{r.specifier}"
         LOGGER.info(f"{r.name:<20}{package_info[r.name]}")
 
@@ -690,37 +654,16 @@ def check_amp(model):
     prefix = colorstr("AMP: ")
     LOGGER.info(f"{prefix}running Automatic Mixed Precision (AMP) checks...")
     warning_msg = "Setting 'amp=True'. If you experience zero-mAP or NaN losses you can disable AMP with amp=False."
-    try:
-        from nkyolo import YOLO
+    from nkyolo import YOLO
 
-        assert amp_allclose(YOLO("yolo11n.pt"), im)
-        LOGGER.info(f"{prefix}checks passed ✅")
-    except ConnectionError:
-        LOGGER.warning(
-            f"{prefix}checks skipped ⚠️. " f"Offline and unable to download YOLO11n for AMP checks. {warning_msg}"
-        )
-    except (AttributeError, ModuleNotFoundError):
-        LOGGER.warning(
-            f"{prefix}checks skipped ⚠️. "
-            f"Unable to load YOLO11n for AMP checks due to possible NK-YOLO package modifications. {warning_msg}"
-        )
-    except AssertionError:
-        LOGGER.warning(
-            f"{prefix}checks failed ❌. Anomalies were detected with AMP on your system that may lead to "
-            f"NaN losses or zero-mAP results, so AMP will be disabled during training."
-        )
-        return False
+    assert amp_allclose(YOLO("yolo11n.pt"), im)
+    LOGGER.info(f"{prefix}checks passed ✅")
     return True
 
 
 def git_describe(path=ROOT):  # path must be a directory
     """Return human-readable git description, i.e. v5.0-5-g3e25f1e https://git-scm.com/docs/git-describe."""
-    try:
-        return subprocess.check_output(f"git -C {path} describe --tags --long --always", shell=True).decode()[:-1]
-    except Exception:
-        return ""
-
-
+    return subprocess.check_output(f"git -C {path} describe --tags --long --always", shell=True).decode()[:-1]
 def print_args(args: Optional[dict] = None, show_file=True, show_func=False):
     """Print function arguments (optional args dict)."""
 
@@ -733,10 +676,7 @@ def print_args(args: Optional[dict] = None, show_file=True, show_func=False):
     if args is None:  # get args automatically
         args, _, _, frm = inspect.getargvalues(x)
         args = {k: v for k, v in frm.items() if k in args}
-    try:
-        file = Path(file).resolve().relative_to(ROOT).with_suffix("")
-    except ValueError:
-        file = Path(file).stem
+    file = Path(file).resolve().relative_to(ROOT).with_suffix("")
     s = (f"{file}: " if show_file else "") + (f"{func}: " if show_func else "")
     LOGGER.info(colorstr(s) + ", ".join(f"{k}={strip_auth(v)}" for k, v in args.items()))
 
@@ -748,21 +688,15 @@ def cuda_device_count() -> int:
     Returns:
         (int): The number of NVIDIA GPUs available.
     """
-    try:
-        # Run the nvidia-smi command and capture its output
-        output = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=count", "--format=csv,noheader,nounits"], encoding="utf-8"
-        )
+    # Run the nvidia-smi command and capture its output
+    output = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=count", "--format=csv,noheader,nounits"], encoding="utf-8"
+    )
 
-        # Take the first line and strip any leading/trailing white space
-        first_line = output.strip().split("\n")[0]
+    # Take the first line and strip any leading/trailing white space
+    first_line = output.strip().split("\n")[0]
 
-        return int(first_line)
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
-        # If the command fails, nvidia-smi is not found, or output is not an integer, assume no GPUs are available
-        return 0
-
-
+    return int(first_line)
 def cuda_is_available() -> bool:
     """
     Check if CUDA is available in the environment.

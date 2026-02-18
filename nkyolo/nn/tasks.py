@@ -278,7 +278,7 @@ class BaseModel(nn.Module):
         m = self.model[-1]  # Detect()
         if isinstance(m, (Detect, WorldDetect, v10Detect)):  # includes all Detect subclasses
             m.stride = fn(m.stride)
-            m.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
+            m.stride.stop_grad()  # stride is a configuration parameter, not a trainable weight
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
         return self
@@ -399,7 +399,7 @@ class DetectionModel(BaseModel):
                 """Performs a forward pass through the model for stride calculation."""
                 # Forward through backbone and neck to get feature maps
                 y = []  # outputs
-                for module in self.model[:-1]:  # except the head part
+                for module in self.model[:-1]:  # excluding the head part
                     if module.f != -1:  # if not from previous layer
                         x = y[module.f] if isinstance(module.f, int) else [x if j == -1 else y[j] for j in module.f]
                     x = module(x)  # run
@@ -425,12 +425,12 @@ class DetectionModel(BaseModel):
                     return head_input
 
             m.stride = jt.Var([s / x.shape[-2] for x in _execute(jt.zeros(1, ch, s, s))])  # execute
-            m.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
+            m.stride.stop_grad()  # stride is a configuration parameter, not a trainable weight
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
             self.stride = jt.Var([32])  # default stride for i.e. RTDETR
-            self.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
+            self.stride.stop_grad()  # stride is a configuration parameter, not a trainable weight
 
         # Init weights, biases
         initialize_weights(self)
@@ -569,7 +569,7 @@ class ClassificationModel(BaseModel):
             raise ValueError("nc not specified. Must specify nc in model.yaml or function arguments.")
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.stride = jt.Var([1])  # no stride constraints
-        self.stride.requires_grad = False  # stride is a configuration parameter, not a trainable weight
+        self.stride.stop_grad()  # stride is a configuration parameter, not a trainable weight
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.info()
 
@@ -705,7 +705,7 @@ class RTDETRDetectionModel(DetectionModel):
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
-        for m in self.model[:-1]:  # except the head part
+        for m in self.model[:-1]:  # excluding the head part
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
@@ -773,7 +773,7 @@ class WorldModel(DetectionModel):
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
-        for m in self.model:  # except the head part
+        for m in self.model:  # excluding the head part
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
@@ -861,23 +861,21 @@ def temporary_modules(modules=None, attributes=None):
     import sys
     from importlib import import_module
 
-    try:
-        # Set attributes in sys.modules under their old name
-        for old, new in attributes.items():
-            old_module, old_attr = old.rsplit(".", 1)
-            new_module, new_attr = new.rsplit(".", 1)
-            setattr(import_module(old_module), old_attr, getattr(import_module(new_module), new_attr))
+    # Set attributes in sys.modules under their old name
+    for old, new in attributes.items():
+        old_module, old_attr = old.rsplit(".", 1)
+        new_module, new_attr = new.rsplit(".", 1)
+        setattr(import_module(old_module), old_attr, getattr(import_module(new_module), new_attr))
 
-        # Set modules in sys.modules under their old name
-        for old, new in modules.items():
-            sys.modules[old] = import_module(new)
+    # Set modules in sys.modules under their old name
+    for old, new in modules.items():
+        sys.modules[old] = import_module(new)
 
-        yield
-    finally:
-        # Remove the temporary module paths
-        for old in modules:
-            if old in sys.modules:
-                del sys.modules[old]
+    yield
+    # Remove the temporary module paths
+    for old in modules:
+        if old in sys.modules:
+            del sys.modules[old]
 
 
 class SafeClass:

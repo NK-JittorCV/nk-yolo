@@ -12,6 +12,7 @@ import math
 import os
 import pickle
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -283,13 +284,16 @@ class BaseTrainer:
             # Command
             cmd, file, env = generate_ddp_command(world_size, self)
             LOGGER.info(f'{colorstr("DDP:")} debug command {" ".join(cmd)}')
-            try:
-                subprocess.run(cmd, check=True, env=env)
-            finally:
-                ddp_cleanup(self, str(file))
+            subprocess.run(cmd, check=True, env=env)
+            ddp_cleanup(self, str(file))
 
         else:
-            self._do_train(world_size)
+            try:
+                self._do_train(world_size)
+            except Exception as e:
+                if self._is_oom_error(e):
+                    self._abort_all_on_oom(e)
+                raise
 
     def _get_world_size(self, default=1):
         """Return world size from MPI/torch env vars, or default."""
@@ -301,6 +305,29 @@ class BaseTrainer:
             return int(os.environ["WORLD_SIZE"])
         return default
 
+    @staticmethod
+    def _is_oom_error(exc: BaseException) -> bool:
+        """Return True when exception message indicates CUDA/Jittor OOM."""
+        msg = str(exc).lower()
+        oom_markers = (
+            "out of memory",
+            "cuda out of memory",
+            "cudaerrormemoryallocation",
+            "memory allocation",
+            "cudnn_status_alloc_failed",
+            "cuda malloc",
+            "cuda malloc failed",
+        )
+        return any(x in msg for x in oom_markers)
+
+    def _abort_all_on_oom(self, exc: BaseException):
+        """Terminate current process immediately on OOM so MPI can tear down all ranks."""
+        rank_msg = f"rank {RANK}" if RANK >= 0 else "single process"
+        LOGGER.error(f"CUDA OOM detected on {rank_msg}. Terminating all training processes immediately.")
+        LOGGER.error(str(exc))
+        self._clear_memory()
+        os.kill(os.getpid(), signal.SIGKILL)
+
     def _ddp_barrier(self, tag: str, max_wait: float = 300.0):
         """Filesystem-based barrier for MPI DDP to keep ranks in sync."""
         if RANK == -1:
@@ -311,13 +338,7 @@ class BaseTrainer:
         barrier_dir = self.save_dir / "_ddp_barrier"
         barrier_dir.mkdir(parents=True, exist_ok=True)
         flag = barrier_dir / f"{tag}_rank{RANK}"
-        try:
-            flag.write_text("1")
-        except Exception:
-            # If we can't write, just return to avoid hard deadlock.
-            LOGGER.warning(f"Rank {RANK}: Unable to write barrier flag {flag}")
-            return
-
+        flag.write_text("1")
         start = time.time()
         while time.time() - start < max_wait:
             if all((barrier_dir / f"{tag}_rank{r}").exists() for r in range(world_size)):
@@ -329,11 +350,7 @@ class BaseTrainer:
 
         if RANK == 0:
             for r in range(world_size):
-                try:
-                    (barrier_dir / f"{tag}_rank{r}").unlink()
-                except FileNotFoundError:
-                    pass
-
+                (barrier_dir / f"{tag}_rank{r}").unlink()
     def _broadcast_object(self, obj, src=0):
         """Broadcast an object from source rank to all ranks in MPI environment.
         
@@ -390,8 +407,8 @@ class BaseTrainer:
 
     def _setup_ddp(self, world_size):
         """Initializes and sets the distributed training parameters for Jittor."""
-        # Jittor automatically handles distributed setup via MPI
-        # Set device based on rank using CUDA_VISIBLE_DEVICES environment variable
+        # Jittor automatically handles distributed setup via MPI.
+        # CUDA_VISIBLE_DEVICES should list all GPUs for the job; LOCAL_RANK selects the device internally.
         if RANK >= 0:
             # CRITICAL: Disable Jittor's parallel compilation in MPI environments to prevent segfaults
             # Multiple MPI processes compiling operators simultaneously causes memory corruption
@@ -407,13 +424,12 @@ class BaseTrainer:
 
             force_cpu = device_arg in {"cpu", "mps"} or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1"
             if jt.has_cuda and not force_cpu:
-                # Set per-rank CUDA_VISIBLE_DEVICES for stable Jittor compilation
-                os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
                 jt.flags.use_cuda = 1
+                # Ensure CUDA_VISIBLE_DEVICES lists all GPUs if provided.
+                if device_list and (not os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1"):
+                    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in device_list)
 
-                # Device string for logging (Jittor doesn't have jt.device like PyTorch)
-                # Note: After CUDA_VISIBLE_DEVICES is set, Jittor sees the GPU as device 0
-                # So we log the actual physical GPU ID from CUDA_VISIBLE_DEVICES
+                # Device string for logging and explicit tensor moves.
                 self.device = f"cuda:{device_id}"
             else:
                 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -449,15 +465,15 @@ class BaseTrainer:
         # Update framework detection after model is loaded
         self._detect_framework()
         
-        # Freeze layers
-        self._freeze_layers()
-        
         # Setup AMP (Automatic Mixed Precision)
         self._setup_amp(world_size)
         
         # Setup DDP (Distributed Data Parallel) if needed
         if world_size > 1:
             self._setup_model_ddp(world_size)
+
+        # Freeze layers after potential DDP wrapping so grad flags are applied on the active model.
+        self._freeze_layers()
         
         # Check imgsz
         gs = max(int(np.max(self.model.stride.numpy())), 32)
@@ -469,7 +485,23 @@ class BaseTrainer:
             self.args.batch = self.batch_size = self.auto_batch()
         
         # Dataloaders
-        batch_size = self.batch_size // max(world_size, 1)
+        # Jittor MPI expects the Dataset batch size to be the global batch size
+        # (sum across all ranks), not per-rank batch size.
+        if world_size > 1 and not self.is_torch:
+            if self.batch_size < world_size:
+                raise ValueError(
+                    f"Batch size {self.batch_size} must be >= world_size {world_size} for Jittor MPI training."
+                )
+            if self.batch_size % world_size != 0 and RANK in {-1, 0}:
+                per_rank = math.ceil(self.batch_size / world_size)
+                LOGGER.warning(
+                    f"WARNING ⚠️ Jittor MPI uses global batch size; batch={self.batch_size} is not divisible by "
+                    f"world_size={world_size}. Per-rank batch will be {per_rank}. "
+                    "For exact parity with single-GPU, use a batch divisible by world_size."
+                )
+            batch_size = self.batch_size
+        else:
+            batch_size = self.batch_size // max(world_size, 1)
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=LOCAL_RANK, mode="train")
         if RANK in {-1, 0}:
             self.test_loader = self.get_dataloader(
@@ -516,29 +548,18 @@ class BaseTrainer:
         self.freeze_layer_names = freeze_layer_names
         
         for k, v in self.model.named_parameters():
-            # BatchNorm running stats never require gradients
-            if "running_mean" in k or "running_var" in k:
-                v.requires_grad = False
-                continue
-            
-            # Configuration parameters that should never require gradients
-            if "stride" in k:
-                v.requires_grad = False
-                continue
-            
-            # DFL layer parameters should not require gradients (fixed layer)
-            if ".dfl" in k:
-                v.requires_grad = False
-                continue
-            
-            # Freeze layers in freeze list
+            is_bn_running_stat = "running_mean" in k or "running_var" in k or "num_batches_tracked" in k
+            freeze_param = is_bn_running_stat or "stride" in k or ".dfl" in k or any(x in k for x in freeze_layer_names)
             if any(x in k for x in freeze_layer_names):
                 LOGGER.info(f"Freezing layer '{k}'")
-                v.requires_grad = False
-            # Ensure trainable parameters have requires_grad=True
-            elif isinstance(v, jt.Var) and str(v.dtype).startswith("float"):
-                if not v.requires_grad:
-                    v.requires_grad = True
+
+            if self.is_torch:
+                v.requires_grad = not freeze_param
+            elif isinstance(v, jt.Var):
+                if freeze_param:
+                    v.stop_grad()
+                elif str(v.dtype).startswith("float"):
+                    v.start_grad()
     
     def _setup_amp(self, world_size):
         """Setup Automatic Mixed Precision (AMP) for training."""
@@ -841,12 +862,14 @@ class BaseTrainer:
             return state_dict_to_numpy(model.state_dict(), fp16=True)
         
         # Prepare checkpoint data
+        ema_model = self.ema.ema if self.ema and self.ema.ema is not None else self.model
+        ema_updates = self.ema.updates if self.ema and self.ema.ema is not None else 0
         checkpoint_data = {
             "epoch": self.epoch,
             "best_fitness": self.best_fitness,
             "model": None,  # resume and final checkpoints derive from EMA
-            "ema": _half_state_dict(self.ema.ema),
-            "updates": self.ema.updates,
+            "ema": _half_state_dict(ema_model),
+            "updates": ema_updates,
             "optimizer": convert_optimizer_state_dict_to_fp16(safe_deepcopy_jittor(self.optimizer.state_dict())),
             "train_args": vars(self.args),  # save as dict
             "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
@@ -855,7 +878,7 @@ class BaseTrainer:
             "version": __version__,
             "license": "AGPL-3.0 (https://ultralytics.com/license)",
             "docs": "https://docs.ultralytics.com",
-            "model_yaml": self.ema.ema.yaml,  # save model config for model reconstruction
+            "model_yaml": ema_model.yaml,  # save model config for model reconstruction
             "names": self.model.names,
             "nc": self.model.nc,
         }
@@ -1055,7 +1078,7 @@ class BaseTrainer:
         if ckpt.get("optimizer", None) is not None:
             self.optimizer.load_state_dict(ckpt["optimizer"])  # optimizer
             best_fitness = ckpt["best_fitness"]
-        if self.ema and ckpt.get("ema"):
+        if self.ema and self.ema.ema is not None and ckpt.get("ema"):
             self.ema.ema.load_state_dict(state_dict_to_jittor(ckpt["ema"]))  # EMA
             self.ema.updates = ckpt["updates"]
         assert start_epoch > 0, (
@@ -1112,6 +1135,10 @@ class BaseTrainer:
         for module_name, module in model.named_modules():
             for param_name, param in module.named_parameters(recurse=False):
                 fullname = f"{module_name}.{param_name}" if module_name else param_name
+                if "running_mean" in fullname or "running_var" in fullname or "num_batches_tracked" in fullname:
+                    continue
+                if isinstance(param, jt.Var) and param.is_stop_grad():
+                    continue
                 if "bias" in fullname:  # bias (no decay)
                     g[2].append(param)
                 elif isinstance(module, bn):  # weight (no decay)

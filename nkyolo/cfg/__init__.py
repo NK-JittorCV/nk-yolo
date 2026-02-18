@@ -407,10 +407,7 @@ def check_dict_alignment(base: Dict, custom: Dict, e=None):
     Examples:
         >>> base_cfg = {"epochs": 50, "lr0": 0.01, "batch_size": 16}
         >>> custom_cfg = {"epoch": 100, "lr": 0.02, "batch_size": 32}
-        >>> try:
-        ...     check_dict_alignment(base_cfg, custom_cfg)
-        ... except SystemExit:
-        ...     print("Mismatched keys found")
+        >>> check_dict_alignment(base_cfg, custom_cfg)  # raises SystemExit on mismatch
 
     Notes:
         - Suggests corrections for mismatched keys based on similarity to valid keys.
@@ -547,23 +544,18 @@ def handle_yolo_settings(args: List[str]) -> None:
           https://docs.ultralytics.com/quickstart/#ultralytics-settings
     """
     url = "https://docs.ultralytics.com/quickstart/#ultralytics-settings"  # help URL
-    try:
-        if any(args):
-            if args[0] == "reset":
-                SETTINGS_FILE.unlink()  # delete the settings file
-                SETTINGS.reset()  # create new settings
-                LOGGER.info("Settings reset successfully")  # inform the user that settings have been reset
-            else:  # save a new setting
-                new = dict(parse_key_value_pair(a) for a in args)
-                check_dict_alignment(SETTINGS, new)
-                SETTINGS.update(new)
+    if any(args):
+        if args[0] == "reset":
+            SETTINGS_FILE.unlink()  # delete the settings file
+            SETTINGS.reset()  # create new settings
+            LOGGER.info("Settings reset successfully")  # inform the user that settings have been reset
+        else:  # save a new setting
+            new = dict(parse_key_value_pair(a) for a in args)
+            check_dict_alignment(SETTINGS, new)
+            SETTINGS.update(new)
 
-        print(SETTINGS)  # print the current settings
-        LOGGER.info(f"💡 Learn more about NK-YOLO Settings at {url}")
-    except Exception as e:
-        LOGGER.warning(f"WARNING ⚠️ settings error: '{e}'. Please see {url} for help.")
-
-
+    print(SETTINGS)  # print the current settings
+    LOGGER.info(f"💡 Learn more about NK-YOLO Settings at {url}")
 def handle_streamlit_inference():
     """
     Open the NK-YOLO Live Inference Streamlit app for real-time object detection.
@@ -658,12 +650,7 @@ def smart_value(v):
     elif v_lower == "false":
         return False
     else:
-        try:
-            return eval(v)
-        except Exception:
-            return v
-
-
+        return eval(v)
 def entrypoint(debug=""):
     """
     Based on ultralytics, NK-YOLO entrypoint function for parsing and executing command-line arguments.
@@ -722,16 +709,12 @@ def entrypoint(debug=""):
             LOGGER.warning(f"WARNING ⚠️ argument '{a}' does not require trailing comma ',', updating to '{a[:-1]}'.")
             a = a[:-1]
         if "=" in a:
-            try:
-                k, v = parse_key_value_pair(a)
-                if k == "cfg" and v is not None:  # custom.yaml passed
-                    LOGGER.info(f"Overriding {DEFAULT_CFG_PATH} with {v}")
-                    overrides = {k: val for k, val in yaml_load(checks.check_yaml(v)).items() if k != "cfg"}
-                else:
-                    overrides[k] = v
-            except (NameError, SyntaxError, ValueError, AssertionError) as e:
-                check_dict_alignment(full_args_dict, {a: ""}, e)
-
+            k, v = parse_key_value_pair(a)
+            if k == "cfg" and v is not None:  # custom.yaml passed
+                LOGGER.info(f"Overriding {DEFAULT_CFG_PATH} with {v}")
+                overrides = {k: val for k, val in yaml_load(checks.check_yaml(v)).items() if k != "cfg"}
+            else:
+                overrides[k] = v
         elif a in TASKS:
             overrides["task"] = a
         elif a in MODES:

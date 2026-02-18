@@ -4,18 +4,11 @@
 from nkyolo.utils import SETTINGS, TESTS_RUNNING
 from nkyolo.utils.jittor_utils import model_info_for_loggers
 
-try:
-    assert not TESTS_RUNNING  # do not log pytest
-    assert SETTINGS["wandb"] is True  # verify integration is enabled
-    import wandb as wb
-
-    assert hasattr(wb, "__version__")  # verify package is not directory
-    _processed_plots = {}
-
-except (ImportError, AssertionError):
-    wb = None
-
-
+assert not TESTS_RUNNING  # do not log pytest
+assert SETTINGS["wandb"] is True  # verify integration is enabled
+import wandb as wb
+assert hasattr(wb, "__version__")  # verify package is not directory
+_processed_plots = {}
 def _custom_table(x, y, classes, title="Precision Recall Curve", x_title="Recall", y_title="Precision"):
     """
     Create and log a custom metric visualization to wandb.plot.pr_curve.

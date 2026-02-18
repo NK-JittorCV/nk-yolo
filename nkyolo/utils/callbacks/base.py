@@ -200,6 +200,8 @@ def add_integration_callbacks(instance):
 
     # Load training callbacks
     if "Trainer" in instance.__class__.__name__:
+        import importlib.util
+
         # from .clearml import callbacks as clear_cb
         # from .comet import callbacks as comet_cb
         # from .dvc import callbacks as dvc_cb
@@ -207,10 +209,13 @@ def add_integration_callbacks(instance):
         # from .neptune import callbacks as neptune_cb
         # from .raytune import callbacks as tune_cb
         # from .tensorboard import callbacks as tb_cb
-        from .wb import callbacks as wb_cb
+        wb_spec = importlib.util.find_spec("wandb")
+        if wb_spec is not None:
+            from .wb import callbacks as wb_cb
 
         # callbacks_list.extend([clear_cb, comet_cb, dvc_cb, mlflow_cb, neptune_cb, tune_cb, tb_cb, wb_cb])
-        callbacks_list.extend([wb_cb])
+        if wb_spec is not None:
+            callbacks_list.extend([wb_cb])
 
     # Add the callbacks to the callbacks dictionary
     for callbacks in callbacks_list:

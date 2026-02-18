@@ -167,10 +167,7 @@ class LoadStreams:
             if thread.is_alive():
                 thread.join(timeout=5)  # Add timeout
         for cap in self.caps:  # Iterate through the stored VideoCapture objects
-            try:
-                cap.release()  # release video capture
-            except Exception as e:
-                LOGGER.warning(f"WARNING ⚠️ Could not release VideoCapture object: {e}")
+            cap.release()  # release video capture
         cv2.destroyAllWindows()
 
     def __iter__(self):
