@@ -38,6 +38,10 @@ class Detect(nn.Module):
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = jt.zeros(self.nl)  # strides computed during build
         self.stride.stop_grad()  # stride is a configuration parameter, not a trainable weight
+        self.anchors = jt.empty(0)
+        self.anchors.stop_grad()
+        self.strides = jt.empty(0)
+        self.strides.stop_grad()
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
             [nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch]
@@ -106,6 +110,8 @@ class Detect(nn.Module):
         x_cat = jt.concat([xi.view(shape[0], self.no, -1) for xi in x], 2)
         # if self.format != "imx" and (self.dynamic or self.shape != shape):
         self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+        self.anchors.stop_grad()
+        self.strides.stop_grad()
         self.shape = shape
 
         if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
@@ -509,10 +515,10 @@ class RTDETRDecoder(nn.Module):
         valid_mask = ((anchors > eps) & (anchors < 1 - eps)).all(-1)  # 1, h*w*nl, 1
         valid_mask = valid_mask.unsqueeze(-1) 
         # valid_mask = jt.reduce(
-        #     ((anchors > eps) & (anchors < 1 - eps)),  # 输入张量
-        #     op="all",  # 运算类型：逻辑与
-        #     dim=-1,    # 目标维度
-        #     keepdims=True  # 保留维度（Jittor 中是 keepdims，复数形式）
+        #     ((anchors > eps) & (anchors < 1 - eps)),  # input tensor
+        #     op="all",  # op type: logical AND
+        #     dim=-1,    # target dimension
+        #     keepdims=True  # keep dims (Jittor uses keepdims)
         # )
         anchors = jt.log(anchors / (1 - anchors))
         # anchors = anchors.masked_fill(~valid_mask, float("inf"))
@@ -549,15 +555,15 @@ class RTDETRDecoder(nn.Module):
         # Query selection
         # (bs, num_queries)
         # topk_ind = jt.topk(enc_outputs_scores.max(-1).values, self.num_queries, dim=1).indices.view(-1)
-        # 第一步：对最后一维取最大值
+        # Step 1: take max over the last dimension
         mmax_vals = enc_outputs_scores.max(-1)
 
-        # 第二步：将 max_vals 传入 topk
+        # Step 2: pass max_vals into topk
         # topk_ind = jt.topk(mmax_vals, self.num_queries, dim=1).indices.view(-1)
-        # 第一步：获取 topk 的返回值（元组：(values, indices)）
+        # Step 1: get topk return values (tuple: (values, indices))
         topk_vals, topk_indices = jt.topk(mmax_vals, self.num_queries, dim=1)
 
-        # 第二步：用索引获取 indices 并变形
+        # Step 2: take indices and reshape
         topk_ind = topk_indices.view(-1)
 
         # (bs, num_queries)

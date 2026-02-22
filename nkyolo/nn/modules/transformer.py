@@ -31,7 +31,7 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
         """Initialize the TransformerEncoderLayer with specified parameters."""
         super().__init__()
-        #TODO:换成jittor的版本检查
+        # TODO: replace with a Jittor version check
         # from ...utils.jittor_utils import TORCH_1_9
 
         # if not TORCH_1_9:

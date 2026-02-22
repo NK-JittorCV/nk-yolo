@@ -215,7 +215,7 @@ def get_cdn_group(
         known_bbox += rand_part * diff
         known_bbox.clip_(min=0.0, max=1.0)
         dn_bbox = xyxy2xywh(known_bbox)
-        #TODO:没有jt.logit
+        # TODO: jt.logit is not available
         dn_bbox = jt.logit(dn_bbox, eps=1e-6)  # inverse sigmoid
 
 

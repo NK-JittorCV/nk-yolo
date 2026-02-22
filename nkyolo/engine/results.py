@@ -185,7 +185,7 @@ class BaseTensor(SimpleClass):
         if 0 <= idx < self.data.shape[0]:
             return self.__class__(self.data[idx], self.orig_shape)
         else:
-            # 处理索引越界的情况，如返回空值或抛出更明确的错误
+            # Handle out-of-range index: return empty or raise a clearer error.
             raise IndexError(f"Index {idx} out of bounds for tensor of size {self.data.shape[0]}")
 
 

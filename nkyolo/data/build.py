@@ -59,11 +59,10 @@ class InfiniteDataset(Dataset):
         )
         
         # Forward all attributes from the original dataset that we don't explicitly define
-        self.__dict__.update({k: v for k, v in dataset.__dict__.items() if not hasattr(self, k)})
+        self.__dict__.update({k: v for k, v in dataset.__dict__.items() if k not in self.__dict__})
         
-        # Set collate function directly if available
-        if hasattr(dataset, 'collate_fn'):
-            self.collate_fn = dataset.collate_fn
+        # Set collate function directly
+        self.collate_fn = dataset.collate_fn
 
     def __getitem__(self, index):
         """Get item at index, cycling through dataset if index exceeds length."""
@@ -71,13 +70,10 @@ class InfiniteDataset(Dataset):
 
     def close_mosaic(self, hyp):
         """Forward mosaic-closing to the wrapped dataset if supported."""
-        if hasattr(self.dataset, "close_mosaic"):
-            result = self.dataset.close_mosaic(hyp)
-            # Keep wrapper in sync with any updated transforms.
-            if hasattr(self.dataset, "transforms"):
-                self.transforms = self.dataset.transforms
-            return result
-        return None
+        result = self.dataset.close_mosaic(hyp)
+        # Keep wrapper in sync with any updated transforms.
+        self.transforms = self.dataset.transforms
+        return result
 
     def collate_batch(self, batch):
         """Collate batch using custom collate function."""
@@ -102,10 +98,15 @@ def collate_fn(batch):
     
     def _same_shape(vals):
         first = vals[0]
-        if not hasattr(first, "shape"):
+        if not isinstance(first, (np.ndarray, jt.Var)):
             return False
         shape = first.shape
-        return all(hasattr(v, "shape") and v.shape == shape for v in vals)
+        for v in vals:
+            if not isinstance(v, (np.ndarray, jt.Var)):
+                return False
+            if v.shape != shape:
+                return False
+        return True
 
     for k in keys:
         values = [item[k] for item in batch]
@@ -162,8 +163,8 @@ class InfiniteDataLoader:
         self.original_dataset = dataset
         self.dataset = dataset
         
-        # Use dataset's collate_fn if available, otherwise use provided or default
-        if collate_fn is None and hasattr(dataset, 'collate_fn'):
+        # Use dataset's collate_fn if not explicitly provided
+        if collate_fn is None:
             collate_fn = dataset.collate_fn
         
         # Store configuration
@@ -265,7 +266,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         stride = int(stride)
 
     # Jittor MPI automatically shards datasets per rank. Avoid manual splitting in MPI mode.
-    split_by_rank = (mode == "train") and (not getattr(jt, "in_mpi", False))
+    split_by_rank = (mode == "train") and (not jt.mpi)
 
     return YOLODataset(
         img_path=img_path,

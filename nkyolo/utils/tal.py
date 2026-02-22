@@ -182,7 +182,7 @@ class TaskAlignedAssigner(nn.Module):
                                           for positive anchor points, where num_classes is the number
                                           of object classes.
         """
-        # 如果 target_gt_idx 为嵌套的 tuple，则一直取第一个元素直到为 jt.Var
+        # If target_gt_idx is a nested tuple, keep unwrapping the first element until it is a jt.Var.
         while isinstance(target_gt_idx, tuple):
             target_gt_idx = target_gt_idx[0]
         target_gt_idx = target_gt_idx.long()

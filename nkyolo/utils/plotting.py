@@ -1067,7 +1067,7 @@ def plot_images(
                 boxes_array = np.array(bboxes)
                 if idx.ndim > 1:
                     idx = idx.any(axis=1)
-                # 若 idx 元素数与 boxes_array 第一维不匹配，采用全 True 掩码
+                # If idx size does not match boxes_array first dimension, use an all-True mask.
                 if idx.size != boxes_array.shape[0]:
                     idx = np.ones(boxes_array.shape[0], dtype=bool)
                 boxes = boxes_array[idx]

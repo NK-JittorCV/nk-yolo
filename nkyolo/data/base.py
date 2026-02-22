@@ -80,7 +80,7 @@ class BaseDataset(Dataset):
         
         # In MPI distributed training, Jittor Dataset already shards data per process.
         # Only do manual splitting when not running under MPI.
-        if self.split_by_rank and RANK >= 0 and not getattr(jt, "in_mpi", False):
+        if self.split_by_rank and RANK >= 0 and not jt.mpi:
             # Get world size from MPI environment
             if "OMPI_COMM_WORLD_SIZE" in os.environ:
                 world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])

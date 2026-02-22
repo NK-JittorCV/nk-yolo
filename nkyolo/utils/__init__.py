@@ -27,11 +27,11 @@ from tqdm import tqdm as tqdm_original
 
 from nkyolo import __version__
 
-# PyTorch Multi-GPU DDP Constants
-# Support both PyTorch DDP and MPI environment variables
+# Distributed training constants
+# Support MPI environment variables
 # MPI (OpenMPI) uses: OMPI_COMM_WORLD_RANK, OMPI_COMM_WORLD_LOCAL_RANK
-# PyTorch DDP uses: RANK, LOCAL_RANK
-# Try MPI first, then fall back to PyTorch DDP format
+# RANK/LOCAL_RANK may also be set by launchers
+# Try MPI first, then fall back to generic RANK/LOCAL_RANK
 _rank = os.getenv("OMPI_COMM_WORLD_RANK") or os.getenv("PMI_RANK") or os.getenv("RANK", "-1")
 _local_rank = os.getenv("OMPI_COMM_WORLD_LOCAL_RANK") or os.getenv("PMI_LOCAL_RANK") or os.getenv("LOCAL_RANK", "-1")
 RANK = int(_rank) if _rank != "-1" else -1
@@ -51,8 +51,6 @@ LOGGING_NAME = "nkyolo"
 MACOS, LINUX, WINDOWS = (platform.system() == x for x in ["Darwin", "Linux", "Windows"])  # environment booleans
 ARM64 = platform.machine() in {"arm64", "aarch64"}  # ARM64 booleans
 PYTHON_VERSION = platform.python_version()
-TORCH_VERSION = jt.__version__
-TORCHVISION_VERSION = jt.__version__  # faster than importing torchvision
 IS_VSCODE = os.environ.get("TERM_PROGRAM", False) == "vscode"
 HELP_MSG = """
     Examples for running NK-YOLO:
@@ -114,12 +112,10 @@ HELP_MSG = """
 # Settings and Environment Variables
 # jt.set_printoptions(linewidth=320, precision=4, profile="default")
 np.set_printoptions(linewidth=320, formatter={"float_kind": "{:11.5g}".format})  # format short g, %precision=5
-cv2.setNumThreads(0)  # prevent OpenCV from multithreading (incompatible with PyTorch DataLoader)
+cv2.setNumThreads(0)  # prevent OpenCV from multithreading (incompatible with multi-worker dataloaders)
 os.environ["NUMEXPR_MAX_THREADS"] = str(NUM_THREADS)  # NumExpr max threads
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # for deterministic training to avoid CUDA warning
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # suppress verbose TF compiler warnings in Colab
-os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"  # suppress "NNPACK.cpp could not initialize NNPACK" warnings
-os.environ["KINETO_LOG_LEVEL"] = "5"  # suppress verbose PyTorch profiler output when computing FLOPs
 
 
 class TQDM(tqdm_original):
@@ -357,22 +353,18 @@ def set_logging(name="LOGGING_NAME", verbose=True):
 
     # Configure the console (stdout) encoding to UTF-8, with checks for compatibility
     formatter = logging.Formatter("%(message)s")  # Default formatter
-    if WINDOWS and hasattr(sys.stdout, "encoding") and sys.stdout.encoding != "utf-8":
+    if WINDOWS:
+        import io
 
-        class CustomFormatter(logging.Formatter):
-            def format(self, record):
-                """Sets up logging with UTF-8 encoding and configurable verbosity."""
-                return emojis(super().format(record))
-
-        # Attempt to reconfigure stdout to use UTF-8 encoding if possible
-        if hasattr(sys.stdout, "reconfigure"):
+        if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.encoding != "utf-8":
             sys.stdout.reconfigure(encoding="utf-8")
-        # For environments where reconfigure is not available, wrap stdout in a TextIOWrapper
-        elif hasattr(sys.stdout, "buffer"):
-            import io
+        elif not isinstance(sys.stdout, io.TextIOWrapper):
 
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-        else:
+            class CustomFormatter(logging.Formatter):
+                def format(self, record):
+                    """Sets up logging with UTF-8 encoding and configurable verbosity."""
+                    return emojis(super().format(record))
+
             formatter = CustomFormatter("%(message)s")
     # Create and configure the StreamHandler with the appropriate formatter and level
     stream_handler = logging.StreamHandler(sys.stdout)

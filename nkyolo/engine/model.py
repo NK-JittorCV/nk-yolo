@@ -283,8 +283,19 @@ class Model(nn.Module):
             >>> model.reset_weights()
         """
         self._check_is_pytorch_model()
+        reset_modules = (
+            nn.Conv,
+            nn.Conv1d,
+            nn.Conv2d,
+            nn.Conv3d,
+            nn.Linear,
+            nn.BatchNorm,
+            nn.BatchNorm1d,
+            nn.BatchNorm2d,
+            nn.BatchNorm3d,
+        )
         for m in self.model.modules():
-            if hasattr(m, "reset_parameters"):
+            if isinstance(m, reset_modules):
                 m.reset_parameters()
         for p in self.model.parameters():
             p.requires_grad = True
@@ -491,7 +502,7 @@ class Model(nn.Module):
             self.predictor.args = get_cfg(self.predictor.args, args)
             if "project" in args or "name" in args:
                 self.predictor.save_dir = get_save_dir(self.predictor.args)
-        if prompts and hasattr(self.predictor, "set_prompts"):  # for SAM-type models
+        if prompts is not None:  # for SAM-type models
             self.predictor.set_prompts(prompts)
         return self.predictor.predict_cli(source=source) if is_cli else self.predictor(source=source, stream=stream)
 
@@ -622,7 +633,7 @@ class Model(nn.Module):
             >>> results = model.train(data="coco8.yaml", epochs=3)
         """
         self._check_is_pytorch_model()
-        if hasattr(self.session, "model") and self.session.model.id:  # NK-YOLO HUB session with loaded model
+        if self.session is not None and self.session.model is not None and self.session.model.id:  # NK-YOLO HUB session with loaded model
             if any(kwargs):
                 LOGGER.warning("WARNING ⚠️ using HUB training arguments, ignoring local training arguments.")
             kwargs = self.session.train_args  # overwrite kwargs
@@ -642,12 +653,7 @@ class Model(nn.Module):
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
         if not args.get("resume"):  # manually set model only if not resuming
-            is_mpi_env = (
-                "OMPI_COMM_WORLD_SIZE" in os.environ
-                or "PMI_SIZE" in os.environ
-                or "WORLD_SIZE" in os.environ
-                or (RANK >= 0 and "LOCAL_RANK" in os.environ)
-            )
+            is_mpi_env = bool(jt.mpi)
             device_list = parse_device_list(args.get("device", ""))
             spawn_ddp = (len(device_list) > 1) and not is_mpi_env
             if not spawn_ddp:
@@ -714,12 +720,10 @@ class Model(nn.Module):
         """
         from nkyolo.nn.autobackend import check_class_names
 
-        if hasattr(self.model, "names"):
-            return check_class_names(self.model.names)
-        if not self.predictor:  # export formats will not have predictor defined until predict() is called
-            self.predictor = self._smart_load("predictor")(overrides=self.overrides, _callbacks=self.callbacks)
-            self.predictor.setup_model(model=self.model, verbose=False)
-        return self.predictor.model.names
+        names = self.model.names
+        if isinstance(names, dict) and not names:
+            return names
+        return check_class_names(names)
 
     @property
     def device(self):
@@ -765,7 +769,7 @@ class Model(nn.Module):
             ... else:
             ...     print("No transforms defined for this model.")
         """
-        return self.model.transforms if hasattr(self.model, "transforms") else None
+        return self.model.transforms
 
     def add_callback(self, event: str, func) -> None:
         """

@@ -155,7 +155,7 @@ def nms_rotated(boxes, scores, threshold=0.45):
     if len(boxes) == 0:
         return jt.array([], dtype='int32')
     
-    # 按分数降序排序
+    # Sort by score descending
     argsort_result = jt.argsort(scores, descending=True)
     if isinstance(argsort_result, tuple):
         sorted_idx = argsort_result[0]
@@ -164,18 +164,18 @@ def nms_rotated(boxes, scores, threshold=0.45):
     
     boxes = boxes[sorted_idx]
     
-    # 批量计算所有框之间的 probiou（只计算上三角矩阵，避免重复计算）
+    # Compute probiou for all boxes in batch (upper triangle only to avoid duplicate work)
     ious = batch_probiou(boxes, boxes).triu_(diagonal=1)
     
-    # 对于每个框，找到与它重叠度最高的框的 IoU
-    # 如果最大 IoU 小于阈值，则保留该框
-    max_ious = ious.max(dim=0)[0]  # 每个框与前面框的最大 IoU
+    # For each box, find the maximum IoU with previous boxes
+    # Keep the box if max IoU is below the threshold
+    max_ious = ious.max(dim=0)[0]  # max IoU with previous boxes
     
-    # 第一个框（分数最高）总是保留，所以从索引1开始检查
+    # The first box (highest score) is always kept, start checking from index 1
     if boxes.shape[0] > 1:
-        # 对于索引 >= 1 的框，检查是否应该保留
+        # For indices >= 1, check whether to keep
         keep_mask = max_ious < threshold
-        # 第一个框总是保留
+        # First box is always kept
         keep_mask = jt.concat([jt.array([True], dtype=jt.bool), keep_mask])
         pick = jt.where(keep_mask)[0]
     else:
@@ -201,63 +201,16 @@ def jtnms(boxes: jt.Var, scores: jt.Var, iou_threshold: float) -> jt.Var:
     Returns:
         jt.Var: Indices of the kept boxes [M,], dtype=int32.
     """
-    # Use Jittor's built-in NMS operator when available (faster, operator-level).
-    if hasattr(jt, "nms"):
-        if scores.ndim == 2:
-            scores = scores.squeeze(1)
-        dets = jt.concat((boxes, scores.reshape(-1, 1)), dim=1)
-        return jt.nms(dets, iou_threshold).astype("int32")
-
-    # 处理空输入
+    # Handle empty input
     if boxes.numel() == 0 or boxes.shape[0] == 0:
         return jt.array([], dtype='int32')
     
-    # 确保 scores 是 [N] 形状
+    # Ensure scores is shape [N]
     if scores.ndim == 2:
         scores = scores.squeeze(1)  # [N, 1] -> [N]
     
-    # 按 scores 降序排序并获取排序索引
-    argsort_result = jt.argsort(scores, descending=True)
-    if isinstance(argsort_result, tuple):
-        order = argsort_result[0]
-    else:
-        order = argsort_result
-    
-    boxes = boxes[order]  # 排序后的 boxes
-    n = boxes.shape[0]
-    
-    # 优化：对于非常少的框，直接返回
-    if n == 1:
-        return order.astype('int32')
-    
-    # 使用优化的循环实现
-    keep = jt.ones(n, dtype=jt.bool)  # 初始时所有框都保留
-    
-    # 对于每个保留的框，批量计算它与后续所有框的 IoU
-    for i in range(n):
-        if not keep[i]:  # 如果当前框已被抑制，跳过
-            continue
-        
-        # 计算当前框与后续所有框的 IoU（批量计算）
-        if i + 1 < n:
-            # 只检查后续还保留的框（优化：减少不必要的计算）
-            # 但为了简化，我们先计算所有后续框，然后应用 keep 掩码
-            current_box = boxes[i:i+1]  # [1, 4]
-            remaining_boxes = boxes[i+1:]  # [M, 4]
-            
-            # 批量计算 IoU: [1, M]
-            ious = box_iou(current_box, remaining_boxes).squeeze(0)  # [M]
-            
-            # 抑制 IoU 超过阈值的框
-            suppress_mask = ious > iou_threshold
-            # 只更新后续还保留的框
-            keep[i+1:] = keep[i+1:] & jt.logical_not(suppress_mask)
-    
-    # 获取保留的索引并映射回原始顺序
-    keep_indices = jt.where(keep)[0]
-    if len(keep_indices) == 0:
-        return jt.array([], dtype='int32')
-    return order[keep_indices].astype('int32')
+    dets = jt.concat((boxes, scores.reshape(-1, 1)), dim=1)
+    return jt.misc.nms(dets, iou_threshold).astype("int32")
 
 
 def non_max_suppression(
@@ -417,7 +370,7 @@ def non_max_suppression(
         n = x.shape[0]  # number of boxes
         if not n:  # no boxes
             continue
-        # 优化：提前限制框的数量，减少 NMS 计算量（这是性能关键优化）
+        # Optimization: limit the number of boxes early to reduce NMS cost (performance critical)
         if n > max_nms:  # excess boxes
             # Sort by confidence and keep top max_nms
             argsort_result = x[:, 4].argsort(descending=True)
@@ -426,7 +379,7 @@ def non_max_suppression(
             else:
                 sorted_idx = argsort_result
             x = x[sorted_idx[:max_nms]]
-            n = max_nms  # 更新框数量
+            n = max_nms  # update box count
 
         # Batched NMS
         c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
@@ -545,7 +498,7 @@ def xyxy2xywh(x):
     """
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
     if isinstance(x, jt.Var):
-        y = jt.zeros(x.shape, dtype=x.dtype)  # 显式指定设备和类型
+        y = jt.zeros(x.shape, dtype=x.dtype)  # explicitly set device and dtype
     else:
         y = np.zeros_like(x)
     y[..., 0] = (x[..., 0] + x[..., 2]) / 2  # x center

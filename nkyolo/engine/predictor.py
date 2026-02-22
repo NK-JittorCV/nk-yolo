@@ -111,6 +111,11 @@ class BasePredictor:
         self.txt_path = None
         self._lock = threading.Lock()  # for automatic thread-safe inference
         callbacks.add_integration_callbacks(self)
+        self.prompts = None
+
+    def set_prompts(self, prompts):
+        """Store prompts for prompt-aware models; no-op for standard predictors."""
+        self.prompts = prompts
 
     def preprocess(self, im):
         """

@@ -147,18 +147,26 @@ class YOLODataset(BaseDataset):
             if not exists and LOCAL_RANK in {-1, 0}:
                 LOGGER.warning(f"{self.prefix}Dataset cache is stale or invalid, rebuilding: {cache_path}")
 
-        use_mpi = bool(getattr(jt, "in_mpi", False))
-        mpi_mod = jt.compile_extern.mpi if use_mpi else None
-        mpi_world = mpi_mod.world_size() if mpi_mod else 1
-        mpi_rank = mpi_mod.world_rank() if mpi_mod else -1
+        use_mpi = bool(jt.mpi)
+        mpi_world = int(jt.world_size) if use_mpi else 1
+        mpi_rank = int(jt.rank) if use_mpi else -1
 
         if not exists:
             if use_mpi and mpi_world > 1:
                 if mpi_rank == 0:
                     cache = self.cache_labels(cache_path)
-                mpi_mod.mpi_barrier()
-                if mpi_rank != 0:
-                    cache = load_dataset_cache_file(cache_path)
+                else:
+                    max_wait = 300.0
+                    start = time.time()
+                    while not cache_path.exists() and time.time() - start < max_wait:
+                        time.sleep(0.05)
+                    if cache_path.exists():
+                        cache = load_dataset_cache_file(cache_path)
+                    else:
+                        LOGGER.warning(
+                            f"{self.prefix}Rank {mpi_rank}: Cache wait timed out after {max_wait}s, rebuilding locally."
+                        )
+                        cache = self.cache_labels(cache_path)
             else:
                 cache = self.cache_labels(cache_path)
 
@@ -263,13 +271,13 @@ class YOLODataset(BaseDataset):
             values = [item[k] for item in batch]
             
             if k == "img":
-                # 图像可以直接堆叠，因为已经被预处理为相同大小
+                # Images can be stacked directly because they are already preprocessed to the same size.
                 new_batch[k] = np.stack(values, 0)
             elif k == "cls":
-                # 类别索引长度可变，拼接为一维
+                # Class indices have variable lengths, so concatenate into a 1D array.
                 new_batch[k] = np.concatenate(values, 0) if len(values) else np.zeros((0, 1), dtype=np.int32)
             elif k == "bboxes":
-                # 边界框长度可变，拼接为一维
+                # Bounding boxes have variable lengths, so concatenate into a 1D array.
                 new_batch[k] = np.concatenate(values, 0) if len(values) else np.zeros((0, 4), dtype=np.float32)
             elif k == "batch_idx":
                 new_batch["batch_idx"] = [item["batch_idx"] for item in batch]
@@ -277,7 +285,7 @@ class YOLODataset(BaseDataset):
                     new_batch["batch_idx"][i] = new_batch["batch_idx"][i] + i  # add target image index for build_targets()
                 new_batch["batch_idx"] = np.concatenate(new_batch["batch_idx"], 0).astype(np.int32)
             else:
-                # 其他数据保持原样
+                # Keep other fields as-is.
                 new_batch[k] = values
         
         return new_batch

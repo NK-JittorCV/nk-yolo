@@ -51,12 +51,10 @@ class DetectionValidator(BaseValidator):
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
         batch["img"] = batch["img"].to(self.device, non_blocking=True)
-        param_dtype = None
-        if hasattr(self, "model") and hasattr(self.model, "parameters"):
-            params = self.model.parameters()
-            params_iter = iter(params)
-            first_param = next(params_iter, None)
-            param_dtype = first_param.dtype if first_param is not None else None
+        params = self.model.parameters()
+        params_iter = iter(params)
+        first_param = next(params_iter, None)
+        param_dtype = first_param.dtype if first_param is not None else None
         if param_dtype is not None and "float16" in str(param_dtype):
             batch["img"] = batch["img"].half()
         else:
@@ -301,8 +299,8 @@ class DetectionValidator(BaseValidator):
         box = ops.xyxy2xywh(predn[:, :4])  # xywh
         box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
         
-        # 优化：使用列表推导式，并立即转换为 Python 原生类型以释放 GPU 内存
-        # 将 Jittor 张量转换为 numpy 再转换为 list，避免在 GPU 上累积
+        # Optimization: use list conversion and immediately move to Python types to free GPU memory.
+        # Convert Jittor tensors to numpy then to list to avoid GPU accumulation.
         if isinstance(predn, jt.Var):
             pred_list = predn.cpu().numpy().tolist()
         else:
@@ -323,8 +321,8 @@ class DetectionValidator(BaseValidator):
                 }
             )
         
-        # 内存优化：如果 jdict 太大，考虑分批处理（可选）
-        # 这里保持原有逻辑，但在 validator 中已经添加了定期清理
+        # Memory optimization: if jdict grows too large, consider batching (optional).
+        # Keep current logic; validator already performs periodic cleanup.
 
     def eval_json(self, stats):
         """Evaluates YOLO output in JSON format and returns performance statistics."""

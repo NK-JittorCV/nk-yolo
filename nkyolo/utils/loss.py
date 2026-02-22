@@ -350,7 +350,7 @@ class v8DetectionLoss:
         ), 1)
         targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
-        # 修改 gt_ 为 gt
+        # Rename gt_ to gt
         mask_gt = gt_bboxes.sum(2, keepdim=True) > 0.0
 
         # Pboxes
@@ -912,10 +912,7 @@ class E2EDetectLoss:
     def __init__(self, model, **kwargs):
         params = model.parameters()
         if params:
-            if hasattr(params[0], "is_cuda"):
-                device = "cuda" if params[0].is_cuda else "cpu"
-            else:
-                device = "cuda" if jt.flags.use_cuda else "cpu"
+            device = "cuda" if jt.flags.use_cuda else "cpu"
         else:
             device = "cpu"
         self.device = device

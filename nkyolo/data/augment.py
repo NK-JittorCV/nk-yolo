@@ -543,10 +543,7 @@ class Mosaic(BaseMixTransform):
         self.imgsz = imgsz
         self.border = (-imgsz // 2, -imgsz // 2)  # width, height
         self.n = n
-        if hasattr(self.dataset, 'cache'):
-            self.buffer_enabled = self.dataset.cache != "ram"
-        else :
-            self.buffer_enabled = 0
+        self.buffer_enabled = self.dataset.cache != "ram"
 
     def get_indexes(self, buffer=True):
         """

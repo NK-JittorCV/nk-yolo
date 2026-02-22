@@ -45,19 +45,17 @@ def autocast(enabled: bool, device: str = "cuda"):
         the previous auto_mixed_precision_level setting to avoid precision changes
         between epochs.
     """
-    # 保存之前的精度设置，避免在 epoch 切换时丢失
-    prev_amp_level = jt.flags.auto_mixed_precision_level
-    
-    # 设置新的精度级别
+    # AMP is temporarily disabled.
+    # prev_amp_level = jt.flags.auto_mixed_precision_level
+    # if enabled:
+    #     jt.flags.auto_mixed_precision_level = 1
+    # else:
+    #     jt.flags.auto_mixed_precision_level = 0
+    # yield
+    # jt.flags.auto_mixed_precision_level = prev_amp_level
     if enabled:
-        jt.flags.auto_mixed_precision_level = 1
-    else:
-        jt.flags.auto_mixed_precision_level = 0
-    
+        raise NotImplementedError("AMP is temporarily disabled.")
     yield
-    # 恢复之前的精度设置，而不是总是设为 0
-    # 这样可以保持跨 epoch 的精度一致性
-    jt.flags.auto_mixed_precision_level = prev_amp_level
 
 def get_cpu_info():
     """Return a string with system CPU information, i.e. 'Apple M2'."""
@@ -207,7 +205,7 @@ def model_info(model, detailed=False, verbose=True, imgsz=640):
                 % (i, name, p.requires_grad, p.numel(), list(p.shape), p.mean(), p.std(), p.dtype)
             )
 
-    flops = get_flops(model, imgsz)
+    flops = get_flops(model, imgsz) if model.supports_flops else 0.0
     fused = " (fused)" if model.is_fused() else ""
     fs = f", {flops:.1f} GFLOPs" if flops else ""
     yaml_file = model.yaml_file or model.yaml.get("yaml_file", "")
@@ -291,7 +289,7 @@ def model_info_for_loggers(trainer):
     else:  # only return PyTorch times from most recent validation
         results = {
             "model/parameters": get_num_params(trainer.model),
-            "model/GFLOPs": round(get_flops(trainer.model), 3),
+            "model/GFLOPs": round(get_flops(trainer.model), 3) if trainer.model.supports_flops else 0.0,
         }
     results["model/speed_PyTorch(ms)"] = round(trainer.validator.speed["inference"], 3)
     return results
@@ -313,17 +311,13 @@ def calculate_layer_flops(layer, input_shape):
 
 def get_flops(model, imgsz=640):
     """Return a YOLO model's FLOPs (GFLOPs) using the unified profile tool."""
-    from nkyolo.utils.jittor_profile import profile as unified_profile
+    from nkyolo.utils.jittor_profile import profile_model_graph
 
     model = de_parallel(model)
     disable_flops = str(os.getenv("NKYOLO_NO_FLOPS", "")).lower() in ("1", "true", "yes")
     force_flops = str(os.getenv("NKYOLO_FORCE_FLOPS", "")).lower() in ("1", "true", "yes")
     if disable_flops and not force_flops:
         return 0.0
-    if not force_flops:
-        for m in model.modules():
-            if hasattr(m, "f"):
-                return 0.0
     params = list(model.parameters())
     if not params:
         return 0.0
@@ -332,33 +326,30 @@ def get_flops(model, imgsz=640):
         imgsz = [imgsz, imgsz]
     h, w = int(imgsz[0]), int(imgsz[1])
 
-    if _TORCH_AVAILABLE and isinstance(p, torch.Tensor):
-        im_full = torch.empty((1, int(p.shape[1]), h, w))
-    else:
-        yaml = model.yaml if isinstance(getattr(model, "yaml", None), dict) else {}
-        ch = yaml.get("ch", None)
-        if isinstance(ch, (list, tuple)) and ch:
-            ch = ch[0]
-        if not isinstance(ch, (int, np.integer)) or ch <= 0:
-            ch = None
-        if ch is None and hasattr(model, "modules"):
-            for m in model.modules():
-                in_ch = getattr(m, "in_channels", None)
-                if isinstance(in_ch, (int, np.integer)) and in_ch > 0:
-                    ch = int(in_ch)
+    yaml = model.yaml if isinstance(getattr(model, "yaml", None), dict) else {}
+    ch = yaml.get("ch", None)
+    if isinstance(ch, (list, tuple)) and ch:
+        ch = ch[0]
+    if not isinstance(ch, (int, np.integer)) or ch <= 0:
+        ch = None
+    if ch is None:
+        for m in model.modules():
+            in_ch = getattr(m, "in_channels", None)
+            if isinstance(in_ch, (int, np.integer)) and in_ch > 0:
+                ch = int(in_ch)
+                break
+    if ch is None:
+        for p_i in params:
+            shape = getattr(p_i, "shape", None)
+            if isinstance(shape, (list, tuple)) and len(shape) >= 2:
+                ch = int(shape[1])
+                if ch > 0:
                     break
-        if ch is None:
-            for p_i in params:
-                shape = getattr(p_i, "shape", None)
-                if isinstance(shape, (list, tuple)) and len(shape) >= 2:
-                    ch = int(shape[1])
-                    if ch > 0:
-                        break
-        if ch is None:
-            ch = 3
-        im_full = jt.empty(1, int(ch), h, w)
+    if ch is None:
+        ch = 3
+    im_full = jt.empty(1, int(ch), h, w)
 
-    flops_result, _ = unified_profile(model, inputs=[im_full], verbose=False)
+    flops_result, _ = profile_model_graph(model, inputs=[im_full], verbose=False)
     return flops_result / 1e9
 
 def time_sync():
@@ -460,7 +451,13 @@ def one_cycle(y1=0.0, y2=1.0, steps=100):
 
 def init_seeds(seed=0, deterministic=False):
     """Initialize RNG seeds and configure deterministic settings for Jittor."""
-    os.environ["NKYOLO_GLOBAL_SEED"] = str(int(seed))
+    base_seed = int(seed)
+    os.environ["NKYOLO_GLOBAL_SEED"] = str(base_seed)
+    rank = int(jt.rank) if jt.mpi else 0
+    if jt.mpi:
+        seed = (base_seed + 1) * (rank + 1)
+    else:
+        seed = base_seed
     # Set Python's random seed
     random.seed(seed)
     
@@ -468,7 +465,7 @@ def init_seeds(seed=0, deterministic=False):
     np.random.seed(seed)
     
     # Set Jittor's global seed
-    jt.set_global_seed(seed)
+    jt.set_global_seed(base_seed, different_seed_for_mpi=True)
     
     # Configure deterministic settings
     if deterministic:
@@ -522,13 +519,20 @@ class ModelEMA:
         self.enabled = RANK in (-1, 0)
 
         self.ema = None
+        self._ema_pairs = []
         self.updates = updates if self.enabled else 0  # number of EMA updates
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp
         if not self.enabled:
             return
-        self.ema = deepcopy(model).eval()
+        self.ema = model.clone().eval()
         for p in self.ema.parameters():
             p.stop_grad()
+        ema_sd = self.ema.state_dict()
+        model_sd = model.state_dict()
+        for k, ema_v in ema_sd.items():
+            model_v = model_sd.get(k)
+            if isinstance(ema_v, jt.Var) and isinstance(model_v, jt.Var):
+                self._ema_pairs.append((ema_v, model_v))
 
     def update(self, model):
         """Update EMA parameters."""
@@ -537,12 +541,10 @@ class ModelEMA:
         
         self.updates += 1
         with jt.no_grad():
-            msd = model.state_dict()
             d = self.decay(self.updates) if callable(self.decay) else self.decay
-            for k, v in self.ema.state_dict().items():
-                if v.dtype.is_float() and k in msd:
-                    v.update(v * d + (1 - d) * msd[k].detach())
-                    v.sync() 
+            for ema_v, model_v in self._ema_pairs:
+                ema_v.update(ema_v * d + (1 - d) * model_v)
+                ema_v.sync()
 
     def update_attr(self, model, include=(), exclude=("process_group", "reducer")):
         """Updates attributes and saves stripped model with optimizer removed."""

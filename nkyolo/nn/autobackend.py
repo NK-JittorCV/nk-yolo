@@ -2,7 +2,6 @@
 # Refer to https://github.com/ultralytics/ultralytics/blob/main/ultralytics/nn/autobackend.py
 
 import json
-import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -12,10 +11,6 @@ import jittor.nn as nn
 from nkyolo.utils import LOGGER, ROOT, yaml_load
 from nkyolo.utils.checks import check_suffix, check_yaml
 from nkyolo.utils.downloads import attempt_download_asset, is_url
-
-_TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
-if _TORCH_AVAILABLE:
-    import torch
 
 
 def check_class_names(names):
@@ -64,7 +59,7 @@ class AutoBackend(nn.Module):
             |-----------------------|------------------|
             | JittorPickle          | *.pkl            |
             | jtScript              | *.jtscript      |
-            | PyTorch               | *.pt, *.pth      |
+            | Torch Weights         | *.pt, *.pth      | (converted to Jittor on load)
             
         TODO: Support for other formats (ONNX, OpenVINO, TensorRT, CoreML, TensorFlow, PaddlePaddle, NCNN) is planned.
 
@@ -88,7 +83,7 @@ class AutoBackend(nn.Module):
         Initialize the AutoBackend for inference with Jittor support.
 
         Args:
-            weights (str): Path to the model weights file. Defaults to 'yolo11n.pt'. Supports Jittor (.pkl) and PyTorch (.pt, .pth).
+            weights (str): Path to the model weights file. Defaults to 'yolo11n.pt'. Supports Jittor (.pkl) and Torch weights (.pt, .pth) via conversion.
             device (jt.device): Jittor device to run the model on. Defaults to jt.cpu.
             dnn (bool): Not currently supported. Reserved for future ONNX OpenCV DNN support.
             data (str | Path | optional): Path to the additional data.yaml file containing class names. Optional.
@@ -98,6 +93,8 @@ class AutoBackend(nn.Module):
             verbose (bool): Enable verbose logging. Defaults to True.
         """
         super().__init__()
+        self.names = {}
+        self.transforms = None
         w = str(weights[0] if isinstance(weights, list) else weights)
         nn_module = isinstance(weights, jt.nn.Module)
         # _model_type() may return a short list (supported-only) or full list of flags.
@@ -122,7 +119,7 @@ class AutoBackend(nn.Module):
             ) = model_types
         elif len(model_types) == 5:
             pt, pkl, jit, torch_pt, triton = model_types
-            pt = pt or torch_pt  # treat PyTorch .pt as pt for now
+            pt = pt or torch_pt  # treat .pt/.pth weights as PT inputs for conversion
             onnx = xml = engine = coreml = saved_model = pb = tflite = edgetpu = tfjs = paddle = ncnn = False
         else:
             # Fallback: pad to full length for compatibility
@@ -173,8 +170,6 @@ class AutoBackend(nn.Module):
             )
             stride = max(int(np.max(model.stride.numpy())), 32)
             names = model.names  # get class names
-            if _TORCH_AVAILABLE and isinstance(model, torch.nn.Module):
-                model.half() if fp16 else model.float()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
 
         # JittorPickle (.pkl)
@@ -186,8 +181,6 @@ class AutoBackend(nn.Module):
             )
             stride = max(int(np.max(model.stride.numpy())), 32)
             names = model.names  # get class names
-            if _TORCH_AVAILABLE and isinstance(model, torch.nn.Module):
-                model.half() if fp16 else model.float()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
 
         # jtScript
@@ -195,15 +188,13 @@ class AutoBackend(nn.Module):
             LOGGER.info(f"Loading {w} for jtScript inference...")
             extra_files = {"config.txt": ""}  # model metadata
             model = jt.jit.load(w, _extra_files=extra_files, map_location=device)
-            if _TORCH_AVAILABLE and isinstance(model, torch.nn.Module):
-                model.half() if fp16 else model.float()
             if extra_files["config.txt"]:  # load metadata dict
                 metadata = json.loads(extra_files["config.txt"], object_hook=lambda x: dict(x.items()))
 
         # TODO: Other format support (ONNX, OpenVINO, TensorRT, CoreML, TensorFlow, PaddlePaddle, NCNN, Triton)
         elif dnn or onnx or xml or engine or coreml or saved_model or pb or tflite or edgetpu or tfjs or paddle or ncnn or triton:
             raise NotImplementedError(
-                f"Model format '{w}' is not yet supported. Currently only Jittor (.pkl), PyTorch (.pt/.pth) and jtScript (.jtscript) formats are supported. "
+                f"Model format '{w}' is not yet supported. Currently only Jittor (.pkl), Torch weights (.pt/.pth, converted), and jtScript (.jtscript) formats are supported. "
                 "TODO: Add support for other formats."
             )
 
@@ -278,7 +269,7 @@ class AutoBackend(nn.Module):
         # TODO: Other format support
         else:
             raise NotImplementedError(
-                "This model format is not yet supported. Currently only Jittor (.pkl), PyTorch (.pt/.pth) and jtScript (.jtscript) formats are supported."
+                "This model format is not yet supported. Currently only Jittor (.pkl), PT/PTH weights (converted), and jtScript (.jtscript) formats are supported."
             )
 
         if isinstance(y, (list, tuple)):
@@ -319,8 +310,8 @@ class AutoBackend(nn.Module):
     @staticmethod
     def _model_type(p="path/to/model.pt"):
         """
-        Takes a path to a model file and returns the model type. Possible types are pt (Jittor), pkl (JittorPickle),
-        jit (jtScript), or PyTorch.
+        Takes a path to a model file and returns the model type. Possible types are pkl (JittorPickle),
+        jit (jtScript), or PT/PTH weights (converted to Jittor).
 
         Args:
             p: path to the model file. Defaults to path/to/model.pt
@@ -350,12 +341,12 @@ class AutoBackend(nn.Module):
 
 
 def export_formats():
-    """NK-YOLO YOLO export formats with Jittor and PyTorch support."""
+    """NK-YOLO YOLO export formats (Jittor runtime, optional PT/PTH weight conversion)."""
     x = [
         ["JittorPickle", "pkl", ".pkl", True, True],
         ["jtScript", "jtscript", ".jtscript", True, True],
-        ["PyTorch", "torch", ".pt", True, True],  # PyTorch support
-        ["PyTorchPTH", "torch", ".pth", True, True],  # PyTorch state dict
+        ["PTWeights", "pt", ".pt", True, True],  # PT weights converted to Jittor
+        ["PTHWeights", "pth", ".pth", True, True],  # PT state dict converted to Jittor
         # TODO: Add support for the following formats
         # ["ONNX", "onnx", ".onnx", True, True],
         # ["OpenVINO", "openvino", "_openvino_model", True, False],

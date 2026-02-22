@@ -1,7 +1,7 @@
 # NK-YOLO 🚀 AGPL-3.0 License
 # Refer to https://github.com/ultralytics/ultralytics/blob/main/ultralytics/utils/autobatch.py
 
-"""Functions for estimating the best YOLO batch size to use a fraction of the available CUDA memory in PyTorch."""
+"""Functions for estimating the best YOLO batch size to use a fraction of the available CUDA memory in Jittor."""
 
 import os
 from copy import deepcopy
@@ -10,7 +10,7 @@ import numpy as np
 import jittor as jt
 
 from nkyolo.utils import DEFAULT_CFG, LOGGER, colorstr
-from nkyolo.utils.jittor_utils import autocast, profile
+from nkyolo.utils.jittor_utils import profile
 
 
 def check_train_batch_size(model, imgsz=640, amp=True, batch=-1):
@@ -18,7 +18,7 @@ def check_train_batch_size(model, imgsz=640, amp=True, batch=-1):
     Compute optimal YOLO training batch size using the autobatch() function.
 
     Args:
-        model (torch.nn.Module): YOLO model to check batch size for.
+        model (jittor.nn.Module): YOLO model to check batch size for.
         imgsz (int, optional): Image size used for training.
         amp (bool, optional): Use automatic mixed precision if True.
         batch (float, optional): Fraction of GPU memory to use. If -1, use default.
@@ -30,8 +30,10 @@ def check_train_batch_size(model, imgsz=640, amp=True, batch=-1):
         If 0.0 < batch < 1.0, it's used as the fraction of GPU memory to use.
         Otherwise, a default fraction of 0.6 is used.
     """
-    with autocast(enabled=amp):
-        return autobatch(deepcopy(model).train(), imgsz, fraction=batch if 0.0 < batch < 1.0 else 0.6)
+    if amp:
+        raise NotImplementedError("AMP is temporarily disabled.")
+    # with autocast(enabled=amp):
+    return autobatch(deepcopy(model).train(), imgsz, fraction=batch if 0.0 < batch < 1.0 else 0.6)
 
 
 def autobatch(model, imgsz=640, fraction=0.60, batch_size=DEFAULT_CFG.batch):
@@ -39,7 +41,7 @@ def autobatch(model, imgsz=640, fraction=0.60, batch_size=DEFAULT_CFG.batch):
     Automatically estimate the best YOLO batch size to use a fraction of the available CUDA memory.
 
     Args:
-        model (torch.nn.module): YOLO model to compute batch size for.
+        model (jittor.nn.Module): YOLO model to compute batch size for.
         imgsz (int, optional): The image size used as input for the YOLO model. Defaults to 640.
         fraction (float, optional): The fraction of available CUDA memory to use. Defaults to 0.60.
         batch_size (int, optional): The default batch size to use if an error is detected. Defaults to 16.
@@ -55,7 +57,7 @@ def autobatch(model, imgsz=640, fraction=0.60, batch_size=DEFAULT_CFG.batch):
         LOGGER.info(f"{prefix} ⚠️ intended for CUDA devices, using default batch-size {batch_size}")
         return batch_size
     if jt.backends.cudnn.benchmark:
-        LOGGER.info(f"{prefix} ⚠️ Requires torch.backends.cudnn.benchmark=False, using default batch-size {batch_size}")
+        LOGGER.info(f"{prefix} ⚠️ Requires cudnn.benchmark=False, using default batch-size {batch_size}")
         return batch_size
 
     # Inspect CUDA memory

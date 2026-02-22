@@ -36,7 +36,7 @@ from nkyolo.utils import LOGGER, TQDM, callbacks, colorstr, emojis
 from nkyolo.utils.checks import check_imgsz
 from nkyolo.utils.ops import Profile
 
-from nkyolo.utils.jittor_utils import autocast, de_parallel
+from nkyolo.utils.jittor_utils import de_parallel
 
 
 class BaseValidator:
@@ -121,16 +121,18 @@ class BaseValidator:
         if self.training:
             self.device = trainer.device
             self.data = trainer.data
-            # Follow training AMP/half settings instead of forcing FP32.
-            # Default to disabling AMP in validation unless explicitly enabled via val_amp
-            val_amp = getattr(self.args, "val_amp", False)
-            self.amp = bool(val_amp)
-            self.args.half = bool(val_amp)
+            # AMP is temporarily disabled for validation.
+            # val_amp = getattr(self.args, "val_amp", False)
+            val_amp = bool(getattr(self.args, "val_amp", False))
+            if val_amp:
+                raise NotImplementedError("AMP is temporarily disabled.")
+            self.amp = False
+            self.args.half = False
             self.compute_loss = _as_bool(getattr(self.args, "val_loss", False))
             model = trainer.ema.ema or trainer.model
             self.model = model
             # CRITICAL FIX: Don't modify training model precision directly
-            # Use autocast context manager to control precision during validation
+            # AMP is temporarily disabled during validation
             # This avoids modifying the training model and prevents compilation cache conflicts
             # model = model.float32()  # REMOVED: This was modifying training model
             # self.model = model
@@ -142,10 +144,13 @@ class BaseValidator:
             if str(self.args.model).endswith(".yaml") and (model is None or str(model).endswith(".yaml")):
                 LOGGER.warning("WARNING ⚠️ validating an untrained model YAML will result in 0 mAP.")
             callbacks.add_integration_callbacks(self)
-            # Default to disabling AMP in validation unless explicitly enabled via val_amp
-            val_amp = getattr(self.args, "val_amp", False)
-            self.amp = bool(val_amp)
-            self.args.half = bool(val_amp)
+            # AMP is temporarily disabled for validation.
+            # val_amp = getattr(self.args, "val_amp", False)
+            val_amp = bool(getattr(self.args, "val_amp", False))
+            if val_amp:
+                raise NotImplementedError("AMP is temporarily disabled.")
+            self.amp = False
+            self.args.half = False
             model = AutoBackend(
                 weights=model or self.args.model,
                 # device=select_device(self.args.device, self.args.batch),
@@ -171,7 +176,7 @@ class BaseValidator:
             else:
                 raise FileNotFoundError(emojis(f"Dataset '{self.args.data}' for task={self.args.task} not found ❌"))
 
-            # 修复：Jittor中device是字符串，不是设备对象
+            # Fix: in Jittor, device is a string, not a device object.
             if self.device in {"cpu", "mps"}:
                 self.args.workers = 0  # faster CPU val as time dominated by inference, not dataloading
             if not pt:
@@ -193,7 +198,7 @@ class BaseValidator:
         self.init_metrics(de_parallel(model))
         self.jdict = []  # empty before each val
         
-        # 内存管理：定期清理间隔（每 N 个 batch 清理一次）
+        # Memory management: periodic cleanup interval (every N batches).
         memory_cleanup_interval = getattr(self.args, 'memory_cleanup_interval', 50)
         
         for batch_i, batch in enumerate(bar):
@@ -205,19 +210,18 @@ class BaseValidator:
 
             # Inference
             with dt[1]:
-                # CRITICAL FIX: Use autocast to control precision during validation
-                # Follow training AMP setting when enabled.
-                with autocast(enabled=self.amp):
-                    preds = model(batch["img"], augment=augment)
+                # CRITICAL FIX: AMP disabled
+                # with autocast(enabled=self.amp):
+                preds = model(batch["img"], augment=augment)
 
             # Loss
             with dt[2]:
                 if self.training and self.compute_loss:
-                    # Use autocast to ensure float32 during loss computation
-                    with autocast(enabled=self.amp):
-                        loss_items = model.loss(batch, preds)[1]
+                    # AMP disabled
+                    # with autocast(enabled=self.amp):
+                    loss_items = model.loss(batch, preds)[1]
                     self.loss += loss_items
-                    # 及时释放 loss_items 的引用
+                    # Release loss_items promptly.
                     del loss_items
 
             # Postprocess
@@ -229,18 +233,18 @@ class BaseValidator:
                 self.plot_val_samples(batch, batch_i)
                 self.plot_predictions(batch, preds, batch_i)
 
-            # 内存管理：定期清理内存，防止内存爆炸
+            # Memory management: periodic cleanup to avoid memory spikes.
             if (batch_i + 1) % memory_cleanup_interval == 0:
-                # 清理中间变量
+                # Clear intermediate variables.
                 del preds
                 if not self.training:
-                    # 对于非训练模式，也清理 batch（训练模式需要保留用于 loss）
-                    if batch_i > 0:  # 保留第一个 batch 用于可能的调试
+                    # For non-training mode, also clear batch (training mode needs it for loss).
+                    if batch_i > 0:  # Keep the first batch for possible debugging.
                         del batch
-                # 强制垃圾回收
+                # Force garbage collection.
                 gc.collect()
                 if jt.has_cuda and "cuda" in str(self.device).lower():
-                    jt.gc()  # Jittor 的内存清理
+                    jt.gc()  # Jittor memory cleanup
 
             self.run_callbacks("on_val_batch_end")
         stats = self.get_stats()
@@ -250,7 +254,7 @@ class BaseValidator:
         self.print_results()
         self.run_callbacks("on_val_end")
         
-        # 内存管理：验证结束后清理内存
+        # Memory management: cleanup after validation.
         if self.training:
             # CRITICAL FIX: Don't modify training model precision here
             # This was causing model precision to switch from float16 to float32
@@ -262,14 +266,14 @@ class BaseValidator:
                 jt.gc()
             
             if self.compute_loss:
-                # 将 loss 移到 CPU 并转换为 Python 数值，释放 GPU 内存
+                # Move loss to CPU and convert to Python values to free GPU memory.
                 loss_cpu = self.loss.cpu() / len(self.dataloader)
                 results = {**stats, **trainer.label_loss_items(loss_cpu, prefix="val")}
-                # 清理 loss 变量
+                # Clear loss variables.
                 del self.loss, loss_cpu
             else:
                 results = stats
-            # 强制垃圾回收
+            # Force garbage collection.
             gc.collect()
             if jt.has_cuda and "cuda" in str(self.device).lower():
                 jt.gc()
@@ -281,19 +285,19 @@ class BaseValidator:
                 )
             )
             if self.args.save_json and self.jdict:
-                # 优化：分批保存大文件，减少内存峰值
+                # Optimization: save large files in batches to reduce peak memory.
                 json_path = str(self.save_dir / "predictions.json")
                 LOGGER.info(f"Saving {json_path}...")
                 with open(json_path, "w") as f:
                     json.dump(self.jdict, f)  # flatten and save
-                # 保存后清理 jdict 以释放内存
+                # Clear jdict after saving to free memory.
                 del self.jdict
                 gc.collect()
                 stats = self.eval_json(stats)  # update stats
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
             
-            # 最终内存清理
+            # Final memory cleanup.
             gc.collect()
             if jt.has_cuda and "cuda" in str(self.device).lower():
                 jt.gc()

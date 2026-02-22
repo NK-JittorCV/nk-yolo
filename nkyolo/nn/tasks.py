@@ -107,6 +107,9 @@ class BaseModel(nn.Module):
         self.criterion = None
         self.clip_model = None
         self.yaml_file = ""
+        self.names = {}
+        self.transforms = None
+        self.supports_flops = True
 
     def execute(self, x, *args, **kwargs):
         """
@@ -292,7 +295,7 @@ class BaseModel(nn.Module):
             verbose (bool): Whether to log transfer progress.
         """
         
-        # 1. 取出权重 state_dict
+        # 1. Extract weight state_dict
         if isinstance(weights, dict):
             model_data = weights.get("model", weights)
         else:
@@ -306,19 +309,21 @@ class BaseModel(nn.Module):
             raise TypeError(f"Unsupported weights type: {type(model_data)}")
 
         csd = state_dict_to_jittor(csd)
+        droppable_suffixes = (".anchors", ".strides")
+        csd = {k: v for k, v in csd.items() if not k.endswith(droppable_suffixes)}
 
-        # 2. 过滤掉 shape 不匹配的键
+        # 2. Filter out keys with shape mismatch
         model_sd = self.state_dict()
         updated_csd = {
             k: v for k, v in csd.items()
             if k in model_sd and tuple(model_sd[k].shape) == tuple(v.shape)
         }
 
-        # 3. 加载
+        # 3. Load
         self.load_state_dict(updated_csd)
         len_updated = len(updated_csd)
 
-        # 4. 处理首层卷积通道数不同的情况
+        # 4. Handle first conv channel mismatch
         first_conv = "model.0.conv.weight"
         if first_conv not in updated_csd and first_conv in model_sd:
             c1, c2, h, w = model_sd[first_conv].shape
@@ -947,29 +952,40 @@ def _build_model_from_yaml(task, yaml_config):
 
 
 def _load_state_dict_strict(model, state_dict):
-    model_keys = set(model.state_dict().keys())
-    state_keys = set(state_dict.keys())
-    missing = model_keys - state_keys
-    unexpected = state_keys - model_keys
-    if unexpected:
-        droppable_suffixes = (".anchors", ".strides")
-        droppable = {k for k in state_dict.keys() if k.endswith(droppable_suffixes)}
-        if unexpected.issubset(droppable):
-            for k in droppable:
-                state_dict.pop(k, None)
-        else:
-            # Be permissive with extra keys in checkpoints; they are not used by the model.
-            for k in list(unexpected):
-                state_dict.pop(k, None)
-    # Recompute after cleanup.
-    state_keys = set(state_dict.keys())
-    missing = model_keys - state_keys
-    unexpected = state_keys - model_keys
-    if missing or unexpected:
+    def _state_shape(val):
+        if isinstance(val, jt.Var):
+            return tuple(val.shape)
+        if _TORCH_AVAILABLE and isinstance(val, torch.Tensor):
+            return tuple(val.shape)
+        if isinstance(val, np.ndarray):
+            return tuple(val.shape)
+        return None
+
+    model_sd = model.state_dict()
+    droppable_suffixes = (".anchors", ".strides")
+    cleaned = {}
+    mismatched = []
+
+    for k, v in state_dict.items():
+        if k.endswith(droppable_suffixes):
+            continue
+        if k not in model_sd:
+            # Drop unexpected keys (not used by current model definition).
+            continue
+        ms = _state_shape(model_sd[k])
+        vs = _state_shape(v)
+        if ms is not None and vs is not None and ms != vs:
+            mismatched.append((k, ms, vs))
+            continue
+        cleaned[k] = v
+
+    if mismatched:
+        mismatch_str = ", ".join(f"{k}: {ms} vs {vs}" for k, ms, vs in mismatched[:5])
         raise RuntimeError(
-            f"State dict keys mismatch. Missing: {len(missing)}, unexpected: {len(unexpected)}."
+            f"State dict shape mismatch for {len(mismatched)} keys. Examples: {mismatch_str}"
         )
-    model.load_state_dict(state_dict)
+
+    model.load_state_dict(cleaned)
 
 
 def _to_numpy(obj):

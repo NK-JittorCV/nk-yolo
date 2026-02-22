@@ -1147,7 +1147,7 @@ class TorchVision(nn.Module):
         truncate (int, optional): Number of layers to truncate from the end if `unwrap` is True. Default is 2.
         split (bool, optional): Returns output from intermediate child modules as list. Default is False.
     """
-    #TODO:jittor没和torchvison对应的板块
+    # TODO: Jittor does not have a direct torchvision equivalent module here.
     def __init__(self, c1, c2, model, weights="DEFAULT", unwrap=True, truncate=2, split=False):
         """Load the model and weights from Jittor."""
         import jittor as jt

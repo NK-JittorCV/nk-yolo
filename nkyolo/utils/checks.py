@@ -33,7 +33,6 @@ from nkyolo.utils import (
     ONLINE,
     PYTHON_VERSION,
     ROOT,
-    TORCHVISION_VERSION,
     USER_CONFIG_DIR,
     WINDOWS,
     Retry,
@@ -400,41 +399,6 @@ def check_requirements(requirements=ROOT.parent / "requirements.txt", exclude=()
     return True
 
 
-def check_torchvision():
-    """
-    Checks the installed versions of PyTorch and Torchvision to ensure they're compatible.
-
-    This function checks the installed versions of PyTorch and Torchvision, and warns if they're incompatible according
-    to the provided compatibility table based on:
-    https://github.com/pytorch/vision#installation.
-
-    The compatibility table is a dictionary where the keys are PyTorch versions and the values are lists of compatible
-    Torchvision versions.
-    """
-    # Compatibility table
-    compatibility_table = {
-        "2.4": ["0.19"],
-        "2.3": ["0.18"],
-        "2.2": ["0.17"],
-        "2.1": ["0.16"],
-        "2.0": ["0.15"],
-        "1.13": ["0.14"],
-        "1.12": ["0.13"],
-    }
-
-    # Extract only the major and minor versions
-    v_torch = ".".join(jt.__version__.split("+")[0].split(".")[:2])
-    if v_torch in compatibility_table:
-        compatible_versions = compatibility_table[v_torch]
-        v_torchvision = ".".join(TORCHVISION_VERSION.split("+")[0].split(".")[:2])
-        if all(v_torchvision != v for v in compatible_versions):
-            print(
-                f"WARNING ⚠️ torchvision=={v_torchvision} is incompatible with torch=={v_torch}.\n"
-                f"Run 'pip install torchvision=={compatible_versions[0]}' to fix torchvision or "
-                "'pip install -U torch torchvision' to update both.\n"
-                "For a full compatibility table see https://github.com/pytorch/vision#installation"
-            )
-
 
 def check_suffix(file="yolo11n.pt", suffix=".pt", msg=""):
     """Check file(s) for acceptable suffix."""
@@ -615,7 +579,7 @@ def collect_system_info():
 
 def check_amp(model):
     """
-    Checks the PyTorch Automatic Mixed Precision (AMP) functionality of a YOLO11 model. If the checks fail, it means
+    Checks Automatic Mixed Precision (AMP) functionality for a YOLO11 model. If the checks fail, it means
     there are anomalies with AMP on the system that may cause NaN losses or zero-mAP results, so AMP will be disabled
     during training.
 
@@ -634,31 +598,8 @@ def check_amp(model):
     Returns:
         (bool): Returns True if the AMP functionality works correctly with YOLO11 model, else False.
     """
-    from nkyolo.utils.jittor_utils import autocast
-
-    device = next(model.parameters()).device  # get model device
-    if device.type in {"cpu", "mps"}:
-        return False  # AMP only used on CUDA devices
-
-    def amp_allclose(m, im):
-        """All close FP32 vs AMP results."""
-        batch = [im] * 8
-        imgsz = max(256, int(model.stride.max() * 4))  # max stride P5-32 and P6-64
-        a = m(batch, imgsz=imgsz, device=device, verbose=False)[0].boxes.data  # FP32 inference
-        with autocast(enabled=True):
-            b = m(batch, imgsz=imgsz, device=device, verbose=False)[0].boxes.data  # AMP inference
-        del m
-        return a.shape == b.shape and jt.allclose(a, b.float(), atol=0.5)  # close to 0.5 absolute tolerance
-
-    im = ASSETS / "bus.jpg"  # image to check
-    prefix = colorstr("AMP: ")
-    LOGGER.info(f"{prefix}running Automatic Mixed Precision (AMP) checks...")
-    warning_msg = "Setting 'amp=True'. If you experience zero-mAP or NaN losses you can disable AMP with amp=False."
-    from nkyolo import YOLO
-
-    assert amp_allclose(YOLO("yolo11n.pt"), im)
-    LOGGER.info(f"{prefix}checks passed ✅")
-    return True
+    # AMP is temporarily disabled.
+    raise NotImplementedError("AMP is temporarily disabled.")
 
 
 def git_describe(path=ROOT):  # path must be a directory
@@ -709,6 +650,5 @@ def cuda_is_available() -> bool:
 
 # Run checks and define constants
 check_python("3.8", hard=False, verbose=True)  # check python version
-check_torchvision()  # check torch-torchvision compatibility
 IS_PYTHON_MINIMUM_3_10 = check_python("3.10", hard=False)
 IS_PYTHON_3_12 = PYTHON_VERSION.startswith("3.12")

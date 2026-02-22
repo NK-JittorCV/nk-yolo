@@ -12,8 +12,6 @@ def export_formats():
     x = [
         ["JittorPickle", "pkl", ".pkl", True, True],
         ["jtScript", "jtscript", ".jtscript", True, True],
-        ["PyTorch", "torch", ".pt", True, True],  # PyTorch support
-        ["PyTorchPTH", "torch", ".pth", True, True],
         # TODO: Add support for the following formats
         # ["ONNX", "onnx", ".onnx", True, True],
         # ["OpenVINO", "openvino", "_openvino_model", True, False],
@@ -37,4 +35,3 @@ def gd_outputs(gd):
         name_list.append(node.name)
         input_list.extend(node.input)
     return sorted(f"{x}:0" for x in list(set(name_list) - set(input_list)) if not x.startswith("NoOp"))
-

@@ -133,13 +133,10 @@ if __name__ == "__main__":
     from nkyolo.utils import DEFAULT_CFG_DICT
     import jittor as jt
     
-    # Disable Jittor's internal parallel compiler if available
+    # Disable Jittor's internal parallel compiler
     if _rank_id >= 0:
-        if hasattr(jt.flags, 'parallel_compile'):
-            jt.flags.parallel_compile = False
-        if hasattr(jt.flags, 'use_parallel_op_compiler'):
-            jt.flags.use_parallel_op_compiler = 0
-        if hasattr(jt.flags, 'cache_path') and os.environ.get("JITTOR_CACHE_PATH"):
+        jt.flags.use_parallel_op_compiler = 0
+        if os.environ.get("JITTOR_CACHE_PATH"):
             jt.flags.cache_path = os.environ["JITTOR_CACHE_PATH"]
 
     cfg = DEFAULT_CFG_DICT.copy()
@@ -186,7 +183,7 @@ def generate_ddp_command(world_size, trainer):
     # MPI will automatically set RANK, LOCAL_RANK, and WORLD_SIZE environment variables
     # Use --allow-run-as-root if needed, and --bind-to none to avoid CPU binding issues
     cmd = ["mpirun"]
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
+    if os.name != "nt" and os.geteuid() == 0:
         cmd.append("--allow-run-as-root")
     cmd += [
         "-np", str(world_size),

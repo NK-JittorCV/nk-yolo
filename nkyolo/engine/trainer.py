@@ -55,7 +55,6 @@ from nkyolo.utils.jittor_utils import (
     EarlyStopping,
     LambdaLR,
     ModelEMA,
-    autocast,
     convert_optimizer_state_dict_to_fp16,
     init_seeds,
     one_cycle,
@@ -65,7 +64,6 @@ from nkyolo.utils.jittor_utils import (
     state_dict_to_jittor,
 )
 
-_TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
 _JT_DISTRIBUTED_AVAILABLE = importlib.util.find_spec("jittor.distributed") is not None
 
 class BaseTrainer:
@@ -129,7 +127,7 @@ class BaseTrainer:
         self.metrics = None
         self.plots = {}
         self.freeze_layer_names = []
-        init_seeds(self.args.seed + 1 + RANK, deterministic=self.args.deterministic)
+        init_seeds(self.args.seed, deterministic=self.args.deterministic)
 
         # Dirs
         self.save_dir = get_save_dir(self.args)
@@ -158,10 +156,6 @@ class BaseTrainer:
         self.trainset, self.testset = self.get_dataset()
         self.ema = None
         
-        # Initialize framework detection (will be updated after model is loaded)
-        self.is_torch = False
-        self.framework = "jittor"
-
         # Optimization utils init
         self.lf = None
         self.scheduler = None
@@ -196,35 +190,10 @@ class BaseTrainer:
         for callback in self.callbacks.get(event, []):
             callback(self)
 
-    def _detect_framework(self):
-        """Detect whether the model uses PyTorch or Jittor framework."""
-        if isinstance(self.model, nn.Module):
-            self.is_torch = False
-            self.framework = "jittor"
-            return
-        
-        # Check if model is PyTorch
-        if _TORCH_AVAILABLE:
-            import torch
-            if isinstance(self.model, torch.nn.Module):
-                self.is_torch = True
-                self.framework = "pytorch"
-                return
-        
-        # Default to Jittor
-        self.is_torch = False
-        self.framework = "jittor"
-
     def train(self):
         """Allow device='', device=None on Multi-GPU systems to default to device=0."""
         # Check if we're already in an MPI environment (to avoid recursive mpirun calls)
-        # MPI sets various environment variables: OMPI_COMM_WORLD_SIZE, PMI_SIZE, or we check RANK
-        is_mpi_env = (
-            "OMPI_COMM_WORLD_SIZE" in os.environ or 
-            "PMI_SIZE" in os.environ or 
-            "WORLD_SIZE" in os.environ or
-            (RANK >= 0 and "LOCAL_RANK" in os.environ)
-        )
+        is_mpi_env = bool(jt.mpi)
         
         device_list = parse_device_list(self.args.device)
         if device_list:
@@ -236,18 +205,9 @@ class BaseTrainer:
         else:  # i.e. device=None or device=''
             world_size = 0
 
-        # If we're in MPI environment, get actual world size from MPI
+        # If we're in MPI environment, get actual world size from Jittor
         if is_mpi_env:
-            if "OMPI_COMM_WORLD_SIZE" in os.environ:
-                world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
-            elif "PMI_SIZE" in os.environ:
-                world_size = int(os.environ["PMI_SIZE"])
-            elif "WORLD_SIZE" in os.environ:
-                world_size = int(os.environ["WORLD_SIZE"])
-            elif RANK >= 0:
-                # If RANK is set but world_size is not, we need to infer it
-                # This is a fallback - ideally MPI should set WORLD_SIZE
-                world_size = max(world_size, 1)  # At least 1 if RANK is set
+            world_size = int(jt.world_size)
 
         # If dataset is tiny, DDP often deadlocks; fall back to single-process training.
         if world_size > 1 and not is_mpi_env:
@@ -288,15 +248,12 @@ class BaseTrainer:
             ddp_cleanup(self, str(file))
 
         else:
-            try:
-                self._do_train(world_size)
-            except Exception as e:
-                if self._is_oom_error(e):
-                    self._abort_all_on_oom(e)
-                raise
+            self._do_train(world_size)
 
     def _get_world_size(self, default=1):
-        """Return world size from MPI/torch env vars, or default."""
+        """Return world size from Jittor MPI when available, or fallback to env/default."""
+        if jt.mpi:
+            return int(jt.world_size)
         if "OMPI_COMM_WORLD_SIZE" in os.environ:
             return int(os.environ["OMPI_COMM_WORLD_SIZE"])
         if "PMI_SIZE" in os.environ:
@@ -438,7 +395,9 @@ class BaseTrainer:
             
             # Get actual world size from environment if available
             actual_world_size = world_size
-            if "OMPI_COMM_WORLD_SIZE" in os.environ:
+            if jt.mpi:
+                actual_world_size = int(jt.world_size)
+            elif "OMPI_COMM_WORLD_SIZE" in os.environ:
                 actual_world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
             elif "PMI_SIZE" in os.environ:
                 actual_world_size = int(os.environ["PMI_SIZE"])
@@ -462,15 +421,16 @@ class BaseTrainer:
         ckpt = self.setup_model()
         self.set_model_attributes()
         
-        # Update framework detection after model is loaded
-        self._detect_framework()
-        
         # Setup AMP (Automatic Mixed Precision)
         self._setup_amp(world_size)
         
         # Setup DDP (Distributed Data Parallel) if needed
         if world_size > 1:
             self._setup_model_ddp(world_size)
+
+        # Ensure model parameters are identical across MPI ranks after initialization/loading.
+        if jt.mpi and int(jt.world_size) > 1:
+            self.model.mpi_param_broadcast(root=0)
 
         # Freeze layers after potential DDP wrapping so grad flags are applied on the active model.
         self._freeze_layers()
@@ -487,7 +447,7 @@ class BaseTrainer:
         # Dataloaders
         # Jittor MPI expects the Dataset batch size to be the global batch size
         # (sum across all ranks), not per-rank batch size.
-        if world_size > 1 and not self.is_torch:
+        if world_size > 1:
             if self.batch_size < world_size:
                 raise ValueError(
                     f"Batch size {self.batch_size} must be >= world_size {world_size} for Jittor MPI training."
@@ -553,9 +513,7 @@ class BaseTrainer:
             if any(x in k for x in freeze_layer_names):
                 LOGGER.info(f"Freezing layer '{k}'")
 
-            if self.is_torch:
-                v.requires_grad = not freeze_param
-            elif isinstance(v, jt.Var):
+            if isinstance(v, jt.Var):
                 if freeze_param:
                     v.stop_grad()
                 elif str(v.dtype).startswith("float"):
@@ -563,63 +521,27 @@ class BaseTrainer:
     
     def _setup_amp(self, world_size):
         """Setup Automatic Mixed Precision (AMP) for training."""
-        # Get AMP setting from args, default to False
-        self.amp = getattr(self.args, 'amp', False)
-        
-        if self.is_torch:
-            # PyTorch AMP setup
-            if not _TORCH_AVAILABLE:
-                raise ModuleNotFoundError("torch is required for PyTorch AMP.")
-            import torch
-            import torch.distributed as dist
-            
-            # Check AMP compatibility on main process
-            if self.amp and RANK in {-1, 0}:
-                from nkyolo.utils.checks import check_amp
-                callbacks_backup = callbacks.default_callbacks.copy()
-                self.amp = check_amp(self.model)
-                callbacks.default_callbacks = callbacks_backup
-            
-            # Broadcast AMP setting in DDP mode
-            if RANK > -1 and world_size > 1 and dist.is_initialized():
-                amp_tensor = torch.tensor([int(self.amp)], dtype=torch.int32)
-                if torch.cuda.is_available():
-                    amp_tensor = amp_tensor.cuda()
-                dist.broadcast(amp_tensor, src=0)
-                self.amp = bool(amp_tensor.item())
-            
-            self.amp = bool(self.amp)
-            self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp) if torch.cuda.is_available() else None
-        else:
-            # Jittor AMP setup
-            # Jittor handles AMP through autocast context manager during training
-            # No need to set flags here - autocast() will handle it per-batch
-            self.amp = bool(self.amp)
-            self.scaler = None  # Jittor handles AMP internally via autocast context manager
+        # AMP is temporarily disabled.
+        # self.amp = bool(getattr(self.args, "amp", False))
+        requested_amp = bool(getattr(self.args, "amp", False))
+        if requested_amp:
+            raise NotImplementedError("AMP is temporarily disabled.")
+        self.amp = False
+        self.scaler = None
     
     def _setup_model_ddp(self, world_size):
         """Setup Distributed Data Parallel (DDP) wrapper for model in multi-GPU training."""
         if world_size <= 1:
             return
         
-        if self.is_torch:
-            if not _TORCH_AVAILABLE:
-                raise ModuleNotFoundError("torch is required for PyTorch DDP.")
-            import torch
-            import torch.nn as torch_nn
-            if RANK > -1:
-                self.model = torch_nn.parallel.DistributedDataParallel(
-                    self.model, device_ids=[RANK], find_unused_parameters=True
-                )
-        else:
-            if _JT_DISTRIBUTED_AVAILABLE and RANK > -1:
-                from jittor import distributed as jt_dist
+        if _JT_DISTRIBUTED_AVAILABLE and RANK > -1:
+            from jittor import distributed as jt_dist
 
-                self.model = jt_dist.ParallelModel(self.model)
-                LOGGER.info(f"Jittor ParallelModel initialized for rank {RANK}")
-            elif RANK >= 0 and jt.has_cuda:
-                device_id = LOCAL_RANK if LOCAL_RANK >= 0 else RANK
-                LOGGER.info(f"Jittor distributed training enabled for rank {RANK} on device {device_id}")
+            self.model = jt_dist.ParallelModel(self.model)
+            LOGGER.info(f"Jittor ParallelModel initialized for rank {RANK}")
+        elif RANK >= 0 and jt.has_cuda:
+            device_id = LOCAL_RANK if LOCAL_RANK >= 0 else RANK
+            LOGGER.info(f"Jittor distributed training enabled for rank {RANK} on device {device_id}")
 
     def _do_train(self, world_size=1):
         """Train completed, evaluate and plot if specified by arguments."""
@@ -689,15 +611,15 @@ class BaseTrainer:
                         if "momentum" in x:
                             x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
-                # Forward
-                with autocast(self.amp):
-                    batch = self.preprocess_batch(batch)
-                    self.loss, self.loss_items = self.model(batch)
-                    if RANK != -1:
-                        self.loss *= world_size
-                    self.tloss = (
-                        (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
-                    )
+                # Forward (AMP disabled)
+                # with autocast(self.amp):
+                batch = self.preprocess_batch(batch)
+                self.loss, self.loss_items = self.model(batch)
+                if RANK != -1:
+                    self.loss *= world_size
+                self.tloss = (
+                    (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
+                )
                 if self.train_time_start is None:
                     self.train_time_start = time.time()
 
@@ -1146,20 +1068,39 @@ class BaseTrainer:
                 else:  # weight (with decay)
                     g[0].append(param)
 
+        base_group = None
+        base_weight_decay = 0.0
+        if g[2]:
+            base_group = g[2]
+            base_weight_decay = 0.0
+        elif g[0]:
+            base_group = g[0]
+            base_weight_decay = decay
+        elif g[1]:
+            base_group = g[1]
+            base_weight_decay = 0.0
+        else:
+            raise ValueError("No trainable parameters found for optimizer construction.")
+
         if name in {"Adam", "Adamax", "AdamW", "NAdam", "RAdam"}:
-            optimizer = getattr(optim, name, optim.Adam)(g[2], lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
+            optimizer = getattr(optim, name, optim.Adam)(base_group, lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
         elif name == "RMSProp":
-            optimizer = optim.RMSprop(g[2], lr=lr, momentum=momentum)
+            optimizer = optim.RMSprop(base_group, lr=lr, momentum=momentum)
         elif name == "SGD":
-            optimizer = optim.SGD(g[2], lr=lr, momentum=momentum, nesterov=True)
+            optimizer = optim.SGD(base_group, lr=lr, momentum=momentum, nesterov=True)
         else:
             raise NotImplementedError(
                 f"Optimizer '{name}' not found in list of available optimizers "
                 f"[Adam, AdamW, NAdam, RAdam, RMSProp, SGD, auto]."
             )
 
-        optimizer.add_param_group({"params": g[0], "weight_decay": decay})  # add g0 with weight_decay
-        optimizer.add_param_group({"params": g[1], "weight_decay": 0.0})  # add g1 (BatchNorm2d weights)
+        optimizer.param_groups[0]["weight_decay"] = base_weight_decay
+        if base_group is not g[0] and g[0]:
+            optimizer.add_param_group({"params": g[0], "weight_decay": decay})  # add g0 with weight_decay
+        if base_group is not g[1] and g[1]:
+            optimizer.add_param_group({"params": g[1], "weight_decay": 0.0})  # add g1 (BatchNorm2d weights)
+        if base_group is not g[2] and g[2]:
+            optimizer.add_param_group({"params": g[2], "weight_decay": 0.0})  # add g2 (biases)
         LOGGER.info(
             f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}, momentum={momentum}) with parameter groups "
             f'{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias(decay=0.0)'

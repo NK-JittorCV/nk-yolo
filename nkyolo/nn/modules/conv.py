@@ -23,7 +23,7 @@ __all__ = (
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
     """Pad to 'same' shape outputs."""
     if isinstance(k, (int, tuple, list)):
-        # 统一将k转换为tuple类型
+        # Normalize k to a tuple.
         k = (k, k) if isinstance(k, int) else tuple(k)
         if d > 1:
             k = tuple(d * (x - 1) + 1 for x in k)
@@ -194,6 +194,9 @@ class RepConv(nn.Module):
         self.bn = nn.BatchNorm2d(num_features=c1) if bn and c2 == c1 and s == 1 else None
         self.conv1 = Conv(c1, c2, k, s, p=p, g=g, act=False)
         self.conv2 = Conv(c1, c2, 1, s, p=(p - k // 2), g=g, act=False)
+        self.conv = None
+        self.id_tensor = None
+        self.nm = None
 
     def execute_fuse(self, x):
         """Forward process."""
@@ -231,7 +234,7 @@ class RepConv(nn.Module):
             beta = branch.bn.bias
             eps = branch.bn.eps
         elif isinstance(branch, nn.BatchNorm2d):
-            if not hasattr(self, "id_tensor"):
+            if self.id_tensor is None:
                 input_dim = self.c1 // self.g
                 kernel_value = np.zeros((self.c1, input_dim, 3, 3), dtype=np.float32)
                 for i in range(self.c1):
@@ -249,7 +252,7 @@ class RepConv(nn.Module):
 
     def fuse_convs(self):
         """Combines two convolution layers into a single layer and removes unused attributes from the class."""
-        if hasattr(self, "conv"):
+        if self.conv is not None:
             return
         kernel, bias = self.get_equivalent_kernel_bias()
         self.conv = nn.Conv2d(
@@ -268,11 +271,11 @@ class RepConv(nn.Module):
             para.detach()
         self.__delattr__("conv1")
         self.__delattr__("conv2")
-        if hasattr(self, "nm"):
+        if self.nm is not None:
             self.__delattr__("nm")
-        if hasattr(self, "bn"):
+        if self.bn is not None:
             self.__delattr__("bn")
-        if hasattr(self, "id_tensor"):
+        if self.id_tensor is not None:
             self.__delattr__("id_tensor")
 
 
