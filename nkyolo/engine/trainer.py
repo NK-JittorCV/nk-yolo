@@ -1041,8 +1041,26 @@ class BaseTrainer:
         Returns:
             (jt.optim.Optimizer): The constructed optimizer.
         """
-        g = [], [], []  # optimizer parameter groups
         bn = tuple(v for k, v in nn.__dict__.items() if "Norm" in k)  # normalization layers, i.e. BatchNorm2d()
+
+        def _group_params():
+            groups = [], [], []
+            for module_name, module in model.named_modules():
+                for param_name, param in module.named_parameters(recurse=False):
+                    fullname = f"{module_name}.{param_name}" if module_name else param_name
+                    if "running_mean" in fullname or "running_var" in fullname or "num_batches_tracked" in fullname:
+                        continue
+                    if isinstance(param, jt.Var) and param.is_stop_grad():
+                        continue
+                    if "bias" in fullname:  # bias (no decay)
+                        groups[2].append(param)
+                    elif isinstance(module, bn):  # weight (no decay)
+                        groups[1].append(param)
+                    else:  # weight (with decay)
+                        groups[0].append(param)
+            return groups
+
+        g = _group_params()
         if name == "auto":
             LOGGER.info(
                 f"{colorstr('optimizer:')} 'optimizer=auto' found, "
@@ -1054,19 +1072,15 @@ class BaseTrainer:
             name, lr, momentum = ("SGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
             self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
 
-        for module_name, module in model.named_modules():
-            for param_name, param in module.named_parameters(recurse=False):
-                fullname = f"{module_name}.{param_name}" if module_name else param_name
-                if "running_mean" in fullname or "running_var" in fullname or "num_batches_tracked" in fullname:
-                    continue
-                if isinstance(param, jt.Var) and param.is_stop_grad():
-                    continue
-                if "bias" in fullname:  # bias (no decay)
-                    g[2].append(param)
-                elif isinstance(module, bn):  # weight (no decay)
-                    g[1].append(param)
-                else:  # weight (with decay)
-                    g[0].append(param)
+        if not (g[0] or g[1] or g[2]):
+            for k, v in model.named_parameters():
+                is_bn_running_stat = "running_mean" in k or "running_var" in k or "num_batches_tracked" in k
+                freeze_param = is_bn_running_stat or "stride" in k or ".dfl" in k or any(
+                    x in k for x in self.freeze_layer_names
+                )
+                if isinstance(v, jt.Var) and not freeze_param and str(v.dtype).startswith("float"):
+                    v.start_grad()
+            g = _group_params()
 
         base_group = None
         base_weight_decay = 0.0

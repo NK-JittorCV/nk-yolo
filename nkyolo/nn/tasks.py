@@ -284,6 +284,11 @@ class BaseModel(nn.Module):
             m.stride.stop_grad()  # stride is a configuration parameter, not a trainable weight
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
+            m.anchors.stop_grad()
+            m.strides.stop_grad()
+            m.stride.persistent = False
+            m.anchors.persistent = False
+            m.strides.persistent = False
         return self
 
     def load(self, weights, verbose=True):

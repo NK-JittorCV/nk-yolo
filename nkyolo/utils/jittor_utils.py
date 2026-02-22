@@ -511,7 +511,7 @@ def safe_deepcopy_jittor(obj):
 class ModelEMA:
     """
     Updated Exponential Moving Average (EMA) from https://github.com/rwightman/pytorch-image-models.
-    Keeps a moving average of everything in the model state_dict (parameters and buffers).
+    Keeps a moving average of trainable parameters and copies buffers directly.
     """
     def __init__(self, model, decay=0.9999, tau=2000, updates=0):
         """Initialize EMA for 'model' with given arguments."""
@@ -520,6 +520,7 @@ class ModelEMA:
 
         self.ema = None
         self._ema_pairs = []
+        self._ema_buffers = []
         self.updates = updates if self.enabled else 0  # number of EMA updates
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp
         if not self.enabled:
@@ -529,10 +530,16 @@ class ModelEMA:
             p.stop_grad()
         ema_sd = self.ema.state_dict()
         model_sd = model.state_dict()
+        skip_suffixes = (".anchors", ".strides")
         for k, ema_v in ema_sd.items():
+            if k.endswith(skip_suffixes):
+                continue
             model_v = model_sd.get(k)
             if isinstance(ema_v, jt.Var) and isinstance(model_v, jt.Var):
-                self._ema_pairs.append((ema_v, model_v))
+                if model_v.is_stop_grad():
+                    self._ema_buffers.append((ema_v, model_v))
+                else:
+                    self._ema_pairs.append((ema_v, model_v))
 
     def update(self, model):
         """Update EMA parameters."""
@@ -544,7 +551,10 @@ class ModelEMA:
             d = self.decay(self.updates) if callable(self.decay) else self.decay
             for ema_v, model_v in self._ema_pairs:
                 ema_v.update(ema_v * d + (1 - d) * model_v)
-                ema_v.sync()
+            for ema_v, model_v in self._ema_buffers:
+                ema_v.update(model_v)
+            if jt.flags.use_cuda:
+                jt.sync_all(True)
 
     def update_attr(self, model, include=(), exclude=("process_group", "reducer")):
         """Updates attributes and saves stripped model with optimizer removed."""

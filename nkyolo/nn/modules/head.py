@@ -38,10 +38,13 @@ class Detect(nn.Module):
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = jt.zeros(self.nl)  # strides computed during build
         self.stride.stop_grad()  # stride is a configuration parameter, not a trainable weight
+        self.stride.persistent = False
         self.anchors = jt.empty(0)
         self.anchors.stop_grad()
+        self.anchors.persistent = False
         self.strides = jt.empty(0)
         self.strides.stop_grad()
+        self.strides.persistent = False
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
             [nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch]
@@ -107,12 +110,17 @@ class Detect(nn.Module):
         """Decode predicted bounding boxes and class probabilities based on multiple-level feature maps."""
         # Inference path
         shape = x[0].shape  # BCHW
+        shape = tuple(shape) if shape is not None else None
+        if self.shape is not None and not isinstance(self.shape, tuple):
+            self.shape = tuple(self.shape)
         x_cat = jt.concat([xi.view(shape[0], self.no, -1) for xi in x], 2)
-        # if self.format != "imx" and (self.dynamic or self.shape != shape):
-        self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
-        self.anchors.stop_grad()
-        self.strides.stop_grad()
-        self.shape = shape
+        if self.dynamic or self.shape is None or self.shape != shape:
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.anchors.stop_grad()
+            self.strides.stop_grad()
+            self.anchors.persistent = False
+            self.strides.persistent = False
+            self.shape = shape
 
         if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
             box = x_cat[:, : self.reg_max * 4]
