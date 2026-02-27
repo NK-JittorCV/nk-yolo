@@ -12,7 +12,7 @@ import jittor as jt
 import jittor.nn as nn
 
 from nkyolo.utils import LOGGER
-from nkyolo.utils.metrics import batch_probiou, box_iou
+from nkyolo.utils.metrics import batch_probiou
 
 
 class Profile(contextlib.ContextDecorator):

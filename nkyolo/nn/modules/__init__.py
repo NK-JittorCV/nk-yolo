@@ -162,5 +162,7 @@ __all__ = (
     "PSA",
     "TorchVision",
     "Index",
+    "MSBlock",
+    "GlobalToken",
     "A2C2f",
 )

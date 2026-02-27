@@ -67,18 +67,14 @@ from nkyolo.nn.modules import (
     WorldDetect,
     v10Detect,
     MSBlock,
-    GlobalToken,
     A2C2f
 )
-from nkyolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
+from nkyolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, yaml_load
 from nkyolo.utils.checks import check_requirements, check_suffix, check_yaml
 from nkyolo.utils.loss import (
     E2EDetectLoss,
     v8ClassificationLoss,
     v8DetectionLoss,
-    v8OBBLoss,
-    v8PoseLoss,
-    v8SegmentationLoss,
 )
 from nkyolo.utils.ops import make_divisible
 from nkyolo.utils.plotting import feature_visualization
@@ -86,7 +82,6 @@ from nkyolo.utils.jittor_utils import (
     fuse_conv_and_bn,
     fuse_deconv_and_bn,
     initialize_weights,
-    intersect_dicts,
     model_info,
     scale_img,
     state_dict_to_jittor,

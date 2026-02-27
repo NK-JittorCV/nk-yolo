@@ -16,7 +16,7 @@ import psutil
 import jittor as jt
 from jittor.dataset import Dataset
 
-from nkyolo.data.utils import FORMATS_HELP_MSG, HELP_URL, IMG_FORMATS
+from nkyolo.data.utils import FORMATS_HELP_MSG, IMG_FORMATS
 from nkyolo.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, RANK, TQDM
 
 
@@ -80,7 +80,7 @@ class BaseDataset(Dataset):
         
         # In MPI distributed training, Jittor Dataset already shards data per process.
         # Only do manual splitting when not running under MPI.
-        if self.split_by_rank and RANK >= 0 and not jt.mpi:
+        if self.split_by_rank and RANK >= 0 and not jt.in_mpi:
             # Get world size from MPI environment
             if "OMPI_COMM_WORLD_SIZE" in os.environ:
                 world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])

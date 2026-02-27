@@ -95,29 +95,12 @@ import os
 
 # Resolve rank/local-rank before importing Jittor to ensure CUDA_VISIBLE_DEVICES is set early.
 _rank_env = os.environ.get("OMPI_COMM_WORLD_RANK") or os.environ.get("PMI_RANK") or os.environ.get("RANK") or "0"
-_local_rank_env = (
-    os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
-    or os.environ.get("PMI_LOCAL_RANK")
-    or os.environ.get("LOCAL_RANK")
-    or "0"
-)
 _rank_id = int(_rank_env) if (_rank_env.isdigit() or (_rank_env.startswith("-") and _rank_env[1:].isdigit())) else 0
-_local_rank_id = int(_local_rank_env) if (_local_rank_env.isdigit() or (_local_rank_env.startswith("-") and _local_rank_env[1:].isdigit())) else 0
-
-# Set Jittor compile environment early to avoid multi-process cache races/segfaults
-os.environ.setdefault("JIT_PARALLEL", "0")
-os.environ.setdefault("JITTOR_COMPILE_THREADS", "1")
-_cache_root = os.environ.get("JITTOR_CACHE_PATH") or os.path.expanduser("~/.cache/jittor")
-_rank_cache = f"{{_cache_root}}_rank{{_rank_id}}"
-os.environ["JITTOR_CACHE_PATH"] = _rank_cache
-os.makedirs(_rank_cache, exist_ok=True)
-os.makedirs(os.path.join(_rank_cache, "jit"), exist_ok=True)
 
 overrides = {overrides_dict}
 device_list = {device_list_str}
 
-# In MPI, CUDA_VISIBLE_DEVICES should list all GPUs used by the job.
-# LOCAL_RANK selects the device internally; do NOT narrow per rank.
+# In MPI, expose all requested GPUs and let Jittor select by LOCAL_RANK.
 device_value = overrides.get("device", "")
 device_arg = str(device_value).lower().strip()
 force_cpu = device_arg in {{"cpu", "mps"}} or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1"
@@ -132,18 +115,12 @@ if __name__ == "__main__":
     from {module} import {name}
     from nkyolo.utils import DEFAULT_CFG_DICT
     import jittor as jt
-    
-    # Disable Jittor's internal parallel compiler
-    if _rank_id >= 0:
-        jt.flags.use_parallel_op_compiler = 0
-        if os.environ.get("JITTOR_CACHE_PATH"):
-            jt.flags.cache_path = os.environ["JITTOR_CACHE_PATH"]
 
     cfg = DEFAULT_CFG_DICT.copy()
     cfg.update(save_dir='')   # handle the extra key 'save_dir'
     trainer = {name}(cfg=cfg, overrides=overrides)
     trainer.args.model = "{getattr(trainer.hub_session, 'model_url', trainer.args.model)}"
-    results = trainer.train()
+    trainer.train()
     # Ensure MPI ranks terminate cleanly after training/validation
     import sys as _sys, os as _os
     _sys.stdout.flush()
@@ -172,7 +149,9 @@ def generate_ddp_command(world_size, trainer):
     subprocess.run(["mpirun", "--version"], capture_output=True, check=True, timeout=5)
     if not trainer.resume:
         shutil.rmtree(trainer.save_dir)  # remove the save_dir
-    file = generate_ddp_file(trainer)
+    main_file = getattr(__main__, "__file__", "")
+    use_entry_script = bool(main_file) and os.path.isfile(main_file)
+    file = os.path.abspath(main_file) if use_entry_script else generate_ddp_file(trainer)
     
     # Jittor uses MPI for distributed training
     # Set environment variables for Jittor distributed training
@@ -191,17 +170,17 @@ def generate_ddp_command(world_size, trainer):
         sys.executable,
         file,
     ]
+    if use_entry_script:
+        cmd += sys.argv[1:]
     
     # Set environment variables for Jittor distributed training
     env = os.environ.copy()
+    # Ensure all requested GPUs are visible to MPI ranks
+    device_list = parse_device_list(getattr(trainer.args, "device", ""))
+    if device_list:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in device_list)
     env["MASTER_ADDR"] = "127.0.0.1"
     env["MASTER_PORT"] = str(port)
-    # Mark that we're launching MPI to avoid recursive calls
-    env["NKYOLO_MPI_LAUNCHED"] = "1"
-    # Disable Jittor's parallel compilation to prevent segfaults in MPI environments
-    # Multiple MPI processes compiling operators simultaneously causes memory corruption
-    env["JIT_PARALLEL"] = "0"  # Disable Jittor's parallel JIT compilation
-    env["JITTOR_COMPILE_THREADS"] = "1"  # Use single-threaded compilation
     # MPI will set these automatically:
     # - OMPI_COMM_WORLD_SIZE (OpenMPI) or PMI_SIZE (other MPI implementations)
     # - OMPI_COMM_WORLD_RANK (OpenMPI) or PMI_RANK (other MPI implementations)

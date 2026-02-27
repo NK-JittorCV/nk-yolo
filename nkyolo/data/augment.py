@@ -10,6 +10,7 @@ from typing import Tuple, Union, Any
 import cv2
 import numpy as np
 import jittor as jt
+import jittor.nn as F
 from PIL import Image
 
 from nkyolo.data.utils import polygons2masks, polygons2masks_overlap
@@ -17,7 +18,7 @@ from nkyolo.utils import LOGGER, colorstr
 from nkyolo.utils.checks import check_version
 from nkyolo.utils.instance import Instances
 from nkyolo.utils.metrics import bbox_ioa
-from nkyolo.utils.ops import segment2box, xyxyxyxy2xywhr
+from nkyolo.utils.ops import segment2box, xywh2xyxy, xyxyxyxy2xywhr
 
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
 DEFAULT_STD = (1.0, 1.0, 1.0)

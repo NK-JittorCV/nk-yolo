@@ -10,9 +10,8 @@ from pathlib import Path
 from urllib import parse, request
 
 import requests
-import jittor as jt
 
-from nkyolo.utils import LOGGER, TQDM, checks, clean_url, emojis, is_online, url2file
+from nkyolo.utils import LOGGER, TQDM, checks, clean_url, emojis, url2file
 
 # Define NK-YOLO GitHub assets maintained at https://github.com/ultralytics/assets
 GITHUB_ASSETS_REPO = "ultralytics/assets"

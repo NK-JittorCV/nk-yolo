@@ -4,7 +4,6 @@ import math
 
 import jittor as jt
 from jittor import nn
-from jittor.init import constant_,xavier_uniform_
 
 from .conv import Conv
 from .utils import _get_clones, inverse_sigmoid

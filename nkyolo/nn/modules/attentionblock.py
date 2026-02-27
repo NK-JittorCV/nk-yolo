@@ -2,7 +2,6 @@
 
 import jittor as jt
 import jittor.nn as nn
-import copy
 
 # ================================
 # Multihead attention mechanism (MultiheadAttention)
@@ -125,4 +124,3 @@ class MultiheadAttention(nn.Module):
     # ========================
     # Do not implement __getstate__ calling submodules' __getstate__
     # Removed; default behavior is sufficient
-

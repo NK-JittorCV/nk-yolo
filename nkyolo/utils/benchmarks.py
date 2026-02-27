@@ -40,6 +40,7 @@ import yaml
 
 from nkyolo import YOLO, YOLOWorld
 from nkyolo.cfg import TASK2DATA, TASK2METRIC
+from nkyolo.engine.exporter import export_formats
 from nkyolo.utils import ARM64, ASSETS, IS_JETSON, IS_RASPBERRYPI, LINUX, LOGGER, MACOS, TQDM, WEIGHTS_DIR
 from nkyolo.utils.checks import IS_PYTHON_3_12, check_requirements, check_yolo
 from nkyolo.utils.downloads import safe_download
@@ -91,7 +92,7 @@ def benchmark(
     y = []
     t0 = time.time()
     for i, (name, format, suffix, cpu, gpu) in enumerate(zip(*export_formats().values())):
-        emoji, filename = "❌", None  # export defaults
+        filename = None
         # Checks
         if i == 7:  # TF GraphDef
             assert model.task != "obb", "TensorFlow GraphDef not supported for OBB task"
@@ -126,8 +127,6 @@ def benchmark(
             filename = model.export(imgsz=imgsz, format=format, half=half, int8=int8, device=device, verbose=False)
             exported_model = YOLO(filename, task=model.task)
             assert suffix in str(filename), "export failed"
-        emoji = "❎"  # indicates export succeeded
-
         # Predict
         assert model.task != "pose" or i != 7, "GraphDef Pose inference is not supported"
         assert i not in {9, 10}, "inference not supported"  # Edge TPU and TF.js are unsupported

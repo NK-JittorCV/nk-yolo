@@ -29,8 +29,16 @@ from nkyolo.utils.checks import check_file
 class InfiniteDataset(Dataset):
     """Dataset wrapper that repeats forever."""
     
-    def __init__(self, dataset, batch_size=1, shuffle=False, drop_last=False, 
-                 num_workers=0, buffer_size=512):
+    def __init__(
+        self,
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        drop_last=False,
+        num_workers=0,
+        buffer_size=512,
+        dataset_size=None,
+    ):
         """Initialize infinite dataset wrapper.
         
         Args:
@@ -44,9 +52,13 @@ class InfiniteDataset(Dataset):
         super().__init__()
         self.dataset = dataset
         
-        # In MPI, Jittor shards data internally at iteration time.
-        # Keep total_len as the global dataset length; per-rank slicing is handled by Jittor.
-        dataset_len = len(dataset)
+        # Keep a stable dataset length across iterator resets.
+        # `len(dataset)` may change after Jittor iteration in MPI mode, while `dataset.ni`
+        # stores the original sample count for YOLODataset.
+        if dataset_size is not None:
+            dataset_len = int(dataset_size)
+        else:
+            dataset_len = int(getattr(dataset, "ni", len(dataset)))
         
         # Set dataset attributes with correct values from the start
         self.set_attrs(
@@ -162,6 +174,7 @@ class InfiniteDataLoader:
         
         self.original_dataset = dataset
         self.dataset = dataset
+        self.dataset_size = int(getattr(dataset, "ni", len(dataset)))
         
         # Use dataset's collate_fn if not explicitly provided
         if collate_fn is None:
@@ -180,7 +193,7 @@ class InfiniteDataLoader:
         
         # Calculate number of batches
         # In MPI, Jittor shards internally; len(dataset) returns the global dataset length.
-        dataset_size = len(dataset)
+        dataset_size = self.dataset_size
         self.num_batches = dataset_size // batch_size
         if not drop_last and dataset_size % batch_size != 0:
             self.num_batches += 1
@@ -197,19 +210,29 @@ class InfiniteDataLoader:
 
     def __iter__(self):
         """Return self as iterator."""
-        dataset_len = len(self.original_dataset)
-        
         # Jittor RingBuffer size is in bytes. Use configured buffer_size or 512MB minimum.
         final_buffer_size = max(int(self.buffer_size), 512 * 1024 * 1024)
-        
-        self.dataset = InfiniteDataset(
-            self.original_dataset,
-            batch_size=self.batch_size,
-            shuffle=self.shuffle,
-            drop_last=self.drop_last,
-            num_workers=self.num_workers,
-            buffer_size=final_buffer_size
-        )
+
+        # Build wrapped dataset once and keep it stable across resets.
+        if not isinstance(self.dataset, InfiniteDataset):
+            self.dataset = InfiniteDataset(
+                self.original_dataset,
+                batch_size=self.batch_size,
+                shuffle=self.shuffle,
+                drop_last=self.drop_last,
+                num_workers=self.num_workers,
+                buffer_size=final_buffer_size,
+                dataset_size=self.dataset_size,
+            )
+        else:
+            self.dataset.set_attrs(
+                total_len=self.dataset_size,
+                batch_size=self.batch_size,
+                shuffle=self.shuffle,
+                drop_last=self.drop_last,
+                num_workers=self.num_workers,
+                buffer_size=final_buffer_size,
+            )
         
         if self.collate_fn:
             self.dataset.collate_fn = self.collate_fn
@@ -224,7 +247,10 @@ class InfiniteDataLoader:
 
     def reset(self):
         """Reset iterator."""
-        self.iterator = self.dataset.__iter__()
+        if isinstance(self.dataset, InfiniteDataset):
+            self.iterator = self.dataset.__iter__()
+        else:
+            self.__iter__()
 
 
 def seed_worker(worker_id):  # noqa
@@ -266,7 +292,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         stride = int(stride)
 
     # Jittor MPI automatically shards datasets per rank. Avoid manual splitting in MPI mode.
-    split_by_rank = (mode == "train") and (not jt.mpi)
+    split_by_rank = (mode == "train") and (not jt.in_mpi)
 
     return YOLODataset(
         img_path=img_path,
@@ -302,36 +328,31 @@ def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size
     Returns:
         InfiniteDataLoader: Configured data loader.
     """
-    from nkyolo.utils import RANK, LOCAL_RANK, LOGGER
+    from nkyolo.utils import RANK, LOGGER
     
     batch = min(batch, len(dataset))
     workers = min(os.cpu_count() or 1, workers)
-    if RANK >= 0 and workers > 0:
+    effective_rank = RANK if RANK >= 0 else rank
+    if effective_rank >= 0 and workers > 0:
         # Jittor dataloader workers can deadlock under MPI; force single-process loading.
         LOGGER.warning("WARNING ⚠️ DDP detected, forcing dataloader workers=0 to avoid Jittor worker crashes.")
         workers = 0
-    
-    # In distributed training, Jittor automatically handles data splitting via MPI
-    # Each rank will get a different subset of the data
-    # For distributed training, use the actual RANK instead of the passed rank parameter
-    actual_rank = RANK if RANK >= 0 else rank
     
     if buffer_size is None:
         # Jittor RingBuffer size is in bytes. Default to 512MB to avoid worker overflow.
         buffer_size = 512 * 1024 * 1024
     
-    # In distributed training, shuffle should be enabled for each rank
-    # Jittor's MPI will automatically ensure different ranks get different data
-    use_shuffle = shuffle  # Allow shuffle in distributed training, MPI handles data distribution
-    
+    # Keep the natural tail batch. Forcing drop_last under MPI can produce unstable final steps.
+    drop_last = False
+
     loader = InfiniteDataLoader(
         dataset=dataset,
         batch_size=batch,
-        shuffle=use_shuffle,
+        shuffle=shuffle,
         num_workers=workers,
         pin_memory=PIN_MEMORY,
         worker_init_fn=seed_worker,
-        drop_last=False,
+        drop_last=drop_last,
         buffer_size=buffer_size
     )
     

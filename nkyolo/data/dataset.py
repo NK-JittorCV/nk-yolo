@@ -147,7 +147,7 @@ class YOLODataset(BaseDataset):
             if not exists and LOCAL_RANK in {-1, 0}:
                 LOGGER.warning(f"{self.prefix}Dataset cache is stale or invalid, rebuilding: {cache_path}")
 
-        use_mpi = bool(jt.mpi)
+        use_mpi = bool(jt.in_mpi)
         mpi_world = int(jt.world_size) if use_mpi else 1
         mpi_rank = int(jt.rank) if use_mpi else -1
 

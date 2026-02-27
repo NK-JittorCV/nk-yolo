@@ -523,7 +523,12 @@ class Annotator:
         """Show the annotated image."""
         im = Image.fromarray(np.asarray(self.im)[..., ::-1])  # Convert numpy array to PIL Image with RGB to BGR
         if IS_COLAB or IS_KAGGLE:  # can not use IS_JUPYTER as will run for all ipython environments
-            display(im)  # noqa - display() function only available in ipython environments
+            try:
+                from IPython.display import display as ipy_display
+
+                ipy_display(im)
+            except Exception:
+                im.show(title=title)
         else:
             im.show(title=title)
 
@@ -867,6 +872,9 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     LOGGER.info(f"Plotting labels to {save_dir / 'labels.jpg'}... ")
     nc = int(cls.max() + 1)  # number of classes
     boxes = boxes[:1000000]  # hard cap to avoid excessive memory
+    dpi = 120
+    label_figsize = (6, 6)
+    label_img_size = 640
 
     # Subsample for plotting to avoid seaborn pairplot stalls on large datasets.
     # Control via env var NKYOLO_PLOT_MAX (0 disables subsampling).
@@ -888,11 +896,11 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
 
     # Seaborn correlogram
     seaborn.pairplot(x, corner=True, diag_kind="auto", kind="hist", diag_kws=dict(bins=50), plot_kws=dict(pmax=0.9))
-    plt.savefig(save_dir / "labels_correlogram.jpg", dpi=200)
+    plt.savefig(save_dir / "labels_correlogram.jpg", dpi=dpi)
     plt.close()
 
     # Matplotlib labels
-    ax = plt.subplots(2, 2, figsize=(8, 8), tight_layout=True)[1].ravel()
+    ax = plt.subplots(2, 2, figsize=label_figsize, tight_layout=True)[1].ravel()
     y = ax[0].hist(cls, bins=np.linspace(0, nc, nc + 1) - 0.5, rwidth=0.8)
     for i in range(nc):
         y[2].patches[i].set_color([x / 255 for x in colors(i)])
@@ -908,8 +916,8 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     # Rectangles
     boxes_plot = boxes_plot.copy()
     boxes_plot[:, 0:2] = 0.5  # center
-    boxes_plot = ops.xywh2xyxy(boxes_plot) * 1000
-    img = Image.fromarray(np.ones((1000, 1000, 3), dtype=np.uint8) * 255)
+    boxes_plot = ops.xywh2xyxy(boxes_plot) * label_img_size
+    img = Image.fromarray(np.ones((label_img_size, label_img_size, 3), dtype=np.uint8) * 255)
     for cls_i, box in zip(cls_plot[:500], boxes_plot[:500]):
         ImageDraw.Draw(img).rectangle(box, width=1, outline=colors(cls_i))  # plot
     ax[1].imshow(img)
@@ -920,7 +928,7 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
             ax[a].spines[s].set_visible(False)
 
     fname = save_dir / "labels.jpg"
-    plt.savefig(fname, dpi=200)
+    plt.savefig(fname, dpi=dpi)
     plt.close()
     if on_plot:
         on_plot(fname)
@@ -986,7 +994,7 @@ def plot_images(
     fname: str = "images.jpg",
     names: Optional[Dict[int, str]] = None,
     on_plot: Optional[Callable] = None,
-    max_size: int = 1920,
+    max_size: int = 1280,
     max_subplots: int = 16,
     save: bool = True,
     conf_thres: float = 0.25,

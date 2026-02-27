@@ -1,8 +1,6 @@
 # NK-YOLO 🚀 AGPL-3.0 License
 # Refer to https://github.com/ultralytics/ultralytics/blob/main/ultralytics/engine/model.py
 
-import inspect
-import os
 from pathlib import Path
 from typing import List, Union
 
@@ -22,10 +20,8 @@ from nkyolo.utils import (
     SETTINGS,
     callbacks,
     checks,
-    emojis,
     yaml_load,
 )
-from nkyolo.utils.dist import parse_device_list
 
 
 class Model(nn.Module):
@@ -653,12 +649,8 @@ class Model(nn.Module):
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
         if not args.get("resume"):  # manually set model only if not resuming
-            is_mpi_env = bool(jt.mpi)
-            device_list = parse_device_list(args.get("device", ""))
-            spawn_ddp = (len(device_list) > 1) and not is_mpi_env
-            if not spawn_ddp:
-                self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
-                self.model = self.trainer.model
+            self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
+            self.model = self.trainer.model
 
         self.trainer.hub_session = self.session  # attach optional HUB session
         self.trainer.train()

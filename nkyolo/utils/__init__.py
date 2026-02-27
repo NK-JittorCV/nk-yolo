@@ -10,7 +10,6 @@ import re
 import subprocess
 import sys
 import threading
-import time
 import urllib
 import uuid
 from pathlib import Path

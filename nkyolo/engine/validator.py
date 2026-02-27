@@ -129,7 +129,8 @@ class BaseValidator:
             self.amp = False
             self.args.half = False
             self.compute_loss = _as_bool(getattr(self.args, "val_loss", False))
-            model = trainer.ema.ema or trainer.model
+            ema_model = getattr(trainer.ema, "ema", None) if trainer.ema else None
+            model = ema_model or trainer.model_base or trainer.model
             self.model = model
             # CRITICAL FIX: Don't modify training model precision directly
             # AMP is temporarily disabled during validation
@@ -166,8 +167,15 @@ class BaseValidator:
                 self.args.batch = model.batch_size
             elif not pt and not jit:
                 metadata = model.metadata or {}
-                self.args.batch = metadata.get("batch", 1)  # export.py models default to batch-size 1
-                LOGGER.info(f"Setting batch={self.args.batch} input of shape ({self.args.batch}, 3, {imgsz}, {imgsz})")
+                metadata_batch = int(metadata.get("batch", 1) or 1)  # export.py models default to batch-size 1
+                user_batch = int(getattr(self.args, "batch", 0) or 0)
+                if user_batch > 0:
+                    self.args.batch = user_batch
+                else:
+                    self.args.batch = metadata_batch
+                    LOGGER.info(
+                        f"Setting batch={self.args.batch} input of shape ({self.args.batch}, 3, {imgsz}, {imgsz})"
+                    )
 
             if str(self.args.data).split(".")[-1] in {"yaml", "yml"}:
                 self.data = check_det_dataset(self.args.data)

@@ -192,12 +192,12 @@ class v8DetectionLoss:
             # jt.unique requires consistent int32 input to avoid CUDA compilation errors
             # Use cast() instead of int() for explicit type conversion that works across precision modes
             i = i.cast(jt.int32)
-            
+
             # jt.unique with return_counts=True alone returns Var, need return_inverse=True to get tuple
             _, _, counts = jt.unique(i, return_inverse=True, return_counts=True)
             counts = counts.to(dtype=jt.int32)
             max_count = counts.max().item()
-            
+
             batch_data = []
             for j in range(batch_size):
                 matches = i == j
@@ -383,6 +383,9 @@ class v8DetectionLoss:
             loss[0], loss[2] = self.bbox_loss(
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
+        else:
+            # Keep bbox branch in graph so all ranks produce identical grad/allreduce sets in DDP.
+            loss[0] += (pred_distri * 0).sum()
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
@@ -470,7 +473,8 @@ class v8SegmentationLoss(v8DetectionLoss):
 
         # WARNING: lines below prevent Multi-GPU DDP 'unused gradient' PyTorch errors, do not remove
         else:
-            loss[1] += (proto * 0).sum() + (pred_masks * 0).sum()  # inf sums may lead to nan loss
+            # Also touch pred_distri to keep bbox branch grads present on all ranks.
+            loss[1] += (proto * 0).sum() + (pred_masks * 0).sum() + (pred_distri * 0).sum()
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.box  # seg gain
@@ -662,6 +666,10 @@ class v8PoseLoss(v8DetectionLoss):
             loss[1], loss[2] = self.calculate_keypoints_loss(
                 fg_mask, target_gt_idx, keypoints, batch_idx, stride_tensor, target_bboxes, pred_kpts
             )
+        else:
+            # Keep bbox/keypoint branches in graph for DDP grad/allreduce parity.
+            loss[0] += (pred_distri * 0).sum()
+            loss[1] += (pred_kpts * 0).sum()
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.pose  # pose gain
@@ -880,7 +888,8 @@ class v8OBBLoss(v8DetectionLoss):
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
             )
         else:
-            loss[0] += (pred_angle * 0).sum()
+            # Keep all OBB prediction branches in graph for DDP grad/allreduce parity.
+            loss[0] += (pred_angle * 0).sum() + (pred_distri * 0).sum()
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain

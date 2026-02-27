@@ -3,7 +3,6 @@
 
 """Monkey patches to update/extend functionality of existing functions."""
 
-import time
 from pathlib import Path
 
 import cv2
@@ -88,5 +87,4 @@ def jittor_save(*args, **kwargs):
         *args (tuple): Positional arguments to pass to jt.save.
         **kwargs (Any): Keyword arguments to pass to jt.save.
     """
-    for i in range(4):  # 3 retries
-        return _jittor_save(*args, **kwargs)
+    return _jittor_save(*args, **kwargs)

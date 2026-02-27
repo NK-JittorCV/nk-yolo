@@ -181,3 +181,5 @@ datasets/
 ultralytics-pytorch/
 
 tmp
+
+logs

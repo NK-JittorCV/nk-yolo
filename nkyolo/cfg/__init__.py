@@ -131,6 +131,7 @@ CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
 CFG_INT_KEYS = {  # integer-only arguments
     "epochs",
     "patience",
+    "val_batch",
     "workers",
     "seed",
     "close_mosaic",

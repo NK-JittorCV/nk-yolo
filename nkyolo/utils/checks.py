@@ -20,7 +20,6 @@ import requests
 import jittor as jt
 
 from nkyolo.utils import (
-    ASSETS,
     AUTOINSTALL,
     IS_COLAB,
     IS_GIT_DIR,
@@ -283,7 +282,7 @@ def check_pip_update_available():
         latest = check_latest_pypi_version()
         if latest and latest[0].isdigit() and check_version(__version__, f"<{latest}"):
             LOGGER.info(
-                f"Update with 'pip install -U nkyolo'"
+                "Update with 'pip install -U nkyolo'"
             )
             return True
     return False

@@ -98,6 +98,17 @@ def select_device(device="", batch=0, newline=False, verbose=True):
     for remove in "cuda:", "none", "(", ")", "[", "]", "'", " ":
         device = device.replace(remove, "")
 
+    # MPI: do not remap CUDA_VISIBLE_DEVICES per-rank.
+    # Let MPI/Jittor select GPU by mpi_local_rank within the visible list.
+    _mpi_rank = os.getenv("OMPI_COMM_WORLD_RANK") or os.getenv("PMI_RANK") or os.getenv("RANK", "-1")
+    _in_mpi = _mpi_rank != "-1"
+    if _in_mpi:
+        if device and device != "cpu":
+            # Ignore explicit device in MPI to avoid mismatching local-rank vs visible devices.
+            if verbose and RANK in {-1, 0}:
+                LOGGER.warning("MPI detected: ignoring explicit device argument; use CUDA_VISIBLE_DEVICES via mpirun.")
+            device = ""
+
     # CPU mode
     if device == "cpu":
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -321,7 +332,6 @@ def get_flops(model, imgsz=640):
     params = list(model.parameters())
     if not params:
         return 0.0
-    p = params[0]
     if not isinstance(imgsz, list):
         imgsz = [imgsz, imgsz]
     h, w = int(imgsz[0]), int(imgsz[1])
@@ -453,8 +463,8 @@ def init_seeds(seed=0, deterministic=False):
     """Initialize RNG seeds and configure deterministic settings for Jittor."""
     base_seed = int(seed)
     os.environ["NKYOLO_GLOBAL_SEED"] = str(base_seed)
-    rank = int(jt.rank) if jt.mpi else 0
-    if jt.mpi:
+    rank = int(jt.rank) if jt.in_mpi else 0
+    if jt.in_mpi:
         seed = (base_seed + 1) * (rank + 1)
     else:
         seed = base_seed
@@ -464,8 +474,9 @@ def init_seeds(seed=0, deterministic=False):
     # Set NumPy's random seed
     np.random.seed(seed)
     
-    # Set Jittor's global seed
-    jt.set_global_seed(base_seed, different_seed_for_mpi=True)
+    # Set Jittor's global seed.
+    # Use the same seed across MPI ranks to keep model initialization identical.
+    jt.set_global_seed(base_seed, different_seed_for_mpi=False)
     
     # Configure deterministic settings
     if deterministic:
@@ -515,51 +526,119 @@ class ModelEMA:
     """
     def __init__(self, model, decay=0.9999, tau=2000, updates=0):
         """Initialize EMA for 'model' with given arguments."""
-        # Only keep EMA on rank0 (or single-process) to avoid multi-rank duplication.
-        self.enabled = RANK in (-1, 0)
+        # In MPI training, keep EMA on every rank so execution stays rank-consistent.
+        in_mpi = bool(getattr(jt, "in_mpi", False))
+        world_size = int(jt.world_size) if in_mpi else 1
+        self.enabled = (RANK in (-1, 0)) if world_size <= 1 else True
 
         self.ema = None
+        self.ema_state = {}
         self._ema_pairs = []
         self._ema_buffers = []
+        self._backup_state = None
         self.updates = updates if self.enabled else 0  # number of EMA updates
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp
         if not self.enabled:
             return
-        self.ema = model.clone().eval()
-        for p in self.ema.parameters():
-            p.stop_grad()
-        ema_sd = self.ema.state_dict()
+
         model_sd = model.state_dict()
         skip_suffixes = (".anchors", ".strides")
-        for k, ema_v in ema_sd.items():
+
+        # Prefer a standalone EMA model so validation can use EMA weights
+        # without swapping training model weights in-place.
+        try:
+            self.ema = deepcopy(model)
+            for p in self.ema.parameters():
+                if isinstance(p, jt.Var):
+                    p.stop_grad()
+        except Exception as e:
+            self.ema = None
+            if RANK in {-1, 0}:
+                LOGGER.warning(f"WARNING ⚠️ EMA model deepcopy failed, fallback to state-only EMA: {e}")
+
+        if self.ema is not None:
+            ema_sd = self.ema.state_dict()
+            for k, model_v in model_sd.items():
+                if k.endswith(skip_suffixes) or k not in ema_sd:
+                    continue
+                ema_v = ema_sd[k]
+                if isinstance(ema_v, jt.Var) and isinstance(model_v, jt.Var):
+                    if model_v.is_stop_grad():
+                        self._ema_buffers.append((ema_v, model_v))
+                    else:
+                        self._ema_pairs.append((ema_v, model_v))
+            return
+
+        # Fallback: keep EMA weights as state_dict-only tensors.
+        for k, model_v in model_sd.items():
             if k.endswith(skip_suffixes):
                 continue
-            model_v = model_sd.get(k)
-            if isinstance(ema_v, jt.Var) and isinstance(model_v, jt.Var):
+            if isinstance(model_v, jt.Var):
+                ema_v = model_v.clone()
                 if model_v.is_stop_grad():
                     self._ema_buffers.append((ema_v, model_v))
                 else:
                     self._ema_pairs.append((ema_v, model_v))
+            else:
+                ema_v = deepcopy(model_v)
+            self.ema_state[k] = ema_v
 
-    def update(self, model):
+    def update(self, model, updates=None):
         """Update EMA parameters."""
-        if not self.enabled or self.ema is None:
+        if not self.enabled:
             return
-        
-        self.updates += 1
+        if self.ema is None and not self.ema_state:
+            return
+        if updates is None:
+            self.updates += 1
+        else:
+            self.updates = int(updates)
         with jt.no_grad():
             d = self.decay(self.updates) if callable(self.decay) else self.decay
             for ema_v, model_v in self._ema_pairs:
                 ema_v.update(ema_v * d + (1 - d) * model_v)
             for ema_v, model_v in self._ema_buffers:
                 ema_v.update(model_v)
-            if jt.flags.use_cuda:
+            if jt.flags.use_cuda and not jt.in_mpi:
                 jt.sync_all(True)
 
     def update_attr(self, model, include=(), exclude=("process_group", "reducer")):
         """Updates attributes and saves stripped model with optimizer removed."""
         if self.enabled and self.ema is not None:
             copy_attr(self.ema, model, include, exclude)
+
+    def state_dict(self):
+        if self.ema is not None:
+            return self.ema.state_dict()
+        return self.ema_state
+
+    def load_state_dict(self, state_dict):
+        if not self.enabled or not state_dict:
+            return
+        if self.ema is not None:
+            self.ema.load_state_dict(state_dict)
+            return
+        for k, v in state_dict.items():
+            if k not in self.ema_state:
+                continue
+            ema_v = self.ema_state[k]
+            if isinstance(ema_v, jt.Var) and isinstance(v, jt.Var):
+                ema_v.update(v)
+            else:
+                self.ema_state[k] = v
+
+    def apply_to(self, model):
+        if not self.enabled or self.ema is not None or not self.ema_state:
+            return False
+        self._backup_state = safe_deepcopy_jittor(model.state_dict())
+        model.load_state_dict(self.ema_state)
+        return True
+
+    def restore(self, model):
+        if self._backup_state is None:
+            return
+        model.load_state_dict(self._backup_state)
+        self._backup_state = None
 
 
 
