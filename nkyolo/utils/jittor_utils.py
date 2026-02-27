@@ -321,21 +321,24 @@ def calculate_layer_flops(layer, input_shape):
 
 
 def get_flops(model, imgsz=640):
-    """Return a YOLO model's FLOPs (GFLOPs) using the unified profile tool."""
-    from nkyolo.utils.jittor_profile import profile_model_graph
+    """Return a YOLO model's FLOPs (GFLOPs)."""
+    from nkyolo.utils.jittor_profile import profile
 
     model = de_parallel(model)
     disable_flops = str(os.getenv("NKYOLO_NO_FLOPS", "")).lower() in ("1", "true", "yes")
     force_flops = str(os.getenv("NKYOLO_FORCE_FLOPS", "")).lower() in ("1", "true", "yes")
     if disable_flops and not force_flops:
         return 0.0
+
     params = list(model.parameters())
-    if not params:
+    if len(params) == 0:
         return 0.0
+
     if not isinstance(imgsz, list):
         imgsz = [imgsz, imgsz]
     h, w = int(imgsz[0]), int(imgsz[1])
 
+    # Resolve input channels.
     yaml = model.yaml if isinstance(getattr(model, "yaml", None), dict) else {}
     ch = yaml.get("ch", None)
     if isinstance(ch, (list, tuple)) and ch:
@@ -357,10 +360,37 @@ def get_flops(model, imgsz=640):
                     break
     if ch is None:
         ch = 3
-    im_full = jt.empty(1, int(ch), h, w)
 
-    flops_result, _ = profile_model_graph(model, inputs=[im_full], verbose=False)
-    return flops_result / 1e9
+    # Resolve profiling stride (same strategy as Ultralytics: fast then scale to target imgsz).
+    stride = 32
+    model_stride = getattr(model, "stride", None)
+    try:
+        if isinstance(model_stride, jt.Var):
+            stride = max(int(model_stride.max().item()), 32)
+        elif isinstance(model_stride, (list, tuple, np.ndarray)) and len(model_stride):
+            stride = max(int(max(model_stride)), 32)
+        elif isinstance(model_stride, (int, np.integer)) and model_stride > 0:
+            stride = max(int(model_stride), 32)
+    except Exception:
+        stride = 32
+
+    # Method 1: stride-based profiling and area scaling.
+    try:
+        im_stride = jt.empty(1, int(ch), int(stride), int(stride))
+        flops_stride, _ = profile(model, inputs=[im_stride], verbose=False)  # raw FLOPs
+        flops_stride_g = float(flops_stride) / 1e9
+        if flops_stride_g > 0:
+            return flops_stride_g * (h / stride) * (w / stride)
+    except Exception:
+        pass
+
+    # Method 2: full-size fallback.
+    try:
+        im_full = jt.empty(1, int(ch), h, w)
+        flops_full, _ = profile(model, inputs=[im_full], verbose=False)  # raw FLOPs
+        return float(flops_full) / 1e9
+    except Exception:
+        return 0.0
 
 def time_sync():
     """Return Jittor-accurate time."""

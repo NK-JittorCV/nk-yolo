@@ -1,5 +1,5 @@
 # NK-YOLO 🚀 AGPL-3.0 License
-# Unified profile tool for Jittor models (native implementation).
+# Unified FLOPs profile tool for Jittor models.
 
 import jittor as jt
 import jittor.nn as nn
@@ -7,385 +7,410 @@ import jittor.nn as nn
 from nkyolo.utils import LOGGER
 
 
+def _to_2tuple(v, default=1):
+    """Convert scalar/list/tuple to 2-tuple of ints."""
+    if isinstance(v, (tuple, list)):
+        if len(v) >= 2:
+            return int(v[0]), int(v[1])
+        if len(v) == 1:
+            return int(v[0]), int(v[0])
+        return int(default), int(default)
+    return int(v), int(v)
+
+
+def _numel_shape(shape):
+    """Return number of elements from a shape-like sequence."""
+    n = 1
+    for d in shape:
+        n *= int(d)
+    return int(n)
+
+
+def _first_var(x):
+    """Get first Jittor Var from nested input/output structures."""
+    if isinstance(x, jt.Var):
+        return x
+    if isinstance(x, (list, tuple)):
+        for xi in x:
+            yi = _first_var(xi)
+            if yi is not None:
+                return yi
+    return None
+
+
+def _to_var_tree(x):
+    """Convert ndarray/list tensor inputs to Jittor Vars while preserving nesting."""
+    if isinstance(x, jt.Var):
+        return x
+    if isinstance(x, (str, bytes, bool, int, float, type(None))):
+        return x
+    if isinstance(x, dict):
+        return {k: _to_var_tree(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_to_var_tree(v) for v in x]
+    if isinstance(x, tuple):
+        return tuple(_to_var_tree(v) for v in x)
+    return jt.array(x)
+
+
+def _normalize_inputs(inputs):
+    """Normalize model inputs to a list."""
+    if not isinstance(inputs, list):
+        inputs = [inputs]
+    return [_to_var_tree(x) for x in inputs]
+
+
+def _run_module(module, inputs):
+    """Run a module with list-formatted inputs."""
+    if len(inputs) == 1:
+        return module(inputs[0])
+    return module(*inputs)
+
+
+def _is_leaf_module(module):
+    """A leaf module has no children."""
+    return len(list(module.children())) == 0
+
+
+def _conv2d_output_hw(input_shape, layer):
+    """Infer Conv2d output spatial size from input shape and layer attrs."""
+    if len(input_shape) < 4:
+        return None
+    in_h, in_w = int(input_shape[2]), int(input_shape[3])
+    k_h, k_w = _to_2tuple(getattr(layer, "kernel_size", 1))
+    s_h, s_w = _to_2tuple(getattr(layer, "stride", 1))
+    p_h, p_w = _to_2tuple(getattr(layer, "padding", 0))
+    d_h, d_w = _to_2tuple(getattr(layer, "dilation", 1))
+
+    out_h = (in_h + 2 * p_h - d_h * (k_h - 1) - 1) // s_h + 1
+    out_w = (in_w + 2 * p_w - d_w * (k_w - 1) - 1) // s_w + 1
+    return max(int(out_h), 0), max(int(out_w), 0)
+
+
+def _conv_transpose_output_hw(input_shape, layer):
+    """Infer ConvTranspose output spatial size from input shape and layer attrs."""
+    if len(input_shape) < 4:
+        return None
+    in_h, in_w = int(input_shape[2]), int(input_shape[3])
+    k_h, k_w = _to_2tuple(getattr(layer, "kernel_size", 1))
+    s_h, s_w = _to_2tuple(getattr(layer, "stride", 1))
+    p_h, p_w = _to_2tuple(getattr(layer, "padding", 0))
+    d_h, d_w = _to_2tuple(getattr(layer, "dilation", 1))
+    op_h, op_w = _to_2tuple(getattr(layer, "output_padding", 0), default=0)
+
+    out_h = (in_h - 1) * s_h - 2 * p_h + d_h * (k_h - 1) + op_h + 1
+    out_w = (in_w - 1) * s_w - 2 * p_w + d_w * (k_w - 1) + op_w + 1
+    return max(int(out_h), 0), max(int(out_w), 0)
+
+
 def calculate_layer_flops(layer, input_shape):
-    """Calculate FLOPs for a single layer.
-    
-    Args:
-        layer: Jittor layer/module
-        input_shape: Input shape tuple (batch, channels, height, width) or (batch, features)
-    
-    Returns:
-        float: Estimated FLOPs (not converted to GFLOPs, returns raw count)
-    """
+    """Estimate FLOPs for a single layer from input shape (raw FLOPs count)."""
     if not isinstance(layer, nn.Module):
         return 0.0
-    
-    layer_type = type(layer).__name__
-    flops = 0.0
-    
-    if layer_type == "Conv2d":
-        # FLOPs = (kernel_h * kernel_w * in_channels * out_channels + out_channels) * output_h * output_w
-        out_channels = layer.out_channels
-        in_channels = layer.in_channels
-        kernel_size = layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
-        k_h, k_w = kernel_size
-        
-        # Calculate output size
+
+    if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 and isinstance(input_shape[0], (list, tuple)):
+        # For list-of-shapes inputs, use the first tensor shape.
+        input_shape = input_shape[0]
+
+    if not isinstance(input_shape, (list, tuple)) or len(input_shape) == 0:
+        return 0.0
+
+    input_shape = tuple(int(x) for x in input_shape)
+    layer_type = type(layer).__name__.lower()
+
+    # Conv2d-like
+    if "convtranspose" in layer_type:
+        if len(input_shape) < 4:
+            return 0.0
+        out_hw = _conv_transpose_output_hw(input_shape, layer)
+        if out_hw is None:
+            return 0.0
+        b = int(input_shape[0])
+        out_c = int(getattr(layer, "out_channels", 0))
+        if out_c <= 0:
+            return 0.0
+        in_c = int(getattr(layer, "in_channels", input_shape[1]))
+        groups = max(int(getattr(layer, "groups", 1) or 1), 1)
+        k_h, k_w = _to_2tuple(getattr(layer, "kernel_size", 1))
+        out_h, out_w = out_hw
+        out_elements = b * out_c * out_h * out_w
+        macs = out_elements * (in_c / groups) * k_h * k_w
+        if getattr(layer, "bias", None) is not None:
+            macs += out_elements
+        return float(macs * 2)
+
+    if layer_type in {"conv", "conv2d"}:
+        if len(input_shape) < 4:
+            return 0.0
+        out_hw = _conv2d_output_hw(input_shape, layer)
+        if out_hw is None:
+            return 0.0
+        b = int(input_shape[0])
+        out_c = int(getattr(layer, "out_channels", 0))
+        if out_c <= 0:
+            return 0.0
+        in_c = int(getattr(layer, "in_channels", input_shape[1]))
+        groups = max(int(getattr(layer, "groups", 1) or 1), 1)
+        k_h, k_w = _to_2tuple(getattr(layer, "kernel_size", 1))
+        out_h, out_w = out_hw
+        out_elements = b * out_c * out_h * out_w
+        macs = out_elements * (in_c / groups) * k_h * k_w
+        if getattr(layer, "bias", None) is not None:
+            macs += out_elements
+        return float(macs * 2)
+
+    # Linear
+    if "linear" in layer_type:
+        in_features = int(getattr(layer, "in_features", input_shape[-1]))
+        if in_features <= 0:
+            return 0.0
+        out_features = int(getattr(layer, "out_features", 0))
+        if out_features <= 0:
+            return 0.0
+        batch = _numel_shape(input_shape[:-1]) if len(input_shape) > 1 else int(input_shape[0])
+        out_elements = batch * out_features
+        macs = out_elements * in_features
+        if getattr(layer, "bias", None) is not None:
+            macs += out_elements
+        return float(macs * 2)
+
+    # Norm layers (inference path)
+    if "batchnorm" in layer_type or "layernorm" in layer_type:
+        return float(_numel_shape(input_shape) * 4)
+
+    # Activations
+    if layer_type in {"relu", "relu6", "leakyrelu", "leaky_relu", "hardtanh"}:
+        return float(_numel_shape(input_shape))
+    if layer_type in {"silu", "sigmoid", "tanh", "gelu", "mish", "hardsigmoid", "hardswish"}:
+        return float(_numel_shape(input_shape) * 4)
+
+    # Pooling (rough estimate)
+    if "pool" in layer_type and len(input_shape) >= 4:
+        k = getattr(layer, "kernel_size", None)
+        if k is None and hasattr(layer, "_layer"):
+            k = getattr(layer._layer, "kernel_size", None)
+        if k is None and hasattr(layer, "layer"):
+            k = getattr(layer.layer, "kernel_size", None)
+        k_h, k_w = _to_2tuple(k, default=1)
+        # Roughly use input elements scaled by stride area.
+        s = getattr(layer, "stride", None)
+        if s is None and hasattr(layer, "_layer"):
+            s = getattr(layer._layer, "stride", None)
+        if s is None and hasattr(layer, "layer"):
+            s = getattr(layer.layer, "stride", None)
+        s_h, s_w = _to_2tuple(s, default=1)
+        out_h = max(int(input_shape[2] // max(s_h, 1)), 1)
+        out_w = max(int(input_shape[3] // max(s_w, 1)), 1)
+        out_elements = int(input_shape[0]) * int(input_shape[1]) * out_h * out_w
+        return float(out_elements * k_h * k_w)
+
+    # Upsample/Interpolate
+    if "upsample" in layer_type or "interpolate" in layer_type:
+        scale = getattr(layer, "scale_factor", 1.0)
+        if isinstance(scale, (list, tuple)):
+            s_h, s_w = float(scale[0]), float(scale[1])
+        else:
+            s_h = s_w = float(scale)
         if len(input_shape) >= 4:
-            output_h, output_w = input_shape[2], input_shape[3]
-            padding = layer.padding
-            if isinstance(padding, int):
-                padding = (padding, padding)
-            elif isinstance(padding, tuple) and len(padding) == 1:
-                padding = (padding[0], padding[0])
+            out_elements = int(input_shape[0]) * int(input_shape[1]) * int(input_shape[2] * s_h) * int(input_shape[3] * s_w)
+            return float(out_elements)
+        return 0.0
+
+    # Concat/Add/etc. are small compared to convs, default to 0 here.
+    return 0.0
+
+
+def _calculate_flops_from_io(layer, inputs, outputs):
+    """Estimate FLOPs for one executed layer from concrete input/output tensors."""
+    if not isinstance(layer, nn.Module):
+        return 0.0
+
+    x = _first_var(inputs)
+    y = _first_var(outputs)
+    if x is None or y is None:
+        return 0.0
+
+    x_shape = tuple(int(d) for d in x.shape)
+    y_shape = tuple(int(d) for d in y.shape)
+    if len(y_shape) == 0:
+        return 0.0
+
+    layer_type = type(layer).__name__.lower()
+    out_elements = _numel_shape(y_shape)
+
+    # Conv / ConvTranspose
+    if "convtranspose" in layer_type or layer_type in {"conv", "conv2d"}:
+        if len(y_shape) < 4:
+            return 0.0
+        in_c = int(getattr(layer, "in_channels", x_shape[1] if len(x_shape) > 1 else 0))
+        groups = max(int(getattr(layer, "groups", 1) or 1), 1)
+        k_h, k_w = _to_2tuple(getattr(layer, "kernel_size", 1))
+        macs = out_elements * (in_c / groups) * k_h * k_w
+        if getattr(layer, "bias", None) is not None:
+            macs += out_elements
+        return float(macs * 2)
+
+    # Linear
+    if "linear" in layer_type:
+        in_features = int(getattr(layer, "in_features", x_shape[-1] if len(x_shape) else 0))
+        if in_features <= 0:
+            return 0.0
+        macs = out_elements * in_features
+        if getattr(layer, "bias", None) is not None:
+            macs += out_elements
+        return float(macs * 2)
+
+    # Normalization
+    if "batchnorm" in layer_type or "layernorm" in layer_type:
+        return float(out_elements * 4)
+
+    # Activations
+    if layer_type in {"relu", "relu6", "leakyrelu", "leaky_relu", "hardtanh"}:
+        return float(out_elements)
+    if layer_type in {"silu", "sigmoid", "tanh", "gelu", "mish", "hardsigmoid", "hardswish"}:
+        return float(out_elements * 4)
+    if "softmax" in layer_type:
+        return float(out_elements * 5)
+
+    # Pooling
+    if "pool" in layer_type and len(y_shape) >= 4:
+        k = getattr(layer, "kernel_size", None)
+        if k is None and hasattr(layer, "_layer"):
+            k = getattr(layer._layer, "kernel_size", None)
+        if k is None and hasattr(layer, "layer"):
+            k = getattr(layer.layer, "kernel_size", None)
+        if k is None:
+            # Adaptive pooling fallback.
+            if len(x_shape) >= 4 and y_shape[2] > 0 and y_shape[3] > 0:
+                k_h = max(int(round(x_shape[2] / y_shape[2])), 1)
+                k_w = max(int(round(x_shape[3] / y_shape[3])), 1)
             else:
-                padding = padding if isinstance(padding, tuple) else (0, 0)
+                k_h = k_w = 1
+        else:
+            k_h, k_w = _to_2tuple(k, default=1)
+        return float(out_elements * k_h * k_w)
 
-            stride = layer.stride
-            if isinstance(stride, int):
-                stride = (stride, stride)
-            elif isinstance(stride, tuple) and len(stride) == 1:
-                stride = (stride[0], stride[0])
+    # Upsample/Interpolate
+    if "upsample" in layer_type or "interpolate" in layer_type:
+        mode = str(getattr(layer, "mode", "nearest")).lower()
+        if "nearest" in mode:
+            return float(out_elements)
+        # bilinear/bicubic: rough estimate
+        return float(out_elements * 4)
+
+    # Concat/add/mul and custom wrappers are intentionally ignored here.
+    return 0.0
+
+
+def _profile_with_hooks(model, inputs, verbose=False):
+    """Profile FLOPs by attaching temporary forward hooks on leaf modules."""
+    if not isinstance(model, nn.Module):
+        return 0.0, 0.0
+
+    inputs = _normalize_inputs(inputs)
+    total_flops = 0.0
+    total_params = float(sum(int(p.numel()) for p in model.parameters()))
+    layer_logs = []
+
+    leaf_modules = [m for m in model.modules() if _is_leaf_module(m)]
+    prev_hooks = {}
+
+    def _hook(mod, inps, outs):
+        nonlocal total_flops
+        layer_flops = _calculate_flops_from_io(mod, inps, outs)
+        total_flops += layer_flops
+        if verbose:
+            layer_params = sum(int(p.numel()) for p in mod.parameters())
+            layer_logs.append((type(mod).__name__, layer_flops, layer_params))
+
+    for mod in leaf_modules:
+        prev_hooks[mod] = getattr(mod, "__fhook__", None)
+        mod.register_forward_hook(_hook)
+
+    model_was_training = model.training
+    model.eval()
+    try:
+        with jt.no_grad():
+            out = _run_module(model, inputs)
+            if isinstance(out, jt.Var):
+                out.sync()
             else:
-                stride = stride if isinstance(stride, tuple) else (1, 1)
+                jt.sync_all(True)
+    finally:
+        for mod, prev_hook in prev_hooks.items():
+            if prev_hook is None:
+                mod.remove_forward_hook()
+            else:
+                mod.register_forward_hook(prev_hook)
+        if model_was_training:
+            model.train()
+        else:
+            model.eval()
 
-            output_h = (input_shape[2] + 2 * padding[0] - k_h) // stride[0] + 1
-            output_w = (input_shape[3] + 2 * padding[1] - k_w) // stride[1] + 1
-            
-            # MACs = kernel_size * in_channels * out_channels * output_size
-            # FLOPs = MACs * 2 (multiply-add operations)
-            macs = k_h * k_w * in_channels * out_channels * output_h * output_w
-            # Add bias operations if exists
-            if layer.bias is not None:
-                macs += out_channels * output_h * output_w
-            flops = macs * 2  # Multiply-add counts as 2 operations
-    
-    elif layer_type == "Linear":
-        # FLOPs = (in_features * out_features + out_features) * batch_size
-        in_features = layer.in_features
-        out_features = layer.out_features
-        batch_size = input_shape[0] if len(input_shape) > 1 else 1
-        
-        macs = in_features * out_features * batch_size
-        if layer.bias is not None:
-            macs += out_features * batch_size
-        flops = macs * 2
-    
-    elif layer_type == "BatchNorm2d":
-        # FLOPs = channels * height * width * 4 (mean + variance + normalize + scale_shift)
-        if len(input_shape) >= 4:
-            flops = input_shape[1] * input_shape[2] * input_shape[3] * 4
-    
-    elif layer_type == "LayerNorm":
-        # FLOPs = features * 4 (similar to BatchNorm)
-        if len(input_shape) >= 2:
-            features = input_shape[-1]
-            batch_size = input_shape[0] if len(input_shape) > 1 else 1
-            flops = features * batch_size * 4
-    
-    elif layer_type == "ReLU":
-        # FLOPs = number of elements (simple comparison operation)
-        total_elements = 1
-        for dim in input_shape:
-            total_elements *= dim
-        flops = total_elements
-    
-    elif layer_type in ["SiLU", "Sigmoid", "Tanh"]:
-        # FLOPs = elements * 3 (exp/log/div operations)
-        total_elements = 1
-        for dim in input_shape:
-            total_elements *= dim
-        flops = total_elements * 3
-    
-    elif layer_type == "MaxPool2d" or layer_type == "AvgPool2d":
-        # FLOPs = kernel_size * output_size (for pooling operations)
-        if len(input_shape) >= 4:
-            pool = layer._layer if layer_type == "MaxPool2d" else layer.layer
-            kernel_size = pool.kernel_size
-            if isinstance(kernel_size, int):
-                kernel_size = (kernel_size, kernel_size)
-            
-            stride = pool.stride
-            if isinstance(stride, int):
-                stride = (stride, stride)
-            
-            padding = pool.padding
-            if isinstance(padding, int):
-                padding = (padding, padding)
-            
-            output_h = (input_shape[2] + 2 * padding[0] - kernel_size[0]) // stride[0] + 1
-            output_w = (input_shape[3] + 2 * padding[1] - kernel_size[1]) // stride[1] + 1
-            
-            total_elements = input_shape[0] * input_shape[1] * output_h * output_w
-            flops = total_elements * kernel_size[0] * kernel_size[1]
-    
-    elif layer_type == "Upsample" or layer_type == "Interpolate":
-        # FLOPs = output_size (simple copying/interpolation)
-        if len(input_shape) >= 4:
-            scale_factor = layer.scale_factor
-            if isinstance(scale_factor, (int, float)):
-                scale_factor = (scale_factor, scale_factor)
-            
-            output_h = int(input_shape[2] * scale_factor[0])
-            output_w = int(input_shape[3] * scale_factor[1])
-            flops = input_shape[0] * input_shape[1] * output_h * output_w
-    
-    elif layer_type == "Concat" or layer_type == "Cat":
-        # Concatenation has minimal FLOPs (just memory copy)
-        flops = 0
-    
-    elif layer_type == "Add" or layer_type == "Multiply":
-        # Element-wise operations: FLOPs = number of elements
-        total_elements = 1
-        for dim in input_shape:
-            total_elements *= dim
-        flops = total_elements
+    if verbose:
+        for layer_name, layer_flops, layer_params in layer_logs:
+            LOGGER.info(f"{layer_name:<45} {layer_flops / 1e9:10.4f} GFLOPs, {layer_params:12d} params")
 
-    return float(flops)
+    return float(total_flops), total_params
 
 
 def profile_model_recursive(model, inputs, verbose=False):
-    """Recursively calculate FLOPs for all layers in a model.
-    
-    Args:
-        model: Jittor model/module
-        inputs: Input tensor or list of input tensors
-        verbose: Whether to print detailed information
-    
-    Returns:
-        tuple: (total_flops, total_params) where flops is in raw count (not GFLOPs)
-    """
-    total_flops = 0.0
-    total_params = 0.0
-
-    if not isinstance(model, nn.Module):
-        return total_flops, total_params
-    
-    # Convert inputs to list if needed
-    if not isinstance(inputs, list):
-        inputs_list = [inputs]
-    else:
-        inputs_list = inputs
-    
-    # Get input tensor
-    x = inputs_list[0]
-    if not isinstance(x, jt.Var):
-        x = jt.array(x)
-    
-    # Store intermediate outputs for shape tracking
-    layer_shapes = {}
-    layer_shapes['input'] = tuple(x.shape)
-    
-    # Manually traverse model modules and calculate FLOPs
-    def traverse_and_calculate(module, x, prefix=''):
-        nonlocal total_flops
-        current_x = x
-        
-        # Get all child modules
-        children = list(module.named_children())
-
-        if len(children) == 0 or not isinstance(module, nn.Sequential):
-            # Leaf or non-sequential composite module - calculate FLOPs directly
-            input_shape = tuple(current_x.shape) if isinstance(current_x, jt.Var) else _infer_input_shape(current_x)
-            layer_flops = calculate_layer_flops(module, input_shape)
-            total_flops += layer_flops
-
-            if verbose:
-                params = sum(p.numel() for p in module.parameters())
-                layer_name = prefix if prefix else type(module).__name__
-                print(f"{layer_name:50s} {layer_flops/1e9:12.4f} GFLOPs, {params:12d} params")
-
-            # Try to get output shape
-            with jt.no_grad():
-                output = module(current_x)
-                if isinstance(output, jt.Var):
-                    return output
-            return current_x
-
-        # Sequential container module - traverse children in order
-        for name, child in children:
-            full_name = f"{prefix}.{name}" if prefix else name
-            current_x = traverse_and_calculate(child, current_x, prefix=full_name)
-        return current_x
-    
-    # Set model to eval mode for profiling
-    model_was_training = model.training
-    model.eval()
-    
-    with jt.no_grad():
-        _ = traverse_and_calculate(model, x)
-    if model_was_training:
-        model.train()
-    else:
-        model.eval()
-
-    # Calculate total parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    
-    return total_flops, total_params
+    """Backward-compatible API: profile model FLOPs/params (raw FLOPs count)."""
+    return _profile_with_hooks(model, inputs, verbose=verbose)
 
 
 def profile_jittor(model, inputs, verbose=False):
-    """Profile a Jittor model to calculate FLOPs and parameters.
-    
-    Args:
-        model: Jittor model/module
-        inputs: Input tensor or list of input tensors
-        verbose: Whether to print detailed information
-    
-    Returns:
-        tuple: (flops, params) where:
-            - flops: Total FLOPs count (raw number, not divided by 1e9)
-            - params: Total number of parameters
-    """
-    # Handle inputs format (expects inputs as list)
-    if not isinstance(inputs, list):
-        inputs = [inputs]
-    
-    # Ensure inputs are Jittor Vars
-    inputs = [jt.array(inp) if not isinstance(inp, jt.Var) else inp for inp in inputs]
-    
-    # Calculate FLOPs and params
-    flops, params = profile_model_recursive(model, inputs, verbose=verbose)
-    
-    return (flops, params)
+    """Profile a Jittor model and return (flops_raw, params)."""
+    return _profile_with_hooks(model, inputs, verbose=verbose)
 
 
 def _infer_input_shape(x):
-    """Infer a representative input shape from a tensor or list/tuple of tensors."""
-    if isinstance(x, jt.Var):
-        return tuple(x.shape)
+    """Infer a representative tensor shape from nested input."""
+    v = _first_var(x)
+    if v is not None:
+        return tuple(int(d) for d in v.shape)
     if isinstance(x, (list, tuple)):
         for item in x:
-            if isinstance(item, jt.Var):
-                return tuple(item.shape)
+            if isinstance(item, (list, tuple)):
+                s = _infer_input_shape(item)
+                if len(s):
+                    return s
     return (1,)
 
 
 def profile_model_graph(model, inputs, verbose=False):
-    """Profile a model with YOLO-style graph routing using module .f and saved outputs."""
-    if not isinstance(inputs, list):
-        inputs = [inputs]
-    x = inputs[0]
-    if not isinstance(x, jt.Var):
-        x = jt.array(x)
-
-    total_flops = 0.0
-    total_params = sum(p.numel() for p in model.parameters())
-
-    y = []
-    save = model.save
-    model_was_training = model.training
-    model.eval()
-    with jt.no_grad():
-        for m in model.model:
-            if m.f != -1:
-                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
-            layer_flops = 0.0
-            if isinstance(x, (list, tuple)):
-                m_type = type(m).__name__
-                if m_type in {"Detect", "Segment", "Pose", "OBB", "WorldDetect", "v10Detect"}:
-                    for xi, cv2_i, cv3_i in zip(x, m.cv2, m.cv3):
-                        layer_flops += profile_model_recursive(cv2_i, inputs=[xi], verbose=False)[0]
-                        layer_flops += profile_model_recursive(cv3_i, inputs=[xi], verbose=False)[0]
-                    if m_type in {"Segment", "Pose", "OBB"}:
-                        for xi, cv4_i in zip(x, m.cv4):
-                            layer_flops += profile_model_recursive(cv4_i, inputs=[xi], verbose=False)[0]
-                    if m_type == "Segment":
-                        layer_flops += profile_model_recursive(m.proto, inputs=[x[0]], verbose=False)[0]
-                total_flops += layer_flops
-            else:
-                input_shape = _infer_input_shape(x)
-            layer_flops = calculate_layer_flops(m, input_shape)
-            if layer_flops == 0.0 and isinstance(m, nn.Sequential):
-                children = list(m.named_children())
-                if children:
-                    layer_flops = profile_model_recursive(m, inputs=[x], verbose=False)[0]
-            total_flops += layer_flops
-            x = m(x)
-            y.append(x if m.i in save else None)
-            if verbose:
-                LOGGER.info(f"{m.type:<45} {total_flops / 1e9:10.4f} GFLOPs")
-    if model_was_training:
-        model.train()
-    else:
-        model.eval()
-    return total_flops, total_params
+    """Backward-compatible API: graph-aware profiling now uses hook-based profiling."""
+    return _profile_with_hooks(model, inputs, verbose=verbose)
 
 
 def profile(model, inputs, verbose=False, *args, **kwargs):
-    """Profile a Jittor model using the native profiling implementation.
-    
-    Args:
-        model: Jittor model/module
-        inputs: Input tensor(s) or list of input tensors
-        verbose: Whether to print detailed information
-        *args: Unused (kept for compatibility)
-        **kwargs: Unused (kept for compatibility)
-    
-    Returns:
-        tuple: (flops, params) where:
-            - flops: Total FLOPs count (raw number, not divided by 1e9)
-            - params: Total number of parameters
-    
-    Example:
-        ```python
-        # Jittor example
-        import jittor as jt
-        import jittor.nn as nn
-        from nkyolo.utils.jittor_profile import profile
-        
-        model = nn.Conv2d(3, 64, 3, padding=1)
-        x = jt.randn(1, 3, 224, 224)
-        flops, params = profile(model, inputs=[x], verbose=True)
-        ```
-    """
+    """Profile a Jittor model using the native hook-based implementation."""
     return profile_jittor(model, inputs, verbose=verbose)
 
 
 def profile_layer_with_fallback(layer, inputs):
-    """Profile a single layer with a lightweight fallback calculation.
-    
-    Args:
-        layer: Layer/module to profile (PyTorch or Jittor)
-        inputs: Input tensor(s) or list of input tensors
-    
-    Returns:
-        float: FLOPs in GFLOPs (already divided by 1e9)
-    """
-    # Normalize inputs to get input shape
-    if not isinstance(inputs, list):
-        inputs_list = [inputs]
-    else:
-        inputs_list = inputs
+    """Profile a layer in GFLOPs with fallback to shape-based estimation."""
+    if not isinstance(layer, nn.Module):
+        return 0.0
 
-    if len(inputs_list) > 0:
-        x = inputs_list[0]
-        input_shape = tuple(x.shape) if isinstance(x, jt.Var) else (1,)
-    else:
-        input_shape = (1,)
+    try:
+        flops, _ = _profile_with_hooks(layer, inputs, verbose=False)
+        if flops > 0:
+            return flops / 1e9
+    except Exception:
+        pass
 
-    # Check if layer is a valid module
-    if isinstance(layer, nn.Module):
-        flops = calculate_layer_flops(layer, input_shape)
-        return flops / 1e9  # Convert to GFLOPs
-    return 0.0
+    inputs_list = inputs if isinstance(inputs, list) else [inputs]
+    input_shape = _infer_input_shape(inputs_list[0]) if len(inputs_list) else (1,)
+    return calculate_layer_flops(layer, input_shape) / 1e9
 
 
 # For backward compatibility and human-friendly formatting
 def clever_format(nums, format="%.2f"):
-    """Format numbers in a human-readable way.
-    
-    Args:
-        nums: Single number or list of numbers
-        format: Format string
-    
-    Returns:
-        Formatted string or list of formatted strings
-    """
+    """Format numbers in a human-readable way."""
     if not isinstance(nums, (list, tuple)):
         nums = [nums]
-    
+
     result = []
     for num in nums:
         if num >= 1e12:
@@ -398,5 +423,5 @@ def clever_format(nums, format="%.2f"):
             result.append(f"{format} K" % (num / 1e3))
         else:
             result.append(f"{format}" % num)
-    
+
     return result[0] if len(result) == 1 else result
