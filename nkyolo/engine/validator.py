@@ -263,7 +263,8 @@ class BaseValidator:
             self.run_callbacks("on_val_batch_end")
         stats = self.get_stats()
         self.check_stats(stats)
-        self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
+        seen_images = max(int(self.seen), 1)
+        self.speed = dict(zip(self.speed.keys(), (x.t / seen_images * 1e3 for x in dt)))
         self.forward_latency_ms = float(self.speed.get("inference", 0.0) or 0.0)
         self.forward_fps = 1000.0 / self.forward_latency_ms if self.forward_latency_ms > 0 else 0.0
         self.finalize_metrics()

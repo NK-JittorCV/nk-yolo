@@ -58,6 +58,9 @@ class Profile(contextlib.ContextDecorator):
 
     def time(self):
         """Get current time."""
+        if self.cuda:
+            # Jittor CUDA kernels are asynchronous. Synchronize to measure real elapsed time.
+            jt.sync_all(True)
         return time.time()
 
 
