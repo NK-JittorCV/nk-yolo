@@ -42,6 +42,7 @@ class DetectionValidator(BaseValidator):
         self.iouv = jt.linspace(0.5, 0.95, 10)  # IoU vector for mAP@0.5:0.95
         self.niou = self.iouv.numel()
         self.lb = []  # for autolabelling
+        self._fast_val_logged = False
         if self.args.save_hybrid:
             LOGGER.warning(
                 "WARNING ⚠️ 'save_hybrid=True' will append ground truth to predictions for autolabelling.\n"
@@ -101,6 +102,17 @@ class DetectionValidator(BaseValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
+        max_nms = int(self.args.max_nms)
+        # Speed up epoch-end validation during training.
+        # Final standalone validation keeps full max_nms for most faithful metrics.
+        if self.training:
+            fast_max_nms = int(os.getenv("NKYOLO_TRAIN_VAL_MAX_NMS", "3000") or 3000)
+            if fast_max_nms > 0 and max_nms > fast_max_nms:
+                max_nms = fast_max_nms
+                if not self._fast_val_logged:
+                    LOGGER.info(f"Validation fast-path: max_nms capped to {max_nms} during training.")
+                    self._fast_val_logged = True
+
         return ops.non_max_suppression(
             preds,
             self.args.conf,
@@ -109,7 +121,7 @@ class DetectionValidator(BaseValidator):
             multi_label=self.args.multi_label,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
-            max_nms=self.args.max_nms,
+            max_nms=max_nms,
             max_time_img=self.args.max_time_img,
         )
 

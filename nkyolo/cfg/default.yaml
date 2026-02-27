@@ -48,7 +48,8 @@ dropout: 0.0 # (float) use dropout regularization (classify train only)
 
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True # (bool) validate/test during training
-val_batch: -1 # (int) validation batch size override (-1 uses default behavior: train-time val uses batch*2 for detect)
+val_batch: -1 # (int) validation batch size override (-1 uses same batch size as training dataloader)
+val_workers: -1 # (int) validation dataloader workers override (-1 uses training workers setting)
 split: val # (str) dataset split to use for validation, i.e. 'val', 'test' or 'train'
 save_json: False # (bool) save results to JSON file
 save_hybrid: False # (bool) save hybrid version of labels (labels + additional predictions)
@@ -61,6 +62,7 @@ max_time_img: 0.05 # (float) NMS time limit per image (seconds)
 val_loss: False # (bool) compute validation loss during training (memory heavy)
 final_eval: True # (bool) run final evaluation on best.pt after training
 val_amp: False # (bool) use AMP (FP16) during validation/final_eval
+val_half: False # (bool) use FP16 for standalone validation forward for faster val
 half: False # (bool) use half precision (FP16)
 dnn: False # (bool) use OpenCV DNN for ONNX inference
 plots: True # (bool) save plots and images during train/val

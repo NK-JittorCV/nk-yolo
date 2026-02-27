@@ -95,6 +95,8 @@ class BaseValidator:
         self.iouv = None
         self.jdict = None
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
+        self.forward_latency_ms = 0.0
+        self.forward_fps = 0.0
 
         self.save_dir = save_dir or get_save_dir(self.args)
         (self.save_dir / "labels" if self.args.save_txt else self.save_dir).mkdir(parents=True, exist_ok=True)
@@ -151,13 +153,16 @@ class BaseValidator:
             if val_amp:
                 raise NotImplementedError("AMP is temporarily disabled.")
             self.amp = False
-            self.args.half = False
+            # Keep FP16 option for standalone/subprocess validation speedup.
+            device_arg = str(getattr(self.args, "device", "")).lower().strip()
+            self.args.half = bool(getattr(self.args, "half", False)) and device_arg not in {"cpu", "mps"}
             model = AutoBackend(
                 weights=model or self.args.model,
                 # device=select_device(self.args.device, self.args.batch),
                 dnn=self.args.dnn,
                 data=self.args.data,
                 fp16=bool(getattr(self.args, "half", False)),
+                verbose=_as_bool(getattr(self.args, "verbose", True)),
             )
             self.model = model
             self.device = self.args.device# model.device  # update device
@@ -203,6 +208,7 @@ class BaseValidator:
             Profile(device=self.device),
         )
         bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
+        show_val_summary = _as_bool(getattr(self.args, "verbose", True))
         self.init_metrics(de_parallel(model))
         self.jdict = []  # empty before each val
         
@@ -258,8 +264,11 @@ class BaseValidator:
         stats = self.get_stats()
         self.check_stats(stats)
         self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
+        self.forward_latency_ms = float(self.speed.get("inference", 0.0) or 0.0)
+        self.forward_fps = 1000.0 / self.forward_latency_ms if self.forward_latency_ms > 0 else 0.0
         self.finalize_metrics()
-        self.print_results()
+        if show_val_summary:
+            self.print_results()
         self.run_callbacks("on_val_end")
         
         # Memory management: cleanup after validation.
@@ -287,22 +296,24 @@ class BaseValidator:
                 jt.gc()
             return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
         else:
-            LOGGER.info(
-                "Speed: {:.1f}ms preprocess, {:.1f}ms inference, {:.1f}ms loss, {:.1f}ms postprocess per image".format(
-                    *tuple(self.speed.values())
+            if show_val_summary:
+                LOGGER.info(
+                    "Speed: {:.1f}ms preprocess, {:.1f}ms inference, {:.1f}ms loss, {:.1f}ms postprocess per image".format(
+                        *tuple(self.speed.values())
+                    )
                 )
-            )
             if self.args.save_json and self.jdict:
                 # Optimization: save large files in batches to reduce peak memory.
                 json_path = str(self.save_dir / "predictions.json")
-                LOGGER.info(f"Saving {json_path}...")
+                if show_val_summary:
+                    LOGGER.info(f"Saving {json_path}...")
                 with open(json_path, "w") as f:
                     json.dump(self.jdict, f)  # flatten and save
                 # Clear jdict after saving to free memory.
                 del self.jdict
                 gc.collect()
                 stats = self.eval_json(stats)  # update stats
-            if self.args.plots or self.args.save_json:
+            if (self.args.plots or self.args.save_json) and show_val_summary:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
             
             # Final memory cleanup.

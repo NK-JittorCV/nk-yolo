@@ -156,7 +156,7 @@ class InfiniteDataLoader:
     
     def __init__(self, dataset, batch_size, shuffle=False, num_workers=0,
                  pin_memory=False, worker_init_fn=None, drop_last=False,
-                 buffer_size=512, collate_fn=None):
+                 buffer_size=512, collate_fn=None, rank=-1):
         """Initialize InfiniteDataLoader.
         
         Args:
@@ -188,21 +188,36 @@ class InfiniteDataLoader:
         self.collate_fn = collate_fn
         self.shuffle = shuffle
         self.drop_last = drop_last
+        self.rank = int(rank)
         # Store buffer_size for use in __iter__
         self.buffer_size = buffer_size
         
         # Calculate number of batches
-        # In MPI, Jittor shards internally; len(dataset) returns the global dataset length.
+        # In MPI, Jittor shards samples by rank at iteration time.
+        # `len(dataset)` remains global, so adjust __len__ to local batches,
+        # otherwise the trainer will over-iterate and repeatedly reset loader.
         dataset_size = self.dataset_size
-        self.num_batches = dataset_size // batch_size
-        if not drop_last and dataset_size % batch_size != 0:
+        if self.rank >= 0 and jt.in_mpi and int(jt.world_size) > 1:
+            world = int(jt.world_size)
+            rank = int(jt.rank)
+            local_size = dataset_size // world
+            if rank < (dataset_size % world):
+                local_size += 1
+        else:
+            local_size = dataset_size
+
+        self.num_batches = local_size // batch_size
+        if not drop_last and local_size % batch_size != 0:
             self.num_batches += 1
+        self.num_batches = max(1, int(self.num_batches))
         
         # Debug logging for distributed training
         if RANK >= 0:
             from nkyolo.utils import LOGGER
-            LOGGER.info(f"InfiniteDataLoader rank {RANK}: dataset_size={dataset_size}, "
-                       f"batch_size={batch_size}, num_batches={self.num_batches}")
+            LOGGER.info(
+                f"InfiniteDataLoader rank {RANK}: dataset_size={dataset_size}, local_size={local_size}, "
+                f"batch_size={batch_size}, num_batches={self.num_batches}"
+            )
 
     def __len__(self):
         """Return length of dataset."""
@@ -334,9 +349,11 @@ def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size
     workers = min(os.cpu_count() or 1, workers)
     effective_rank = RANK if RANK >= 0 else rank
     if effective_rank >= 0 and workers > 0:
-        # Jittor dataloader workers can deadlock under MPI; force single-process loading.
-        LOGGER.warning("WARNING ⚠️ DDP detected, forcing dataloader workers=0 to avoid Jittor worker crashes.")
-        workers = 0
+        # Keep an escape hatch for environments where MPI+workers is unstable.
+        disable_ddp_workers = str(os.getenv("NKYOLO_DDP_WORKERS", "1")).lower() in {"0", "false", "no"}
+        if disable_ddp_workers:
+            LOGGER.warning("WARNING ⚠️ DDP detected, forcing dataloader workers=0 (NKYOLO_DDP_WORKERS=0).")
+            workers = 0
     
     if buffer_size is None:
         # Jittor RingBuffer size is in bytes. Default to 512MB to avoid worker overflow.
@@ -353,7 +370,8 @@ def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size
         pin_memory=PIN_MEMORY,
         worker_init_fn=seed_worker,
         drop_last=drop_last,
-        buffer_size=buffer_size
+        buffer_size=buffer_size,
+        rank=rank,
     )
     
     return loader

@@ -272,8 +272,10 @@ def non_max_suppression(
 
     # Jittor NMS/where kernels are more reliable in FP32; cast if needed
     if isinstance(prediction, jt.Var):
-        # Force FP32 for NMS path to avoid Jittor FP16 codegen issues
-        prediction = prediction.float32()
+        # Force FP32 for NMS path to avoid Jittor FP16 codegen issues.
+        # Avoid redundant cast/copy when the tensor is already float32.
+        if "float32" not in str(prediction.dtype):
+            prediction = prediction.float32()
     
     # Convert classes to tensor if provided
     if classes is not None:

@@ -14,7 +14,7 @@ import jittor.nn as F
 from PIL import Image
 
 from nkyolo.data.utils import polygons2masks, polygons2masks_overlap
-from nkyolo.utils import LOGGER, colorstr
+from nkyolo.utils import LOGGER, RANK, colorstr
 from nkyolo.utils.checks import check_version
 from nkyolo.utils.instance import Instances
 from nkyolo.utils.metrics import bbox_ioa
@@ -23,6 +23,7 @@ from nkyolo.utils.ops import segment2box, xywh2xyxy, xyxyxyxy2xywhr
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
 DEFAULT_STD = (1.0, 1.0, 1.0)
 DEFAULT_CROP_FRACTION = 1.0
+_ALBUMENTATIONS_LOGGED = False
 
 
 class BaseTransform:
@@ -1984,6 +1985,12 @@ class Albumentations:
             "XYMasking",
         }  # from https://albumentations.ai/docs/getting_started/transforms_and_targets/#spatial-level-transforms
 
+        image_compression_kwargs = {"p": 0.0}
+        if check_version(A.__version__, ">=2.0.0"):
+            image_compression_kwargs["quality_range"] = (75, 100)
+        else:
+            image_compression_kwargs["quality_lower"] = 75
+
         # Transforms
         T = [
             A.Blur(p=0.01),
@@ -1992,7 +1999,7 @@ class Albumentations:
             A.CLAHE(p=0.01),
             A.RandomBrightnessContrast(p=0.0),
             A.RandomGamma(p=0.0),
-            A.ImageCompression(quality_lower=75, p=0.0),
+            A.ImageCompression(**image_compression_kwargs),
         ]
 
         # Compose transforms
@@ -2011,8 +2018,10 @@ class Albumentations:
 
         self.transform = A.Compose(T, **compose_kwargs)
         active_str = ", ".join(f"{x}".replace("always_apply=False, ", "") for x in active) if active else "None"
-        LOGGER.info(prefix + active_str)
-        print(prefix + active_str)
+        global _ALBUMENTATIONS_LOGGED
+        if (RANK in {-1, 0}) and not _ALBUMENTATIONS_LOGGED:
+            LOGGER.info(prefix + active_str)
+            _ALBUMENTATIONS_LOGGED = True
         
         
     def __call__(self, labels):

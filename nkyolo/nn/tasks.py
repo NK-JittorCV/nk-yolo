@@ -1192,10 +1192,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         scale = d.get("scale")
         if not scale:
             scale = tuple(scales.keys())[0]
-            LOGGER.warning(
-                f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}' from scales dict. "
-                f"Available scales: {list(scales.keys())}. This may cause shape mismatch if incorrect."
-            )
+            if verbose:
+                LOGGER.warning(
+                    f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}' from scales dict. "
+                    f"Available scales: {list(scales.keys())}. This may cause shape mismatch if incorrect."
+                )
         if scale not in scales:
             available = list(scales.keys())
             LOGGER.error(
@@ -1204,7 +1205,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             )
             scale = available[0]
         depth, width, max_channels = scales[scale]
-        LOGGER.info(f"Using scale '{scale}': width_multiple={width}, depth_multiple={depth}, max_channels={max_channels}")
+        if verbose:
+            LOGGER.info(
+                f"Using scale '{scale}': width_multiple={width}, depth_multiple={depth}, max_channels={max_channels}"
+            )
 
         activation_mapping = {
             'SiLU': nn.SiLU,

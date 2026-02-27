@@ -60,9 +60,12 @@ class DetectionTrainer(BaseTrainer):
         if getattr(dataset, "rect", False) and shuffle:
             LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
             shuffle = False
-        # Use same number of workers for train and val to avoid resource contention
-        # Validation doesn't need more workers (no shuffle overhead)
+        # Support dedicated validation workers; fallback to train workers.
         workers = self.args.workers
+        if mode == "val":
+            val_workers = int(getattr(self.args, "val_workers", -1) or -1)
+            if val_workers >= 0:
+                workers = val_workers
         return build_dataloader(dataset, batch_size, workers, shuffle, rank, buffer_size=None)
 
     def preprocess_batch(self, batch):
@@ -122,7 +125,7 @@ class DetectionTrainer(BaseTrainer):
         Returns:
             DetectionModel: Configured YOLO detection model.
         """
-        model = DetectionModel(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
+        model = DetectionModel(cfg, nc=self.data["nc"], verbose=verbose and RANK in {-1, 0})
         if weights:
             model.load(weights)
         return model

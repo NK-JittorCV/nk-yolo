@@ -7,15 +7,12 @@ Usage:
     $ yolo mode=train model=yolov8n.pt data=coco8.yaml imgsz=640 epochs=100 batch=16
 """
 
-import contextlib
 import gc
-import json
 import math
 import os
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 import warnings
@@ -63,7 +60,6 @@ from nkyolo.utils.jittor_utils import (
     select_device,
     strip_optimizer,
     safe_deepcopy_jittor,
-    state_dict_to_numpy,
     state_dict_to_jittor,
 )
 
@@ -224,7 +220,7 @@ class BaseTrainer:
                 cmd, file, env = generate_ddp_command(world_size, self)
                 LOGGER.info(f"DDP command: {' '.join(cmd)}")
                 result = subprocess.run(cmd, env=env)
-            except Exception as exc:
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
                 LOGGER.warning(
                     "WARNING ⚠️ Failed to launch MPI DDP, falling back to single GPU. "
                     f"Reason: {exc}"
@@ -292,32 +288,40 @@ class BaseTrainer:
         return Path(tempfile.gettempdir()) / "nkyolo_ddp_barrier" / str(job_id)
 
     def _sync_stop_flag(self, epoch: int, stop: bool, max_wait: float = 600.0) -> bool:
-        """Share rank0 stop decision with other ranks via filesystem (no MPI collectives)."""
+        """Share rank0 stop decision with other ranks."""
         if RANK == -1 or self._get_world_size(default=1) <= 1:
             return bool(stop)
+
+        if jt.in_mpi and hasattr(jt, "mpi"):
+            flag = np.array([1 if (bool(stop) and RANK == 0) else 0], dtype=np.int32)
+            jt.mpi.broadcast(flag, 0)
+            return bool(int(flag[0]))
 
         stop_dir = self._get_ddp_barrier_dir() / "stop_flags"
         stop_dir.mkdir(parents=True, exist_ok=True)
         flag_file = stop_dir / f"epoch_{epoch}.txt"
-
         if RANK == 0:
             flag_file.write_text("1" if stop else "0")
             return bool(stop)
-
         start = time.time()
         while time.time() - start < max_wait:
             if flag_file.exists():
                 try:
                     return flag_file.read_text().strip() == "1"
-                except Exception:
+                except OSError:
                     return bool(stop)
             time.sleep(0.05)
         LOGGER.warning(f"Rank {RANK}: stop flag sync timed out at epoch {epoch}, fallback to local stop={stop}.")
         return bool(stop)
 
     def _epoch_barrier(self, epoch: int, phase: str, max_wait: float = 1200.0):
-        """Filesystem barrier to keep all MPI ranks aligned around rank0-only work (val/save)."""
+        """Barrier to keep all MPI ranks aligned around rank0-only work (val/save)."""
         if RANK == -1 or self._get_world_size(default=1) <= 1:
+            return
+
+        if jt.in_mpi and hasattr(jt, "mpi"):
+            jt.sync_all(True)
+            jt.mpi.mpi_barrier()
             return
 
         world = self._get_world_size(default=1)
@@ -345,10 +349,15 @@ class BaseTrainer:
         return
 
     def _sync_train_num_batches(self, epoch: int, local_nb: int, max_wait: float = 600.0) -> int:
-        """Synchronize per-rank train step count and return a common step count (min across ranks)."""
+        """Synchronize per-rank train step count and return a common step count."""
         local_nb = max(1, int(local_nb))
         if RANK == -1 or self._get_world_size(default=1) <= 1:
             return local_nb
+
+        if jt.in_mpi and hasattr(jt, "mpi"):
+            v = np.array([local_nb], dtype=np.int32)
+            jt.mpi.broadcast(v, 0)
+            return max(1, int(v[0]))
 
         world = self._get_world_size(default=1)
         sdir = self._get_ddp_barrier_dir() / "train_num_batches" / f"epoch_{epoch}"
@@ -365,7 +374,7 @@ class BaseTrainer:
                     for rf in rank_files:
                         try:
                             values.append(int(rf.read_text().strip()))
-                        except Exception:
+                        except (OSError, ValueError):
                             continue
                     synced = max(1, min(values)) if values else local_nb
                     resolved_file.write_text(str(synced))
@@ -381,7 +390,7 @@ class BaseTrainer:
             if resolved_file.exists():
                 try:
                     return max(1, int(resolved_file.read_text().strip()))
-                except Exception:
+                except (OSError, ValueError):
                     return local_nb
             time.sleep(0.05)
         LOGGER.warning(f"Rank {RANK}: wait train step sync timed out at epoch {epoch}, fallback to {local_nb}.")
@@ -392,7 +401,8 @@ class BaseTrainer:
         requested = int(getattr(self.args, "val_batch", -1) or -1)
         if requested > 0:
             return max(1, requested)
-        return max(1, base_batch if self.args.task == "obb" else base_batch * 2)
+        # Keep validation batch aligned with train batch by default.
+        return max(1, base_batch)
 
     def _reset_val_loader(self, val_batch: int):
         """Rebuild validation dataloader with a new batch size on rank0/single process."""
@@ -462,12 +472,9 @@ class BaseTrainer:
         self.set_model_attributes()
         self.model_base = self.model
 
-        if jt.has_cuda and hasattr(jt, "cudnn"):
-            try:
-                # Larger cache avoids repeated cuDNN algorithm searches that can stall training.
-                jt.cudnn.set_algorithm_cache_size(10000)
-            except Exception:
-                pass
+        if jt.has_cuda and hasattr(jt, "cudnn") and hasattr(jt.cudnn, "set_algorithm_cache_size"):
+            # Larger cache avoids repeated cuDNN algorithm searches that can stall training.
+            jt.cudnn.set_algorithm_cache_size(10000)
         
         # Setup AMP (Automatic Mixed Precision)
         self._setup_amp(world_size)
@@ -493,23 +500,21 @@ class BaseTrainer:
             self.args.batch = self.batch_size = self.auto_batch()
         
         # Dataloaders
-        # Jittor MPI expects the Dataset batch size to be the global batch size
-        # (sum across all ranks), not per-rank batch size.
+        # Use per-rank micro-batch in DDP so global effective batch equals args.batch.
         if world_size > 1:
             if self.batch_size < world_size:
                 raise ValueError(
-                    f"Batch size {self.batch_size} must be >= world_size {world_size} for Jittor MPI training."
+                    f"Batch size {self.batch_size} must be >= world_size {world_size} for DDP training."
                 )
             if self.batch_size % world_size != 0 and RANK in {-1, 0}:
-                per_rank = math.ceil(self.batch_size / world_size)
                 LOGGER.warning(
-                    f"WARNING ⚠️ Jittor MPI uses global batch size; batch={self.batch_size} is not divisible by "
-                    f"world_size={world_size}. Per-rank batch will be {per_rank}. "
-                    "For exact parity with single-GPU, use a batch divisible by world_size."
+                    f"WARNING ⚠️ batch={self.batch_size} is not divisible by world_size={world_size}. "
+                    f"Using per-rank batch={self.batch_size // world_size}, effective global batch="
+                    f"{(self.batch_size // world_size) * world_size}."
                 )
-            batch_size = self.batch_size
+            batch_size = max(1, self.batch_size // world_size)
         else:
-            batch_size = self.batch_size // max(world_size, 1)
+            batch_size = self.batch_size
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=LOCAL_RANK, mode="train")
         if getattr(self.args, "ema", True) and RANK in {-1, 0}:
             self.ema = ModelEMA(self.model_base or self.model)
@@ -687,20 +692,17 @@ class BaseTrainer:
             loader_iter = iter(self.train_loader)
             if nb is None:
                 loader_nb = len(self.train_loader)
-                local_nb = loader_nb
-                if RANK != -1 and world_size > 1:
-                    per_rank_bs = max(1, self.batch_size // world_size)
-                    local_items = len(self.trainset)
-                    est_nb = local_items // per_rank_bs
-                    if not getattr(self.train_loader, "drop_last", False) and (local_items % per_rank_bs):
-                        est_nb += 1
-                    # Guard against inflated loader lengths when Jittor shards unevenly across ranks.
-                    local_nb = max(1, min(loader_nb, est_nb))
+                local_nb = max(1, int(loader_nb))
+                train_items = int(getattr(self.train_loader, "dataset_size", 0) or 0)
+                if train_items <= 0:
+                    ds_obj = getattr(self.train_loader, "original_dataset", None) or getattr(self.train_loader, "dataset", None)
+                    train_items = int(getattr(ds_obj, "ni", len(ds_obj) if ds_obj is not None else 0) or 0)
                 nb = self._sync_train_num_batches(epoch, local_nb) if RANK != -1 else local_nb
                 if RANK >= 0:
+                    per_rank_bs = int(getattr(self.train_loader, "batch_size", self.batch_size))
                     LOGGER.info(
                         f"Rank {RANK}: loader batches={loader_nb}, local batches={local_nb}, synced batches={nb} "
-                        f"(dataset size: {len(self.trainset)}, batch_size: {self.batch_size // max(world_size, 1)})"
+                        f"(dataset size: {train_items}, batch_size: {per_rank_bs}, global_batch: {per_rank_bs * max(world_size, 1)})"
                     )
                 if self.args.close_mosaic:
                     base_idx = (self.epochs - self.args.close_mosaic) * nb
@@ -775,26 +777,26 @@ class BaseTrainer:
                         if self.stop:  # training time exceeded
                             break
 
-                # Jittor MPI executes kernels asynchronously. On the final in-epoch step,
-                # rank>0 may immediately enter Python-side barriers while rank0 still
-                # materializes tensors for logging, which can deadlock. Force a per-step
-                # device sync on all ranks before rank-divergent logging code.
-                if RANK != -1 and world_size > 1:
-                    jt.sync_all(True)
-
                 # Log
                 if RANK in {-1, 0}:
                     loss_length = self.tloss.shape[0] if len(self.tloss.shape) else 1
+                    if isinstance(self.tloss, jt.Var):
+                        loss_vals = self.tloss.reshape((-1,)).numpy().tolist()
+                    elif isinstance(self.tloss, np.ndarray):
+                        loss_vals = self.tloss.reshape(-1).tolist()
+                    elif isinstance(self.tloss, (list, tuple)):
+                        loss_vals = list(self.tloss)
+                    else:
+                        loss_vals = [float(self.tloss)]
+                    loss_vals = [float(x) for x in loss_vals[:loss_length]]
                     memory_str = self._get_memory_str()  # Get memory string or empty
-                    format_str = "%11s" * (1 + (1 if memory_str else 0)) + "%11.4g" * (2 + loss_length)
+                    format_str = "%11s" * (1 + (1 if memory_str else 0)) + "%11.4g" * loss_length + "%11i%11i"
                     log_items = [f"{epoch + 1}/{self.epochs}"]
                     if memory_str:
                         log_items.append(memory_str)
-                    log_items.extend([
-                        *(self.tloss if loss_length > 1 else jt.unsqueeze(self.tloss, 0)),  # losses
-                        batch["cls"][0].shape[0],  # batch size, i.e. 8
-                        batch["img"][0].shape[-1],  # imgsz, i.e 640
-                    ])
+                    instances = self._batch_instances(batch)
+                    imgsz = int(batch["img"].shape[-1]) if hasattr(batch.get("img", None), "shape") else int(self.args.imgsz)
+                    log_items.extend([*loss_vals, instances, imgsz])
                     pbar.set_description(format_str % tuple(log_items))
                     self.run_callbacks("on_batch_end")
                     if self.args.plots and ni in self.plot_idx:
@@ -807,17 +809,19 @@ class BaseTrainer:
             if RANK != -1:
                 self._epoch_barrier(epoch, "train_done")
             final_epoch = epoch + 1 >= self.epochs
-            if RANK in {-1, 0}:
-                if self.ema:
-                    self.ema.update_attr(
-                        self.model,
-                        include=["yaml", "nc", "args", "names", "stride", "class_weights"],
-                    )
+            if RANK in {-1, 0} and self.ema:
+                self.ema.update_attr(
+                    self.model,
+                    include=["yaml", "nc", "args", "names", "stride", "class_weights"],
+                )
 
-                # Validation
-                if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
-                    self._clear_memory(threshold=0.5)  # prevent VRAM spike
-                    self.metrics, self.fitness = self.validate()
+            # Validation (all ranks enter validate() under MPI to keep single_process_scope sync aligned).
+            do_val = bool(self.args.val or final_epoch)
+            if do_val:
+                self._clear_memory(threshold=0.5)  # prevent VRAM spike
+                val_metrics, val_fitness = self.validate()
+                if RANK in {-1, 0}:
+                    self.metrics, self.fitness = val_metrics, val_fitness
 
             # Important: materialize loss scalars on all ranks before rank-divergent code.
             # In Jittor MPI, forcing this only on rank0 can deadlock at epoch end.
@@ -878,24 +882,66 @@ class BaseTrainer:
             max_num_obj=max_num_obj,
         )  # returns batch size
 
+    def _get_gpu_memory_stats(self):
+        """Return GPU memory stats as (used_gb, total_gb, usage_fraction) or None when unavailable."""
+        device_str = str(self.device).lower()
+        if "cpu" in device_str or "mps" in device_str or not jt.has_cuda:
+            return None
+        mi = jt.get_mem_info()
+        used_bytes = int(getattr(mi, "total_cuda_used", 0) or 0)
+        total_bytes = int(getattr(mi, "total_cuda_ram", 0) or 0)
+        if total_bytes <= 0:
+            return None
+        used_gb = used_bytes / (1024**3)
+        total_gb = total_bytes / (1024**3)
+        usage = used_bytes / total_bytes
+        return used_gb, total_gb, usage
+
     def _get_memory(self, fraction=False):
         """Get accelerator memory utilization in GB or as a fraction of total memory."""
         device_str = str(self.device).lower()
-        
-        # Handle non-CUDA devices
+
         if "mps" in device_str:
             return __import__("psutil").virtual_memory().percent / 100 if fraction else 0.0
-        
+
         if "cpu" in device_str:
             return 0.0
-        
-        # Handle CUDA devices - Jittor has no direct memory API, return None to indicate unavailable
-        return None
+
+        stats = self._get_gpu_memory_stats()
+        if stats is None:
+            return None
+        used_gb, _, usage = stats
+        return usage if fraction else used_gb
 
     def _get_memory_str(self):
         """Get memory string for display, returns empty string if unavailable."""
-        memory = self._get_memory()
-        return f"{memory:.3g}G" if memory is not None and memory > 0 else ""
+        stats = self._get_gpu_memory_stats()
+        if stats is None:
+            return ""
+        used_gb, _, _ = stats
+        return f"{used_gb:.1f}G"
+
+    @staticmethod
+    def _batch_instances(batch):
+        """Return number of GT instances in current batch."""
+        cls = batch.get("cls", None) if isinstance(batch, dict) else None
+        if cls is None:
+            return 0
+        shape = getattr(cls, "shape", None)
+        if shape is not None and len(shape):
+            return int(shape[0])
+        if isinstance(cls, (list, tuple)):
+            total = 0
+            for x in cls:
+                xs = getattr(x, "shape", None)
+                if xs is not None and len(xs):
+                    total += int(xs[0])
+                elif hasattr(x, "__len__"):
+                    total += len(x)
+                else:
+                    total += 1
+            return int(total)
+        return int(len(cls)) if hasattr(cls, "__len__") else 0
 
     def _model_train(self):
         """Set model in training mode."""
@@ -1040,7 +1086,7 @@ class BaseTrainer:
             cfg = weights.yaml
         elif isinstance(self.args.pretrained, (str, Path)):
             weights, _ = attempt_load_one_weight(self.args.pretrained)
-        self.model = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)  # calls Model(cfg, weights)
+        self.model = self.get_model(cfg=cfg, weights=weights, verbose=bool(self.args.verbose))  # calls Model(cfg, weights)
         return ckpt
 
     def optimizer_step(self):
@@ -1065,128 +1111,6 @@ class BaseTrainer:
         """Allows custom preprocessing model inputs and ground truths depending on task type."""
         return batch
 
-    def _validate_ema_subprocess(self):
-        """Run validation in a separate non-MPI process using current EMA weights."""
-        if not self.ema:
-            return None
-
-        base_model = self.model_base or self.model
-        ema_model = self.ema.ema if getattr(self.ema, "ema", None) is not None else None
-        ema_state = self.ema.state_dict() if ema_model is None else ema_model.state_dict()
-        if not ema_state:
-            return None
-
-        tmp_ckpt = self.wdir / f"ema_val_epoch{self.epoch}.pkl"
-        tmp_metrics = self.wdir / f"ema_val_epoch{self.epoch}_metrics.json"
-        val_batch = int(getattr(self, "val_batch_size", 0) or 0)
-        if val_batch <= 0:
-            val_batch = int(getattr(self.args, "val_batch", -1) or -1)
-        if val_batch <= 0:
-            val_batch = int(getattr(self.test_loader, "batch_size", max(1, self.batch_size)))
-        val_batch = max(1, val_batch)
-
-        ckpt = {
-            "epoch": self.epoch,
-            "model": None,
-            "ema": state_dict_to_numpy(ema_state, fp16=False),
-            "updates": getattr(self.ema, "updates", 0),
-            "train_args": vars(self.args),
-            "model_yaml": (ema_model or base_model).yaml,
-            "names": getattr(base_model, "names", None),
-            "nc": getattr(base_model, "nc", None),
-        }
-
-        try:
-            jt.save(ckpt, str(tmp_ckpt))
-            env = os.environ.copy()
-            for k in (
-                "OMPI_COMM_WORLD_RANK",
-                "OMPI_COMM_WORLD_LOCAL_RANK",
-                "OMPI_COMM_WORLD_SIZE",
-                "PMI_RANK",
-                "PMI_LOCAL_RANK",
-                "PMI_SIZE",
-                "RANK",
-                "LOCAL_RANK",
-                "WORLD_SIZE",
-            ):
-                env.pop(k, None)
-
-            val_device = str(self.device)
-            if val_device.startswith("cuda:"):
-                env["CUDA_VISIBLE_DEVICES"] = val_device.split(":", 1)[1]
-                val_device = "0"
-
-            val_kwargs = {
-                "data": self.args.data,
-                "imgsz": int(self.args.imgsz),
-                "split": self.args.split,
-                "device": val_device,
-                "workers": 0,
-                "plots": False,
-                "save_json": False,
-                # Keep subprocess validation progress bar visible in rank0 logs.
-                "verbose": True,
-                "project": str(self.save_dir / "ema_val"),
-                "name": f"epoch{self.epoch + 1}",
-                "exist_ok": True,
-            }
-            # Retry with smaller validation batch sizes on subprocess failures (typically CUDA OOM).
-            attempt_batches = []
-            b = val_batch
-            while True:
-                attempt_batches.append(b)
-                if b <= 1:
-                    break
-                b = max(1, b // 2)
-
-            for cur_batch in attempt_batches:
-                val_kwargs["batch"] = cur_batch
-                with contextlib.suppress(Exception):
-                    tmp_metrics.unlink()
-
-                script = (
-                    "import json\n"
-                    "from nkyolo import YOLO\n"
-                    f"model = YOLO(r'''{tmp_ckpt}''')\n"
-                    f"metrics = model.val(**{repr(val_kwargs)})\n"
-                    "d = getattr(metrics, 'results_dict', None)\n"
-                    "if d is None:\n"
-                    "    d = metrics if isinstance(metrics, dict) else {}\n"
-                    f"with open(r'''{tmp_metrics}''', 'w') as f:\n"
-                    "    json.dump({k: float(v) for k, v in d.items()}, f)\n"
-                )
-                proc = subprocess.run(
-                    [sys.executable, "-c", script],
-                    cwd=str(Path(__file__).resolve().parents[2]),
-                    env=env,
-                    text=True,
-                )
-                if proc.returncode == 0 and tmp_metrics.exists():
-                    if cur_batch != val_batch:
-                        LOGGER.warning(
-                            f"WARNING ⚠️ Validation batch auto-reduced from {val_batch} to {cur_batch} to avoid failures."
-                        )
-                        self.val_batch_size = cur_batch
-                        self.args.val_batch = cur_batch
-                    return json.loads(tmp_metrics.read_text())
-
-                if cur_batch > 1:
-                    LOGGER.warning(
-                        f"WARNING ⚠️ EMA subprocess validation failed at batch={cur_batch}, retrying with batch={max(1, cur_batch // 2)}."
-                    )
-
-            LOGGER.warning("WARNING ⚠️ EMA subprocess validation failed at all batch sizes, using fallback.")
-            return None
-        except Exception as e:
-            LOGGER.warning(f"WARNING ⚠️ EMA subprocess validation exception, using fallback: {e}")
-            return None
-        finally:
-            with contextlib.suppress(Exception):
-                tmp_ckpt.unlink()
-            with contextlib.suppress(Exception):
-                tmp_metrics.unlink()
-
     def _validate_inprocess_with_backoff(self):
         """Run in-process validation and auto-reduce val batch size if CUDA OOM occurs."""
         if self.validator is None:
@@ -1200,7 +1124,7 @@ class BaseTrainer:
         while True:
             try:
                 return self.validator(self)
-            except Exception as e:
+            except (RuntimeError, MemoryError) as e:
                 if (not self._is_oom_error(e)) or cur_batch <= 1:
                     raise
                 next_batch = max(1, cur_batch // 2)
@@ -1217,27 +1141,32 @@ class BaseTrainer:
 
         The returned dict is expected to contain "fitness" key.
         """
-        metrics = None
-        if jt.in_mpi and int(jt.world_size) > 1 and self.ema:
-            # Jittor MPI can deadlock when validating EMA in-process; run EMA val in an isolated process.
-            metrics = self._validate_ema_subprocess()
-            if metrics is None:
-                # Stable fallback: in-process val with train weights.
-                ema_obj = self.ema
-                self.ema = None
-                metrics = self._validate_inprocess_with_backoff()
-                self.ema = ema_obj
-            elif RANK in {-1, 0}:
-                LOGGER.info(f"Using EMA weights for epoch {self.epoch + 1} validation (subprocess mode).")
-        else:
-            # Non-MPI path: force EMA weights for validation when EMA is enabled.
+        def _run_inprocess():
+            # Force EMA weights for validation when EMA is enabled.
             model_for_ema = self.model_base or self.model
             ema_applied = False
             if self.ema and getattr(self.ema, "ema", None) is None:
                 ema_applied = self.ema.apply_to(model_for_ema)
-            metrics = self._validate_inprocess_with_backoff()
+            metrics_local = self._validate_inprocess_with_backoff()
             if ema_applied:
                 self.ema.restore(model_for_ema)
+            return metrics_local
+
+        metrics = {}
+        if jt.in_mpi and int(jt.world_size) > 1:
+            @jt.single_process_scope(rank=0)
+            def _rank0_validate():
+                return _run_inprocess()
+
+            res = _rank0_validate()
+            if RANK == 0 and isinstance(res, dict):
+                metrics = res
+        else:
+            metrics = _run_inprocess()
+
+        if RANK not in {-1, 0}:
+            return {}, -1.0
+
         fitness = metrics.pop("fitness", -self.loss.detach().cpu().numpy())  # use loss as fitness measure if not found
         if not self.best_fitness or self.best_fitness < fitness:
             self.best_fitness = fitness

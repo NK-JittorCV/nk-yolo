@@ -9,7 +9,7 @@ import time
 import numpy as np
 import jittor as jt
 
-from nkyolo.utils import LOCAL_RANK, NUM_THREADS, TQDM
+from nkyolo.utils import LOCAL_RANK, NUM_THREADS, TQDM, remove_colorstr
 from nkyolo.utils.ops import resample_segments
 
 from .augment import (
@@ -54,6 +54,11 @@ class YOLODataset(BaseDataset):
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, **kwargs)
 
+    def _show_cache_scan_logs(self):
+        """Return True when cache scanning progress should be shown."""
+        prefix = remove_colorstr(str(getattr(self, "prefix", ""))).strip().lower()
+        return not prefix.startswith("val:")
+
     def cache_labels(self, path=Path("./labels.jittor_cache")):
         """
         Cache dataset labels, check images and read shapes.
@@ -74,6 +79,7 @@ class YOLODataset(BaseDataset):
                 "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
                 "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
             )
+        show_scan = self._show_cache_scan_logs()
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(
                 func=verify_image_label,
@@ -87,7 +93,7 @@ class YOLODataset(BaseDataset):
                     repeat(ndim),
                 ),
             )
-            pbar = TQDM(results, desc=desc, total=total)
+            pbar = TQDM(results, desc=desc, total=total, disable=not show_scan)
             for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
@@ -108,7 +114,8 @@ class YOLODataset(BaseDataset):
                     )
                 if msg:
                     msgs.append(msg)
-                pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt"
+                if show_scan:
+                    pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt"
             pbar.close()
 
         if msgs:
@@ -124,26 +131,44 @@ class YOLODataset(BaseDataset):
     def get_labels(self):
         """Returns dictionary of labels for YOLO training."""
         self.label_files = img2label_paths(self.im_files)
-        cache_path = Path(self.label_files[0]).parent.with_suffix(".jittor_cache")
+        # Use source-file cache when dataset is provided as a txt list (e.g. coco128_train.txt).
+        # This avoids collisions with directory-based datasets sharing the same labels folder.
+        label_dir_cache = Path(self.label_files[0]).parent.with_suffix(".jittor_cache")
+        cache_path = label_dir_cache
+        src = self.img_path[0] if isinstance(self.img_path, (list, tuple)) and len(self.img_path) == 1 else self.img_path
+        if isinstance(src, (str, Path)):
+            src_path = Path(src)
+            if src_path.is_file():
+                cache_path = src_path.with_suffix(".jittor_cache")
         cache = None
-        exists = False
-        current_hash = get_hash(self.label_files + self.im_files)
-        candidate_paths = (
-            cache_path,
-            cache_path.with_suffix(".cache"),
-            cache_path.with_suffix(".npy"),
-            cache_path.with_suffix(".cache.npy"),
-        )
-        cache_file_found = any(p.exists() for p in candidate_paths)
 
+        def _cache_ok(c, expected_hash):
+            """Return True when cache dict matches current dataset content."""
+            if not isinstance(c, dict):
+                return False
+            if c.get("version") != DATASET_CACHE_VERSION:
+                return False
+            if c.get("hash") != expected_hash:
+                return False
+            if not isinstance(c.get("labels"), list):
+                return False
+            results = c.get("results")
+            return isinstance(results, (tuple, list)) and len(results) == 5
+
+        current_hash = get_hash(self.label_files + self.im_files)
+        cache_file_found = any(
+            p.exists()
+            for p in (
+                cache_path,
+                cache_path.with_suffix(".cache"),
+                cache_path.with_suffix(".npy"),
+                cache_path.with_suffix(".cache.npy"),
+            )
+        )
+        exists = False
         if cache_file_found:
             cache = load_dataset_cache_file(cache_path)
-            version_ok = isinstance(cache, dict) and cache.get("version") == DATASET_CACHE_VERSION
-            hash_ok = isinstance(cache, dict) and cache.get("hash") == current_hash
-            labels_ok = isinstance(cache, dict) and isinstance(cache.get("labels"), list)
-            results = cache.get("results") if isinstance(cache, dict) else None
-            results_ok = isinstance(results, (tuple, list)) and len(results) == 5
-            exists = version_ok and hash_ok and labels_ok and results_ok
+            exists = _cache_ok(cache, current_hash)
             if not exists and LOCAL_RANK in {-1, 0}:
                 LOGGER.warning(f"{self.prefix}Dataset cache is stale or invalid, rebuilding: {cache_path}")
 
@@ -158,11 +183,16 @@ class YOLODataset(BaseDataset):
                 else:
                     max_wait = 300.0
                     start = time.time()
-                    while not cache_path.exists() and time.time() - start < max_wait:
-                        time.sleep(0.05)
-                    if cache_path.exists():
+                    while time.time() - start < max_wait:
+                        if not cache_path.exists():
+                            time.sleep(0.05)
+                            continue
                         cache = load_dataset_cache_file(cache_path)
-                    else:
+                        latest_hash = get_hash(self.label_files + self.im_files)
+                        if _cache_ok(cache, latest_hash):
+                            break
+                        time.sleep(0.05)
+                    if cache is None or (not _cache_ok(cache, get_hash(self.label_files + self.im_files))):
                         LOGGER.warning(
                             f"{self.prefix}Rank {mpi_rank}: Cache wait timed out after {max_wait}s, rebuilding locally."
                         )
@@ -170,14 +200,24 @@ class YOLODataset(BaseDataset):
             else:
                 cache = self.cache_labels(cache_path)
 
-        cache_version_ok = isinstance(cache, dict) and cache.get("version") == DATASET_CACHE_VERSION
-        cache_hash_ok = isinstance(cache, dict) and cache.get("hash") == current_hash
-        if not (cache_version_ok and cache_hash_ok):
-            raise RuntimeError(f"{self.prefix}Dataset cache check failed after rebuild: {cache_path}")
+        # Re-check with a refreshed hash because verify pass may repair image files and change hash.
+        latest_hash = get_hash(self.label_files + self.im_files)
+        if not _cache_ok(cache, latest_hash):
+            # Retry once in case another rank replaced the cache file between checks.
+            if cache_path.exists():
+                cache = load_dataset_cache_file(cache_path)
+            latest_hash = get_hash(self.label_files + self.im_files)
+
+        if not _cache_ok(cache, latest_hash):
+            LOGGER.warning(f"{self.prefix}Cache mismatch after rebuild, forcing local rebuild: {cache_path}")
+            cache = self.cache_labels(cache_path)
+            latest_hash = get_hash(self.label_files + self.im_files)
+            if not _cache_ok(cache, latest_hash):
+                raise RuntimeError(f"{self.prefix}Dataset cache check failed after rebuild: {cache_path}")
 
         # Display cache
         nf, nm, ne, nc, n = cache.pop("results")  # found, missing, empty, corrupt, total
-        if exists and LOCAL_RANK in {-1, 0}:
+        if exists and LOCAL_RANK in {-1, 0} and self._show_cache_scan_logs():
             d = f"Scanning {cache_path}... {nf} images, {nm + ne} backgrounds, {nc} corrupt"
             TQDM(None, desc=self.prefix + d, total=n, initial=n)  # display results
             if cache["msgs"]:

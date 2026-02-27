@@ -48,6 +48,13 @@ from nkyolo.utils.files import file_size
 from nkyolo.utils.jittor_utils import get_cpu_info, select_device
 
 
+def _forward_latency_ms(speed):
+    """Return forward-only latency (ms/im) from a speed dict or scalar."""
+    if isinstance(speed, dict):
+        return float(speed.get("inference", 0.0) or 0.0)
+    return float(speed or 0.0)
+
+
 def benchmark(
     model=WEIGHTS_DIR / "yolo11n.pt",
     data=None,
@@ -141,9 +148,10 @@ def benchmark(
         results = exported_model.val(
             data=data, batch=1, imgsz=imgsz, plots=False, device=device, half=half, int8=int8, verbose=False
         )
-        metric, speed = results.results_dict[key], results.speed["inference"]
-        fps = round(1000 / (speed + eps), 2)  # frames per second
-        y.append([name, "✅", round(file_size(filename), 1), round(metric, 4), round(speed, 2), fps])
+        metric = results.results_dict[key]
+        latency = _forward_latency_ms(getattr(results, "speed", {}))
+        fps = round(1000 / (latency + eps), 2)  # forward-only FPS
+        y.append([name, "✅", round(file_size(filename), 1), round(metric, 4), round(latency, 2), fps])
     # Print results
     check_yolo(device=device)  # print system info
     df = pd.DataFrame(y, columns=["Format", "Status❔", "Size (MB)", key, "Inference time (ms/im)", "FPS"])
