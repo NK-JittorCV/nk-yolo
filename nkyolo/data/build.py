@@ -191,6 +191,9 @@ class InfiniteDataLoader:
         self.rank = int(rank)
         # Store buffer_size for use in __iter__
         self.buffer_size = buffer_size
+        # Track worker init context to avoid unnecessary worker respawn.
+        self._worker_mpi_state = None
+        self._worker_world_size = None
         
         # Calculate number of batches
         # In MPI, Jittor shards samples by rank at iteration time.
@@ -227,6 +230,8 @@ class InfiniteDataLoader:
         """Return self as iterator."""
         # Jittor RingBuffer size is in bytes. Use configured buffer_size or 512MB minimum.
         final_buffer_size = max(int(self.buffer_size), 512 * 1024 * 1024)
+        cur_mpi_state = bool(jt.in_mpi)
+        cur_world_size = int(jt.world_size) if cur_mpi_state else 1
 
         # Build wrapped dataset once and keep it stable across resets.
         if not isinstance(self.dataset, InfiniteDataset):
@@ -239,20 +244,28 @@ class InfiniteDataLoader:
                 buffer_size=final_buffer_size,
                 dataset_size=self.dataset_size,
             )
-        else:
-            self.dataset.set_attrs(
-                total_len=self.dataset_size,
-                batch_size=self.batch_size,
-                shuffle=self.shuffle,
-                drop_last=self.drop_last,
-                num_workers=self.num_workers,
-                buffer_size=final_buffer_size,
+        elif (
+            hasattr(self.dataset, "workers")
+            and self._worker_mpi_state is not None
+            and (
+                self._worker_mpi_state != cur_mpi_state
+                or self._worker_world_size != cur_world_size
             )
+        ):
+            # MPI context can change under jt.single_process_scope (used by rank0-only validation).
+            # Recreate workers only when MPI mode/world size changes, otherwise keep workers alive.
+            self.dataset.reset()
+        # NOTE: do not call dataset.set_attrs() on every __iter__.
+        # Jittor's Dataset.set_attrs() triggers reset(), which tears down/re-spawns workers.
+        # Repeated re-spawn across epochs can leak worker processes and make later epochs slower.
         
         if self.collate_fn:
             self.dataset.collate_fn = self.collate_fn
         
         self.iterator = self.dataset.__iter__()
+        if self.num_workers > 0:
+            self._worker_mpi_state = cur_mpi_state
+            self._worker_world_size = cur_world_size
         return self
 
     def __next__(self):
@@ -349,7 +362,19 @@ def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, buffer_size
     workers = min(os.cpu_count() or 1, workers)
     effective_rank = RANK if RANK >= 0 else rank
     if effective_rank >= 0 and workers > 0:
-        # Keep an escape hatch for environments where MPI+workers is unstable.
+        # In Jittor MPI, worker processes are forked from rank processes and can consume large host RAM.
+        # Keep a conservative default cap to avoid host OOM-kill (signal 9) in multi-GPU runs.
+        if jt.in_mpi and int(jt.world_size) > 1:
+            max_workers = int(os.getenv("NKYOLO_DDP_MAX_WORKERS", "2") or 2)
+            max_workers = max(0, max_workers)
+            if workers > max_workers:
+                LOGGER.warning(
+                    f"WARNING ⚠️ DDP detected, capping dataloader workers from {workers} to {max_workers} "
+                    "(set NKYOLO_DDP_MAX_WORKERS to override)."
+                )
+                workers = max_workers
+
+        # Escape hatch: explicitly disable workers for debugging extreme instability.
         disable_ddp_workers = str(os.getenv("NKYOLO_DDP_WORKERS", "1")).lower() in {"0", "false", "no"}
         if disable_ddp_workers:
             LOGGER.warning("WARNING ⚠️ DDP detected, forcing dataloader workers=0 (NKYOLO_DDP_WORKERS=0).")
