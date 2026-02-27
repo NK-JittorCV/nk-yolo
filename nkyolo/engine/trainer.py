@@ -54,6 +54,7 @@ from nkyolo.utils.jittor_utils import (
     EarlyStopping,
     LambdaLR,
     ModelEMA,
+    autocast,
     convert_optimizer_state_dict_to_fp16,
     init_seeds,
     one_cycle,
@@ -574,7 +575,8 @@ class BaseTrainer:
                 batch = next(loader_iter)
 
             batch = self.preprocess_batch(batch)
-            _ = self.model(batch)
+            with autocast(enabled=self.amp, device=self.device):
+                _ = self.model(batch)
 
         if RANK != -1 and world > 1:
             jt.sync_all(True)
@@ -610,12 +612,16 @@ class BaseTrainer:
     
     def _setup_amp(self, world_size):
         """Setup Automatic Mixed Precision (AMP) for training."""
-        # AMP is temporarily disabled.
-        # self.amp = bool(getattr(self.args, "amp", False))
         requested_amp = bool(getattr(self.args, "amp", False))
-        if requested_amp:
-            raise NotImplementedError("AMP is temporarily disabled.")
-        self.amp = False
+        use_cuda = jt.has_cuda and "cuda" in str(self.device).lower()
+        self.amp = bool(requested_amp and use_cuda)
+        if requested_amp and not self.amp and RANK in {-1, 0}:
+            LOGGER.warning("WARNING ⚠️ AMP requested but CUDA is unavailable, falling back to FP32.")
+        if self.amp and RANK in {-1, 0}:
+            amp_level = int(os.getenv("NKYOLO_AMP_LEVEL", "3") or 3)
+            LOGGER.info(f"AMP enabled (Jittor auto_mixed_precision_level={amp_level}).")
+            if amp_level <= 3:
+                LOGGER.info("AMP level<=3 is stability mode in Jittor and may show little/no speedup.")
         self.scaler = None
     
     def _setup_model_ddp(self, world_size):
@@ -745,10 +751,9 @@ class BaseTrainer:
                         if "momentum" in x:
                             x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
-                # Forward (AMP disabled)
-                # with autocast(self.amp):
                 batch = self.preprocess_batch(batch)
-                self.loss, self.loss_items = self.model(batch)
+                with autocast(enabled=self.amp, device=self.device):
+                    self.loss, self.loss_items = self.model(batch)
                 touch = self._ddp_touch_loss_params()
                 if touch is not None:
                     self.loss = self.loss + touch

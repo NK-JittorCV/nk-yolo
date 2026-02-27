@@ -41,21 +41,17 @@ def autocast(enabled: bool, device: str = "cuda"):
         device: Device type ('cuda' or 'cpu')
     
     Note:
-        For Jittor, AMP is handled internally. This context manager preserves
-        the previous auto_mixed_precision_level setting to avoid precision changes
-        between epochs.
+        Jittor AMP is controlled by ``auto_mixed_precision_level``.
+        Level 3 is used by default for stability in YOLO training.
     """
-    # AMP is temporarily disabled.
-    # prev_amp_level = jt.flags.auto_mixed_precision_level
-    # if enabled:
-    #     jt.flags.auto_mixed_precision_level = 1
-    # else:
-    #     jt.flags.auto_mixed_precision_level = 0
-    # yield
-    # jt.flags.auto_mixed_precision_level = prev_amp_level
-    if enabled:
-        raise NotImplementedError("AMP is temporarily disabled.")
-    yield
+    if (not enabled) or (not jt.has_cuda) or ("cpu" in str(device).lower()) or ("mps" in str(device).lower()):
+        yield
+        return
+
+    amp_level = int(os.getenv("NKYOLO_AMP_LEVEL", "3") or 3)
+    amp_level = max(0, amp_level)
+    with jt.flag_scope(auto_mixed_precision_level=amp_level):
+        yield
 
 def get_cpu_info():
     """Return a string with system CPU information, i.e. 'Apple M2'."""

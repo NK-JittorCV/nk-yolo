@@ -597,8 +597,16 @@ def check_amp(model):
     Returns:
         (bool): Returns True if the AMP functionality works correctly with YOLO11 model, else False.
     """
-    # AMP is temporarily disabled.
-    raise NotImplementedError("AMP is temporarily disabled.")
+    # Jittor AMP uses auto_mixed_precision_level. Keep this lightweight and non-intrusive.
+    try:
+        with jt.flag_scope(auto_mixed_precision_level=3):
+            x = jt.randn((1, 3, 32, 32))
+            y = (x * 2.0 + 1.0).mean()
+            _ = float(y.numpy())
+        return True
+    except Exception as e:
+        LOGGER.warning(f"WARNING ⚠️ AMP check failed, fallback to FP32. Reason: {e}")
+        return False
 
 
 def git_describe(path=ROOT):  # path must be a directory

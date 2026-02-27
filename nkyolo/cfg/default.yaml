@@ -35,7 +35,7 @@ rect: False # (bool) rectangular training if mode='train' or rectangular validat
 cos_lr: False # (bool) use cosine learning rate scheduler
 close_mosaic: 10 # (int) disable mosaic augmentation for final epochs (0 to disable)
 resume: False # (bool) resume training from last checkpoint
-amp: False # (bool) Automatic Mixed Precision (AMP) training, choices=[True, False], True runs AMP check
+amp: True # (bool) Automatic Mixed Precision (AMP) training, choices=[True, False]
 fraction: 1.0 # (float) dataset fraction to train on (default is 1.0, all images in train set)
 profile: False # (bool) profile ONNX and TensorRT speeds during training for loggers
 freeze: None # (int | list, optional) freeze first n layers, or freeze list of layer indices during training
@@ -61,7 +61,7 @@ max_nms: 30000 # (int) maximum boxes into NMS
 max_time_img: 0.05 # (float) NMS time limit per image (seconds)
 val_loss: False # (bool) compute validation loss during training (memory heavy)
 final_eval: True # (bool) run final evaluation on best.pt after training
-val_amp: False # (bool) use AMP (FP16) during validation/final_eval
+val_amp: True # (bool) use AMP during validation/final_eval (Jittor AMP level controlled by NKYOLO_AMP_LEVEL)
 val_half: False # (bool) use FP16 for standalone validation forward for faster val
 half: False # (bool) use half precision (FP16)
 dnn: False # (bool) use OpenCV DNN for ONNX inference

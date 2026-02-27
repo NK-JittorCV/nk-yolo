@@ -36,7 +36,7 @@ from nkyolo.utils import LOGGER, TQDM, callbacks, colorstr, emojis
 from nkyolo.utils.checks import check_imgsz
 from nkyolo.utils.ops import Profile
 
-from nkyolo.utils.jittor_utils import de_parallel
+from nkyolo.utils.jittor_utils import autocast, de_parallel
 
 
 class BaseValidator:
@@ -123,12 +123,9 @@ class BaseValidator:
         if self.training:
             self.device = trainer.device
             self.data = trainer.data
-            # AMP is temporarily disabled for validation.
-            # val_amp = getattr(self.args, "val_amp", False)
             val_amp = bool(getattr(self.args, "val_amp", False))
-            if val_amp:
-                raise NotImplementedError("AMP is temporarily disabled.")
-            self.amp = False
+            use_cuda = jt.has_cuda and "cuda" in str(self.device).lower()
+            self.amp = bool(val_amp and use_cuda)
             self.args.half = False
             self.compute_loss = _as_bool(getattr(self.args, "val_loss", False))
             ema_model = getattr(trainer.ema, "ema", None) if trainer.ema else None
@@ -147,14 +144,11 @@ class BaseValidator:
             if str(self.args.model).endswith(".yaml") and (model is None or str(model).endswith(".yaml")):
                 LOGGER.warning("WARNING ⚠️ validating an untrained model YAML will result in 0 mAP.")
             callbacks.add_integration_callbacks(self)
-            # AMP is temporarily disabled for validation.
-            # val_amp = getattr(self.args, "val_amp", False)
             val_amp = bool(getattr(self.args, "val_amp", False))
-            if val_amp:
-                raise NotImplementedError("AMP is temporarily disabled.")
-            self.amp = False
-            # Keep FP16 option for standalone/subprocess validation speedup.
             device_arg = str(getattr(self.args, "device", "")).lower().strip()
+            use_cuda = jt.has_cuda and device_arg not in {"cpu", "mps"}
+            self.amp = bool(val_amp and use_cuda)
+            # Keep FP16 option for standalone/subprocess validation speedup.
             self.args.half = bool(getattr(self.args, "half", False)) and device_arg not in {"cpu", "mps"}
             model = AutoBackend(
                 weights=model or self.args.model,
@@ -224,16 +218,14 @@ class BaseValidator:
 
             # Inference
             with dt[1]:
-                # CRITICAL FIX: AMP disabled
-                # with autocast(enabled=self.amp):
-                preds = model(batch["img"], augment=augment)
+                with autocast(enabled=self.amp, device=self.device):
+                    preds = model(batch["img"], augment=augment)
 
             # Loss
             with dt[2]:
                 if self.training and self.compute_loss:
-                    # AMP disabled
-                    # with autocast(enabled=self.amp):
-                    loss_items = model.loss(batch, preds)[1]
+                    with autocast(enabled=self.amp, device=self.device):
+                        loss_items = model.loss(batch, preds)[1]
                     self.loss += loss_items
                     # Release loss_items promptly.
                     del loss_items
