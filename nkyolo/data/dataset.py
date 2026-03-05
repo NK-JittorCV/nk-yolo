@@ -155,6 +155,18 @@ class YOLODataset(BaseDataset):
             results = c.get("results")
             return isinstance(results, (tuple, list)) and len(results) == 5
 
+        def _try_load_cache(path, log_warning=True):
+            """Best-effort cache loader that falls back to label scan on read errors."""
+            try:
+                return load_dataset_cache_file(path)
+            except Exception as e:
+                if log_warning and LOCAL_RANK in {-1, 0}:
+                    LOGGER.warning(
+                        f"{self.prefix}Unable to load dataset cache {path}: {type(e).__name__}: {e}. "
+                        "Falling back to label scan."
+                    )
+                return None
+
         current_hash = get_hash(self.label_files + self.im_files)
         cache_file_found = any(
             p.exists()
@@ -167,9 +179,9 @@ class YOLODataset(BaseDataset):
         )
         exists = False
         if cache_file_found:
-            cache = load_dataset_cache_file(cache_path)
+            cache = _try_load_cache(cache_path)
             exists = _cache_ok(cache, current_hash)
-            if not exists and LOCAL_RANK in {-1, 0}:
+            if cache is not None and not exists and LOCAL_RANK in {-1, 0}:
                 LOGGER.warning(f"{self.prefix}Dataset cache is stale or invalid, rebuilding: {cache_path}")
 
         use_mpi = bool(jt.in_mpi)
@@ -183,19 +195,21 @@ class YOLODataset(BaseDataset):
                 else:
                     max_wait = 300.0
                     start = time.time()
+                    wait_reason = f"timed out after {max_wait:.0f}s"
                     while time.time() - start < max_wait:
                         if not cache_path.exists():
                             time.sleep(0.05)
                             continue
-                        cache = load_dataset_cache_file(cache_path)
+                        cache = _try_load_cache(cache_path, log_warning=False)
+                        if cache is None:
+                            wait_reason = "failed because cache file is unreadable"
+                            break
                         latest_hash = get_hash(self.label_files + self.im_files)
                         if _cache_ok(cache, latest_hash):
                             break
                         time.sleep(0.05)
                     if cache is None or (not _cache_ok(cache, get_hash(self.label_files + self.im_files))):
-                        LOGGER.warning(
-                            f"{self.prefix}Rank {mpi_rank}: Cache wait timed out after {max_wait}s, rebuilding locally."
-                        )
+                        LOGGER.warning(f"{self.prefix}Rank {mpi_rank}: Cache wait {wait_reason}, rebuilding locally.")
                         cache = self.cache_labels(cache_path)
             else:
                 cache = self.cache_labels(cache_path)
@@ -205,7 +219,9 @@ class YOLODataset(BaseDataset):
         if not _cache_ok(cache, latest_hash):
             # Retry once in case another rank replaced the cache file between checks.
             if cache_path.exists():
-                cache = load_dataset_cache_file(cache_path)
+                refreshed_cache = _try_load_cache(cache_path, log_warning=False)
+                if refreshed_cache is not None:
+                    cache = refreshed_cache
             latest_hash = get_hash(self.label_files + self.im_files)
 
         if not _cache_ok(cache, latest_hash):

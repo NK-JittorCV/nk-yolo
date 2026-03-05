@@ -27,7 +27,6 @@ share/python-wheels/
 *.egg
 MANIFEST
 requirements.txt
-setup.py
 jittoryolo.egg-info
 
 # PyInstaller
