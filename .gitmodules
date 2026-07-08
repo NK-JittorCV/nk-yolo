@@ -1,0 +1,4 @@
+[submodule "third_party/jittor"]
+	path = third_party/jittor
+	url = git@github.com:FishAndWasabi/jittor.git
+	branch = nk-stable

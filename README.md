@@ -53,12 +53,17 @@
 ### Step 1: Clone and Install Dependencies
 
 ```bash
-git clone https://github.com/NK-JittorCV/nk-yolo.git
+git clone --recursive https://github.com/NK-JittorCV/nk-yolo.git
 cd nk-yolo
 python -m pip install -r requirements.txt
 ```
 
-> 💡 **Note**: If you encounter Jittor installation issues, please refer to the [Jittor Installation Guide](https://github.com/Jittor/jittor).
+> ⚠️ **Jittor comes from the pinned submodule** `third_party/jittor` (branch `nk-stable` of our fork,
+> which carries fp16-training, NMS and pooling fixes that stock Jittor wheels do not have).
+> Do NOT `pip install jittor`. If you cloned without `--recursive`, run
+> `git submodule update --init third_party/jittor`, then install it with
+> `pip install -e third_party/jittor/python` — or simply run `bash setup_env.sh`
+> which does all of the above.
 
 ### Step 2: Install NK-YOLO
 
