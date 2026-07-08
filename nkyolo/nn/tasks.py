@@ -66,6 +66,7 @@ from nkyolo.nn.modules import (
     TorchVision,
     WorldDetect,
     v10Detect,
+    GlobalToken,
     MSBlock,
     A2C2f
 )
@@ -392,7 +393,8 @@ class DetectionModel(BaseModel):
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
-        self.end2end = self.model[-1].end2end
+        # Non-Detect heads (e.g. RTDETRDecoder) don't define end2end
+        self.end2end = getattr(self.model[-1], "end2end", False)
 
         # Build strides
         m = self.model[-1]  # Detect()

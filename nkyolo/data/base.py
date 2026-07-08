@@ -17,7 +17,7 @@ import jittor as jt
 from jittor.dataset import Dataset
 
 from nkyolo.data.utils import FORMATS_HELP_MSG, IMG_FORMATS
-from nkyolo.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, RANK, TQDM
+from nkyolo.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, RANK, TQDM, get_world_size
 
 
 class BaseDataset(Dataset):
@@ -81,15 +81,7 @@ class BaseDataset(Dataset):
         # In MPI distributed training, Jittor Dataset already shards data per process.
         # Only do manual splitting when not running under MPI.
         if self.split_by_rank and RANK >= 0 and not jt.in_mpi:
-            # Get world size from MPI environment
-            if "OMPI_COMM_WORLD_SIZE" in os.environ:
-                world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
-            elif "PMI_SIZE" in os.environ:
-                world_size = int(os.environ["PMI_SIZE"])
-            elif "WORLD_SIZE" in os.environ:
-                world_size = int(os.environ["WORLD_SIZE"])
-            else:
-                world_size = 1
+            world_size = get_world_size()
 
             if world_size > 1:
                 total_len = len(self.labels)
@@ -317,7 +309,13 @@ class BaseDataset(Dataset):
             elif mini > 1:
                 shapes[i] = [1, 1 / mini]
 
-        self.batch_shapes = np.ceil(np.array(shapes) * self.imgsz / self.stride + self.pad).astype(int) * self.stride
+        batch_shapes = np.ceil(np.array(shapes) * self.imgsz / self.stride + self.pad).astype(int) * self.stride
+        # Floor the short side so the deepest feature map stays larger than
+        # SPPF's k=5 pool window: stock jittor's Pool rejects inputs whose
+        # spatial size is <= kernel_size (ignoring padding), so extreme aspect
+        # ratios would otherwise crash rect validation. Capped at imgsz so a
+        # small requested size (e.g. imgsz=128) is never silently inflated.
+        self.batch_shapes = np.maximum(batch_shapes, min(6 * self.stride, self.imgsz))
         self.batch = bi  # batch index of image
 
     def __getitem__(self, index):
