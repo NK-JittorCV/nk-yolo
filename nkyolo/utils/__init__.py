@@ -36,6 +36,38 @@ _local_rank = os.getenv("OMPI_COMM_WORLD_LOCAL_RANK") or os.getenv("PMI_LOCAL_RA
 RANK = int(_rank) if _rank != "-1" else -1
 LOCAL_RANK = int(_local_rank) if _local_rank != "-1" else -1
 
+
+def get_world_size(default=1):
+    """Return world size from Jittor MPI state, falling back to launcher env vars."""
+    if getattr(jt, "in_mpi", False):
+        return int(jt.world_size)
+    if RANK == -1:
+        # Not a distributed rank: ignore stale WORLD_SIZE/PMI_SIZE leftovers
+        # (e.g. exported by an unrelated torchrun/K8s launcher) so a plain
+        # single-process run is never mistaken for DDP.
+        return default
+    return int(
+        os.getenv("OMPI_COMM_WORLD_SIZE") or os.getenv("PMI_SIZE") or os.getenv("WORLD_SIZE") or default
+    )
+
+
+def as_bool(val, default=False):
+    """Coerce a config/env value to bool; strings accept 1/true/t/yes/y/on (case-insensitive)."""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return val != 0
+    if isinstance(val, str):
+        return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    return bool(val)
+
+
+def env_flag(name, default=False):
+    """Parse a boolean environment variable via as_bool()."""
+    return as_bool(os.getenv(name), default)
+
 # Other Constants
 ARGV = sys.argv or ["", ""]  # sometimes sys.argv = []
 FILE = Path(__file__).resolve()

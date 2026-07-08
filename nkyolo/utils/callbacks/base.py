@@ -209,13 +209,27 @@ def add_integration_callbacks(instance):
         # from .neptune import callbacks as neptune_cb
         # from .raytune import callbacks as tune_cb
         # from .tensorboard import callbacks as tb_cb
+        from nkyolo.utils import LOGGER, env_flag, get_world_size
+
         wb_spec = importlib.util.find_spec("wandb")
-        if wb_spec is not None:
+        world_size = get_world_size()
+        enable_wandb = env_flag("NKYOLO_ENABLE_WANDB")
+        disable_wandb = env_flag("NKYOLO_DISABLE_WANDB") or env_flag("WANDB_DISABLED")
+
+        # W&B can block multi-GPU teardown on artifact upload / finish.
+        # Keep it opt-in for DDP/MPI runs.
+        load_wandb = wb_spec is not None and not disable_wandb and (world_size <= 1 or enable_wandb)
+        if load_wandb:
             from .wb import callbacks as wb_cb
 
         # callbacks_list.extend([clear_cb, comet_cb, dvc_cb, mlflow_cb, neptune_cb, tune_cb, tb_cb, wb_cb])
-        if wb_spec is not None:
+        if load_wandb:
             callbacks_list.extend([wb_cb])
+        elif wb_spec is not None and not disable_wandb and world_size > 1:
+            LOGGER.info(
+                f"W&B integration disabled for multi-GPU run (world_size={world_size}); "
+                "set NKYOLO_ENABLE_WANDB=1 to enable it."
+            )
 
     # Add the callbacks to the callbacks dictionary
     for callbacks in callbacks_list:

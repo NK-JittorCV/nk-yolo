@@ -150,7 +150,16 @@ def generate_ddp_command(world_size, trainer):
     if not trainer.resume:
         shutil.rmtree(trainer.save_dir)  # remove the save_dir
     main_file = getattr(__main__, "__file__", "")
-    use_entry_script = bool(main_file) and os.path.isfile(main_file)
+    from nkyolo.utils import env_flag
+
+    # Default to re-executing the user's entry script: the generated wrapper
+    # cannot import trainer subclasses defined in __main__ and silently drops
+    # callbacks registered via model.add_callback(). Lingering-worker hangs are
+    # handled by trainer._cleanup_loaders(); if a launch still hangs at exit,
+    # force the wrapper (which hard-exits after trainer.train()) with
+    # NKYOLO_DDP_USE_WRAPPER=1.
+    force_wrapper = env_flag("NKYOLO_DDP_USE_WRAPPER")
+    use_entry_script = not force_wrapper and bool(main_file) and os.path.isfile(main_file)
     file = os.path.abspath(main_file) if use_entry_script else generate_ddp_file(trainer)
     
     # Jittor uses MPI for distributed training

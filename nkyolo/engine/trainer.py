@@ -8,11 +8,13 @@ Usage:
 """
 
 import gc
+import json
 import math
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import warnings
@@ -38,6 +40,7 @@ from nkyolo.utils import (
     clean_url,
     colorstr,
     emojis,
+    get_world_size,
     yaml_save,
 )
 from nkyolo.utils.autobatch import check_train_batch_size
@@ -145,6 +148,8 @@ class BaseTrainer:
         self.val_batch_size = None
         self.epochs = self.args.epochs
         self.start_epoch = 0
+        self.train_loader = None
+        self.test_loader = None
         if RANK == -1:
             print_args(vars(self.args))
 
@@ -242,18 +247,6 @@ class BaseTrainer:
         # Train in current process (MPI ranks handled externally)
         self._do_train(world_size)
 
-    def _get_world_size(self, default=1):
-        """Return world size from Jittor MPI when available, or fallback to env/default."""
-        if jt.in_mpi:
-            return int(jt.world_size)
-        if "OMPI_COMM_WORLD_SIZE" in os.environ:
-            return int(os.environ["OMPI_COMM_WORLD_SIZE"])
-        if "PMI_SIZE" in os.environ:
-            return int(os.environ["PMI_SIZE"])
-        if "WORLD_SIZE" in os.environ:
-            return int(os.environ["WORLD_SIZE"])
-        return default
-
     @staticmethod
     def _is_oom_error(exc: BaseException) -> bool:
         """Return True when exception message indicates CUDA/Jittor OOM."""
@@ -290,7 +283,7 @@ class BaseTrainer:
 
     def _sync_stop_flag(self, epoch: int, stop: bool, max_wait: float = 600.0) -> bool:
         """Share rank0 stop decision with other ranks."""
-        if RANK == -1 or self._get_world_size(default=1) <= 1:
+        if RANK == -1 or get_world_size() <= 1:
             return bool(stop)
 
         if jt.in_mpi and hasattr(jt, "mpi"):
@@ -317,7 +310,7 @@ class BaseTrainer:
 
     def _epoch_barrier(self, epoch: int, phase: str, max_wait: float = 1200.0):
         """Barrier to keep all MPI ranks aligned around rank0-only work (val/save)."""
-        if RANK == -1 or self._get_world_size(default=1) <= 1:
+        if RANK == -1 or get_world_size() <= 1:
             return
 
         if jt.in_mpi and hasattr(jt, "mpi"):
@@ -325,7 +318,7 @@ class BaseTrainer:
             jt.mpi.mpi_barrier()
             return
 
-        world = self._get_world_size(default=1)
+        world = get_world_size()
         bdir = self._get_ddp_barrier_dir() / "epoch_barrier" / f"epoch_{epoch}_{phase}"
         bdir.mkdir(parents=True, exist_ok=True)
         (bdir / f"rank_{RANK}.ok").write_text("1")
@@ -352,7 +345,7 @@ class BaseTrainer:
     def _sync_train_num_batches(self, epoch: int, local_nb: int, max_wait: float = 600.0) -> int:
         """Synchronize per-rank train step count and return a common step count."""
         local_nb = max(1, int(local_nb))
-        if RANK == -1 or self._get_world_size(default=1) <= 1:
+        if RANK == -1 or get_world_size() <= 1:
             return local_nb
 
         if jt.in_mpi and hasattr(jt, "mpi"):
@@ -360,7 +353,7 @@ class BaseTrainer:
             jt.mpi.broadcast(v, 0)
             return max(1, int(v[0]))
 
-        world = self._get_world_size(default=1)
+        world = get_world_size()
         sdir = self._get_ddp_barrier_dir() / "train_num_batches" / f"epoch_{epoch}"
         sdir.mkdir(parents=True, exist_ok=True)
         (sdir / f"rank_{RANK}.txt").write_text(str(local_nb))
@@ -449,17 +442,8 @@ class BaseTrainer:
                 jt.flags.use_cuda = 0
                 self.device = "cpu"
             
-            # Get actual world size from environment if available
-            actual_world_size = world_size
-            if jt.in_mpi:
-                actual_world_size = int(jt.world_size)
-            elif "OMPI_COMM_WORLD_SIZE" in os.environ:
-                actual_world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
-            elif "PMI_SIZE" in os.environ:
-                actual_world_size = int(os.environ["PMI_SIZE"])
-            elif "WORLD_SIZE" in os.environ:
-                actual_world_size = int(os.environ["WORLD_SIZE"])
-            
+            actual_world_size = get_world_size(default=world_size)
+
             LOGGER.info(f'DDP info: RANK {RANK}, LOCAL_RANK {LOCAL_RANK}, WORLD_SIZE {actual_world_size}, DEVICE {self.device}')
             
             # Jittor uses MPI for distributed training, no need for explicit init_process_group
@@ -561,7 +545,7 @@ class BaseTrainer:
             LOGGER.info(f"JIT warmup: compiling {warmup_batches} train batch(es) before epoch loop (forward-only).")
 
         self._model_train()
-        world = max(1, self._get_world_size(default=1))
+        world = max(1, get_world_size())
         loader_iter = iter(self.train_loader)
         for wi in range(warmup_batches):
             if RANK in {-1, 0}:
@@ -866,16 +850,42 @@ class BaseTrainer:
             epoch += 1
 
         if RANK in {-1, 0}:
-            # Do final val with best.pkl
             seconds = time.time() - (self.train_time_start or time.time())
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
-            if getattr(self.args, "final_eval", True):
+
+        if getattr(self.args, "final_eval", True):
+            if RANK != -1:
+                self._epoch_barrier(epoch, "before_final_eval")
+            try:
                 self.final_eval()
+            except Exception as e:
+                # Surface the failure (exit code must not be 0 when best.pkl was
+                # never validated) — but only after the barrier in `finally` has
+                # released the other ranks from a timeout-less MPI wait.
+                LOGGER.error(f"Final eval failed: {type(e).__name__}: {e}")
+                raise
+            finally:
+                if RANK != -1:
+                    self._epoch_barrier(epoch, "after_final_eval")
+
+        if RANK in {-1, 0}:
             if self.args.plots:
+                LOGGER.debug("Train end: plotting metrics...")
                 self.plot_metrics()
+            LOGGER.debug("Train end: running callbacks...")
             self.run_callbacks("on_train_end")
+            LOGGER.debug("Train end: callbacks finished.")
+        self._cleanup_loaders()
+        LOGGER.debug("Train end: dataloaders closed.")
         self._clear_memory()
+        LOGGER.debug("Train end: memory cleared.")
         self.run_callbacks("teardown")
+        LOGGER.debug("Train end: teardown finished.")
+        # NOTE: no os._exit() here — a hard exit inside train() silently kills
+        # best-weights reload in Model.train() and any user code after it when
+        # ranks execute the entry script. The generated DDP wrapper (see
+        # nkyolo/utils/dist.py) hard-exits after trainer.train() for launches
+        # that need it; loader teardown above handles lingering workers.
 
     def auto_batch(self, max_num_obj=0):
         """Calculate optimal batch size based on model and device memory constraints."""
@@ -958,7 +968,7 @@ class BaseTrainer:
 
     def _ddp_touch_loss_params(self):
         """Return a tiny term that references all trainable params to stabilize DDP all-reduce graphs."""
-        if RANK == -1 or self._get_world_size(default=1) <= 1 or self.optimizer is None:
+        if RANK == -1 or get_world_size() <= 1 or self.optimizer is None:
             return None
         touch_scale = float(getattr(self.args, "ddp_touch_scale", 1e-12) or 0.0)
         if touch_scale <= 0.0:
@@ -1243,21 +1253,190 @@ class BaseTrainer:
         path = Path(name)
         self.plots[path] = {"data": data, "timestamp": time.time()}
 
+    def _close_loader(self, loader, name: str):
+        """Best-effort close for a dataloader and its worker processes."""
+        if loader is None:
+            return
+        try:
+            loader.close()
+        except Exception as e:
+            LOGGER.warning(f"Loader cleanup warning for {name}: {type(e).__name__}: {e}")
+
+    def _cleanup_loaders(self):
+        """Release dataloader iterators/workers before process teardown (idempotent)."""
+        validator_loader = self.validator.dataloader if self.validator is not None else None
+        if self.train_loader is None and self.test_loader is None and validator_loader is None:
+            return
+        LOGGER.debug("Train end: closing dataloaders...")
+        self._close_loader(self.train_loader, "train_loader")
+        if self.test_loader is not validator_loader:
+            self._close_loader(self.test_loader, "test_loader")
+        self._close_loader(validator_loader, "validator.dataloader")
+        self.train_loader = None
+        self.test_loader = None
+        if self.validator is not None:
+            self.validator.dataloader = None
+
     def final_eval(self):
         """Performs final evaluation and validation for object detection YOLO model."""
-        ckpt = {}
-        for f in self.last, self.best:
-            if f.exists():
+        def _json_safe(v):
+            if isinstance(v, Path):
+                return str(v)
+            if isinstance(v, np.generic):
+                return v.item()
+            if isinstance(v, (list, tuple)):
+                return [_json_safe(x) for x in v]
+            if isinstance(v, dict):
+                return {str(k): _json_safe(x) for k, x in v.items()}
+            return v
+
+        def _standalone_val_kwargs():
+            # Only reachable from _run_rank0_final_eval, which returns early
+            # when self.validator is None.
+            src_args = self.validator.args
+            keys = (
+                "imgsz",
+                "split",
+                "save_json",
+                "conf",
+                "iou",
+                "max_det",
+                "single_cls",
+                "agnostic_nms",
+                "classes",
+                "rect",
+                "dnn",
+                "verbose",
+                "save_txt",
+                "save_conf",
+                "plots",
+                "half",
+                "val_half",
+            )
+            kwargs = {}
+            for k in keys:
+                if hasattr(src_args, k):
+                    kwargs[k] = _json_safe(getattr(src_args, k))
+            kwargs["data"] = str(self.args.data)
+            # Single source: _run_rank0_final_eval sets validator.args.batch
+            # before any final-eval path runs.
+            kwargs["batch"] = int(src_args.batch)
+            # The eval subprocess runs without any MPI context (env is scrubbed
+            # below), so normal dataloader workers are safe — keep the
+            # configured values instead of serializing the whole val pass.
+            kwargs["workers"] = int(getattr(src_args, "workers", 8))
+            kwargs["val_workers"] = int(getattr(src_args, "val_workers", -1))
+            kwargs["device"] = "" if "cuda" in str(self.device).lower() else str(self.device)
+            kwargs["project"] = str(self.save_dir.parent)
+            kwargs["name"] = self.save_dir.name
+            kwargs["exist_ok"] = True
+            return kwargs
+
+        def _run_final_eval_subprocess(weight_path: Path):
+            metrics_path = self.save_dir / "final_eval_metrics.json"
+            if metrics_path.exists():
+                metrics_path.unlink()
+
+            # Snapshot kwargs BEFORE cleanup: _standalone_val_kwargs reads
+            # test_loader.batch_size, which _cleanup_loaders() nulls.
+            kwargs_json = json.dumps(_standalone_val_kwargs(), ensure_ascii=True)
+
+            # The eval process shares this rank's visible GPUs — release the
+            # training loaders and cached GPU memory before it allocates.
+            self._cleanup_loaders()
+            self._clear_memory()
+
+            env = os.environ.copy()
+            for k in (
+                "OMPI_COMM_WORLD_RANK",
+                "OMPI_COMM_WORLD_LOCAL_RANK",
+                "OMPI_COMM_WORLD_SIZE",
+                "PMI_RANK",
+                "PMI_LOCAL_RANK",
+                "PMI_SIZE",
+                "RANK",
+                "LOCAL_RANK",
+                "WORLD_SIZE",
+                "MASTER_ADDR",
+                "MASTER_PORT",
+            ):
+                env.pop(k, None)
+
+            script = """
+import json
+import sys
+
+from nkyolo import YOLO
+
+weight_path = sys.argv[1]
+metrics_path = sys.argv[2]
+kwargs = json.loads(sys.argv[3])
+
+model = YOLO(weight_path)
+metrics = model.val(**kwargs)
+payload = getattr(metrics, "results_dict", None)
+if payload is None:
+    payload = metrics if isinstance(metrics, dict) else {}
+with open(metrics_path, "w", encoding="utf-8") as f:
+    json.dump(payload, f)
+"""
+            LOGGER.info(f"Final eval: launching isolated single-process validation for {weight_path}...")
+            proc = subprocess.run(
+                [sys.executable, "-c", script, str(weight_path), str(metrics_path), kwargs_json],
+                cwd=str(Path(__file__).resolve().parents[2]),
+                env=env,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"Final eval subprocess failed with exit code {proc.returncode}.")
+            if not metrics_path.exists():
+                raise FileNotFoundError(f"Final eval metrics file was not created: {metrics_path}")
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+
+        def _run_rank0_final_eval():
+            if self.validator is None:
+                return None
+            ckpt = {}
+            metrics = None
+            for f in self.last, self.best:
+                if not f.exists():
+                    continue
                 if f is self.last:
+                    LOGGER.info(f"\nFinal eval: stripping optimizer from {f}...")
                     ckpt = strip_optimizer(f)
-                elif f is self.best:
-                    k = "train_results"  # update best.pkl train_metrics from last.pkl
-                    strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
-                    LOGGER.info(f"\nValidating {f}...")
-                    self.validator.args.plots = self.args.plots
-                    self.metrics = self.validator(model=f)
-                    self.metrics.pop("fitness", None)
-                    self.run_callbacks("on_fit_epoch_end")
+                    continue
+
+                k = "train_results"  # update best.pkl train_metrics from last.pkl
+                LOGGER.info(f"\nFinal eval: preparing {f}...")
+                strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
+                # Both eval paths read these through validator.args
+                # (_standalone_val_kwargs copies batch/plots into the subprocess).
+                self.validator.args.batch = int(self.val_batch_size or getattr(self.test_loader, "batch_size", 1))
+                self.validator.args.plots = self.args.plots
+                LOGGER.info(f"\nFinal eval: validating {f} on {self.device}...")
+                # get_world_size() > 1 implies RANK == 0 here: this function only
+                # runs for RANK in {-1, 0}, and world size is 1 when RANK == -1.
+                if get_world_size() > 1:
+                    metrics = _run_final_eval_subprocess(f)
+                else:
+                    # Final standalone validation should run on the training
+                    # device, not on the raw persisted device string.
+                    self.validator.args.device = self.device
+                    self.validator.device = self.device
+                    metrics = self.validator(model=f)
+                if isinstance(metrics, dict):
+                    metrics.pop("fitness", None)
+            return metrics
+
+        if RANK in {-1, 0}:
+            res = _run_rank0_final_eval()
+            if isinstance(res, dict):
+                # Only overwrite last-epoch metrics when final eval produced
+                # results (best.pkl may not exist, e.g. save=False + early stop).
+                self.metrics = res
+                self.run_callbacks("on_fit_epoch_end")
 
     def check_resume(self, overrides):
         """Check if resume checkpoint exists and update arguments accordingly."""

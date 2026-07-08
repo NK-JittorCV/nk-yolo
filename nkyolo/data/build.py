@@ -280,6 +280,18 @@ class InfiniteDataLoader:
         else:
             self.__iter__()
 
+    def close(self):
+        """Teardown for underlying Jittor dataset workers and buffers.
+
+        Raises on terminate failure so the caller (trainer._close_loader) can
+        log it — a silently failed worker teardown is how end-of-run hangs
+        become undiagnosable.
+        """
+        if hasattr(self.dataset, "terminate"):
+            self.dataset.terminate()
+        self.dataset = self.original_dataset
+        self.iterator = None
+
 
 def seed_worker(worker_id):  # noqa
     """Set random seed for dataloader worker.
