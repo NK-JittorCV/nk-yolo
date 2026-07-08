@@ -6,7 +6,7 @@ def manual_bce_jt(pred, label):
     return jt.maximum(pred, 0.0) - pred * label + jt.log(1.0 + jt.exp(-jt.abs(pred)))
 
 def test_bce_behavior():
-    print("====== BCE 行为差异诊断 ======")
+    print("====== BCE behavior difference diagnosis ======")
     
     B, C = 2, 1000
     pred_np = np.random.randn(B, C).astype(np.float32)
@@ -22,16 +22,16 @@ def test_bce_behavior():
     jt_label = jt.array(label_np)
     jt_bce_layer = jt.nn.BCEWithLogitsLoss() 
     jt_loss_default = jt_bce_layer(jt_pred, jt_label).sum()
-    print(f"Jittor (Default Class): {jt_loss_default.item():.4f} <--- 错误根源 (太小)")
+    print(f"Jittor (Default Class): {jt_loss_default.item():.4f} <--- root cause (too small)")
 
     jt_loss_manual = manual_bce_jt(jt_pred, jt_label).sum()
-    print(f"Jittor (Manual Fix):    {jt_loss_manual.item():.4f} <--- 期望值")
+    print(f"Jittor (Manual Fix):    {jt_loss_manual.item():.4f} <--- expected value")
 
     diff = abs(pt_loss.item() - jt_loss_manual.item())
     if diff < 1e-3:
-        print("\n✅ 诊断结论: 必须在 Seg/Pose Loss 中使用手动 BCE 替代 self.bce")
+        print("\n✅ Conclusion: must use manual BCE in Seg/Pose loss instead of self.bce")
     else:
-        print("\n❌ 诊断结论: 手动实现仍有差异，需检查数学公式")
+        print("\n❌ Conclusion: manual implementation still differs, check the math")
 
 if __name__ == "__main__":
     test_bce_behavior()

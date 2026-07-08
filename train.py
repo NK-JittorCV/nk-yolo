@@ -22,8 +22,8 @@ if _force_cpu:
 # 需要更大 batch 可：NKYOLO_BATCH=64 python train.py
 _batch = int(os.environ.get("NKYOLO_BATCH", "8" if _force_cpu else "32"))
 
-model = YOLO("yolov8n.yaml")
-train_kw = dict(data="coco128.yaml", epochs=10, batch=_batch)
+model = YOLO("yolov10n.yaml")
+train_kw = dict(data="coco128.yaml", epochs=10, batch=_batch, amp=True, val_amp=True)
 if _force_cpu:
     train_kw["device"] = "cpu"
 model.train(**train_kw)

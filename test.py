@@ -1,23 +1,21 @@
 import jittor as jt
 # import numpy as np
 
-# 假设损失函数代码在losses.py文件中，根据实际情况修改导入路径
+# Assume loss functions are in losses.py; adjust the import path as needed
 from nkyolo.utils.loss import (
     VarifocalLoss, FocalLoss, DFLoss, BboxLoss, RotatedBboxLoss,
     KeypointLoss, v8DetectionLoss, v8SegmentationLoss,
     v8PoseLoss, v8ClassificationLoss, v8OBBLoss
 )
 
-import ultralytics.utils.loss as loss
-
-# 启用Jittor的GPU支持（如果可用）
+# Enable Jittor GPU support (if available)
 jt.flags.use_cuda = jt.has_cuda
 
 class TestBaseLosses:
-    """测试基础损失组件"""
+    """Test basic loss components"""
     
     def test_varifocal_loss(self):
-        """测试变焦点损失"""
+        """Test Varifocal loss"""
         vfl = VarifocalLoss()
         pred_score = jt.array([[0.8, 0.2], [0.3, 0.7]], dtype=jt.float32)
         gt_score = jt.array([[1.0, 0.0], [0.0, 1.0]], dtype=jt.float32)
@@ -25,24 +23,24 @@ class TestBaseLosses:
         
         loss = vfl.execute(pred_score, gt_score, label)
         
-        assert loss.ndim == 0, "VarifocalLoss输出应为标量"
-        assert loss > 0, "VarifocalLoss值应大于0"
-        print("VarifocalLoss测试通过")
+        assert loss.ndim == 0, "VarifocalLoss output should be scalar"
+        assert loss > 0, "VarifocalLoss value should be > 0"
+        print("VarifocalLoss test passed")
 
     def test_focal_loss(self):
-        """测试焦点损失"""
+        """Test Focal loss"""
         fl = FocalLoss()
         pred = jt.array([[0.8, 0.2], [0.3, 0.7]], dtype=jt.float32)
         label = jt.array([[1, 0], [0, 1]], dtype=jt.float32)
         
         loss = fl.execute(pred, label)
         
-        assert loss.ndim == 0, "FocalLoss输出应为标量"
-        assert loss > 0, "FocalLoss值应大于0"
-        print("FocalLoss测试通过")
+        assert loss.ndim == 0, "FocalLoss output should be scalar"
+        assert loss > 0, "FocalLoss value should be > 0"
+        print("FocalLoss test passed")
 
     def test_dfl_loss(self):
-        """测试分布焦点损失"""
+        """Test Distribution Focal loss"""
         reg_max = 16
         dfl = DFLoss(reg_max=reg_max)
         
@@ -51,12 +49,12 @@ class TestBaseLosses:
         
         loss = dfl(pred_dist, target)
         
-        assert loss.shape == (2, 1), f"DFLoss形状错误，预期(2,1)，实际{loss.shape}"
-        assert loss.sum() > 0, "DFLoss值应大于0"
-        print("DFLoss测试通过")
+        assert loss.shape == (2, 1), f"DFLoss shape mismatch, expected (2,1), got {loss.shape}"
+        assert loss.sum() > 0, "DFLoss value should be > 0"
+        print("DFLoss test passed")
 
     def test_bbox_loss(self):
-        """测试边界框损失"""
+        """Test bbox loss"""
         reg_max = 16
         bbox_loss = BboxLoss(reg_max=reg_max)
         
@@ -77,11 +75,11 @@ class TestBaseLosses:
             target_bboxes, target_scores, target_scores_sum, fg_mask
         )
         
-        assert loss_iou > 0 and loss_dfl > 0, "边界框损失应大于0"
-        print("BboxLoss测试通过")
+        assert loss_iou > 0 and loss_dfl > 0, "Bbox loss should be > 0"
+        print("BboxLoss test passed")
 
     def test_rotated_bbox_loss(self):
-        """测试旋转边界框损失"""
+        """Test rotated bbox loss"""
         reg_max = 16
         rbbox_loss = RotatedBboxLoss(reg_max=reg_max)
         
@@ -89,9 +87,9 @@ class TestBaseLosses:
         num_anchors = 10
         
         pred_dist = jt.randn(batch_size, num_anchors, reg_max*4)
-        pred_bboxes = jt.randn(batch_size, num_anchors, 5)  # 旋转框多一个角度
+        pred_bboxes = jt.randn(batch_size, num_anchors, 5)  # Rotated boxes include an extra angle
         anchor_points = jt.randn(num_anchors, 2)
-        target_bboxes = jt.array([[[0.2, 0.3, 0.5, 0.4, 0.785]]])  # 最后一个是角度(rad)
+        target_bboxes = jt.array([[[0.2, 0.3, 0.5, 0.4, 0.785]]])  # Last value is angle (rad)
         target_scores = jt.zeros(batch_size, num_anchors, 1)
         target_scores[0, 0, 0] = 1.0
         fg_mask = target_scores.sum(-1) > 0
@@ -102,32 +100,32 @@ class TestBaseLosses:
             target_bboxes, target_scores, target_scores_sum, fg_mask
         )
         
-        assert loss_iou > 0 and loss_dfl > 0, "旋转边界框损失应大于0"
-        print("RotatedBboxLoss测试通过")
+        assert loss_iou > 0 and loss_dfl > 0, "Rotated bbox loss should be > 0"
+        print("RotatedBboxLoss test passed")
 
     def test_keypoint_loss(self):
-        """测试关键点损失"""
+        """Test keypoint loss"""
         sigmas = jt.array([0.025, 0.025], dtype=jt.float32)
         kpt_loss = KeypointLoss(sigmas=sigmas)
         
         pred_kpts = jt.randn(2, 2, 3)  # (num_samples, num_kpts, 3)
         gt_kpts = jt.randn(2, 2, 3)
-        kpt_mask = jt.array([[1, 1], [1, 0]], dtype=jt.float32)  # 第二个样本的第二个关键点不可见
+        kpt_mask = jt.array([[1, 1], [1, 0]], dtype=jt.float32)  # The second sample's second keypoint is invisible
         area = jt.array([[0.1], [0.2]], dtype=jt.float32)
         
         loss = kpt_loss(pred_kpts, gt_kpts, kpt_mask, area)
         
-        assert loss.ndim == 0, "关键点损失应为标量"
-        assert loss > 0, "关键点损失应大于0"
-        print("KeypointLoss测试通过")
+        assert loss.ndim == 0, "Keypoint loss should be scalar"
+        assert loss > 0, "Keypoint loss should be > 0"
+        print("KeypointLoss test passed")
 
 
 class TestTaskLosses:
-    """测试任务级损失函数"""
+    """Test task-level loss functions"""
     
     def test_v8_detection_loss(self):
-        """测试检测损失"""
-        # 模拟检测模型
+        """Test detection loss"""
+        # Mock detection model
         class MockDetectionModel:
             def __init__(self):
                 self.args = {"box": 7.5, "cls": 0.5, "dfl": 1.5}
@@ -141,7 +139,7 @@ class TestTaskLosses:
         model = MockDetectionModel()
         loss_fn = v8DetectionLoss(model)
         
-        # 生成测试数据
+        # Generate test data
         batch_size = 2
         feats = [
             jt.randn(batch_size, 2 + 16*4, 10, 10),  # (BS, no=2+64, H, W)
@@ -158,26 +156,26 @@ class TestTaskLosses:
         
         total_loss, loss_items = loss_fn(feats, batch)
         
-        assert total_loss.ndim == 0, "检测总损失应为标量"
-        assert len(loss_items) == 3, "检测损失应包含3个分量"
-        print("v8DetectionLoss测试通过")
+        assert total_loss.ndim == 0, "Detection total loss should be scalar"
+        assert len(loss_items) == 3, "Detection loss should have 3 components"
+        print("v8DetectionLoss test passed")
 
     def test_v8_classification_loss(self):
-        """测试分类损失"""
+        """Test classification loss"""
         cls_loss = v8ClassificationLoss()
         
-        pred = jt.randn(4, 3)  # 4个样本，3个类别
-        batch = {"cls": jt.array([0, 1, 2, 0])}  # 类别标签
+        pred = jt.randn(4, 3)  # 4 samples, 3 classes
+        batch = {"cls": jt.array([0, 1, 2, 0])}  # Class labels
         
         loss, loss_items = cls_loss(pred, batch)
         
-        assert loss.ndim == 0, "分类总损失应为标量"
-        assert loss > 0, "分类损失应大于0"
-        print("v8ClassificationLoss测试通过")
+        assert loss.ndim == 0, "Classification total loss should be scalar"
+        assert loss > 0, "Classification loss should be > 0"
+        print("v8ClassificationLoss test passed")
 
     def test_v8_segmentation_loss(self):
-        """测试分割损失"""
-        # 模拟分割模型
+        """Test segmentation loss"""
+        # Mock segmentation model
         class MockSegmentModel:
             def __init__(self):
                 self.args = {"box": 7.5, "cls": 0.5, "dfl": 1.5, "overlap": False}
@@ -191,29 +189,29 @@ class TestTaskLosses:
         model = MockSegmentModel()
         loss_fn = v8SegmentationLoss(model)
         
-        # 生成测试数据
+        # Generate test data
         batch_size = 1
         feats = [jt.randn(batch_size, 2 + 16*4, 10, 10)]
         pred_masks = jt.randn(batch_size, 100, 32)  # (BS, anchors, 32)
-        proto = jt.randn(batch_size, 32, 20, 20)    # 原型掩码
+        proto = jt.randn(batch_size, 32, 20, 20)    # Prototype masks
         preds = (feats, pred_masks, proto)
         
         batch = {
             "batch_idx": jt.array([0]),
             "cls": jt.array([0]),
             "bboxes": jt.array([[0.1, 0.2, 0.3, 0.4]]),
-            "masks": jt.randint(0, 2, (1, 20, 20))  # GT掩码
+            "masks": jt.randint(0, 2, (1, 20, 20))  # GT mask
         }
         
         total_loss, loss_items = loss_fn(preds, batch)
         
-        assert total_loss.ndim == 0, "分割总损失应为标量"
-        assert len(loss_items) == 4, "分割损失应包含4个分量"
-        print("v8SegmentationLoss测试通过")
+        assert total_loss.ndim == 0, "Segmentation total loss should be scalar"
+        assert len(loss_items) == 4, "Segmentation loss should have 4 components"
+        print("v8SegmentationLoss test passed")
 
     def test_v8_obb_loss(self):
-        """测试旋转目标检测损失"""
-        # 模拟OBB模型
+        """Test OBB detection loss"""
+        # Mock OBB model
         class MockOBBModel:
             def __init__(self):
                 self.args = {"box": 7.5, "cls": 0.5, "dfl": 1.5}
@@ -227,27 +225,27 @@ class TestTaskLosses:
         model = MockOBBModel()
         loss_fn = v8OBBLoss(model)
         
-        # 生成测试数据
+        # Generate test data
         batch_size = 1
         feats = [jt.randn(batch_size, 2 + 16*4, 10, 10)]
-        pred_angle = jt.randn(batch_size, 100, 1)  # 角度预测
+        pred_angle = jt.randn(batch_size, 100, 1)  # Angle prediction
         preds = (feats, pred_angle)
         
         batch = {
             "batch_idx": jt.array([0]),
             "cls": jt.array([0]),
-            "bboxes": jt.array([[0.1, 0.2, 0.3, 0.4, 0.785]])  # 最后一个是角度(rad)
+            "bboxes": jt.array([[0.1, 0.2, 0.3, 0.4, 0.785]])  # Last value is angle (rad)
         }
         
         total_loss, loss_items = loss_fn(preds, batch)
         
-        assert total_loss.ndim == 0, "OBB总损失应为标量"
-        assert len(loss_items) == 3, "OBB损失应包含3个分量"
-        print("v8OBBLoss测试通过")
+        assert total_loss.ndim == 0, "OBB total loss should be scalar"
+        assert len(loss_items) == 3, "OBB loss should have 3 components"
+        print("v8OBBLoss test passed")
 
     def test_v8_pose_loss(self):
-        """测试姿态估计损失"""
-        # 模拟姿态模型
+        """Test pose loss"""
+        # Mock pose model
         class MockPoseModel:
             def __init__(self):
                 self.args = {"box": 7.5, "cls": 0.5, "dfl": 1.5, "pose": 1.0, "kobj": 1.0}
@@ -256,16 +254,16 @@ class TestTaskLosses:
                                 'stride': jt.array([8, 16]), 
                                 'nc': 2, 
                                 'reg_max': 16,
-                                'kpt_shape': [2, 3]  # 2个关键点，每个有3个参数(x,y,可见性)
+                                'kpt_shape': [2, 3]  # 2 keypoints, each has 3 params (x, y, visibility)
                             })]
         
         model = MockPoseModel()
         loss_fn = v8PoseLoss(model)
         
-        # 生成测试数据
+        # Generate test data
         batch_size = 1
         feats = [jt.randn(batch_size, 2 + 16*4, 10, 10)]
-        pred_kpts = jt.randn(batch_size, 100, 2*3)  # 关键点预测
+        pred_kpts = jt.randn(batch_size, 100, 2*3)  # Keypoint prediction
         preds = (feats, pred_kpts)
         
         batch = {
@@ -277,18 +275,18 @@ class TestTaskLosses:
         
         total_loss, loss_items = loss_fn(preds, batch)
         
-        assert total_loss.ndim == 0, "姿态总损失应为标量"
-        assert len(loss_items) == 5, "姿态损失应包含5个分量"
-        print("v8PoseLoss测试通过")
+        assert total_loss.ndim == 0, "Pose total loss should be scalar"
+        assert len(loss_items) == 5, "Pose loss should have 5 components"
+        print("v8PoseLoss test passed")
 
 
 if __name__ == "__main__":
-    # 初始化测试类
+    # Initialize test classes
     base_tester = TestBaseLosses()
     task_tester = TestTaskLosses()
     
-    # 运行基础损失测试
-    print("=== 开始基础损失组件测试 ===")
+    # Run basic loss tests
+    print("=== Starting basic loss component tests ===")
     base_tester.test_varifocal_loss()
     base_tester.test_focal_loss()
     base_tester.test_dfl_loss()
@@ -296,12 +294,12 @@ if __name__ == "__main__":
     base_tester.test_rotated_bbox_loss()
     base_tester.test_keypoint_loss()
     
-    # 运行任务级损失测试
-    print("\n=== 开始任务级损失函数测试 ===")
+    # Run task-level loss tests
+    print("\n=== Starting task-level loss function tests ===")
     task_tester.test_v8_detection_loss()
     task_tester.test_v8_classification_loss()
     task_tester.test_v8_segmentation_loss()
     task_tester.test_v8_obb_loss()
     task_tester.test_v8_pose_loss()
     
-    print("\n所有测试通过！")
+    print("\nAll tests passed!")

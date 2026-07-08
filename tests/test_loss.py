@@ -30,21 +30,25 @@ def _make_args(**kwargs):
 
 def _fail(name, msg):
     print("name = ", name)
-    print("  ✗ 测试失败:", msg)
+    print("  ✗ Test failed:", msg)
     return False
 
 
 def _describe_preds(x):
     def rec(o, indent=0):
         sp = "  " * indent
+        def _shape_of(v):
+            if isinstance(v, (jt.Var, np.ndarray, torch.Tensor)):
+                return v.shape
+            return None
         if isinstance(o, (list, tuple)):
             lines = [f"{sp}{type(o).__name__}(len={len(o)})"]
             for i, v in enumerate(o[:5]):
-                lines.append(f"{sp}  [{i}] -> {type(v).__name__}, shape={getattr(v,'shape',None)}")
+                lines.append(f"{sp}  [{i}] -> {type(v).__name__}, shape={_shape_of(v)}")
             if len(o) > 5:
                 lines.append(f"{sp}  ...")
             return lines
-        return [f"{sp}{type(o).__name__}, shape={getattr(o,'shape',None)}"]
+        return [f"{sp}{type(o).__name__}, shape={_shape_of(o)}"]
     return "\n".join(rec(x))
 
 
@@ -108,7 +112,6 @@ def mock_pose_model(is_pt, nc=80, reg_max=16, kpt_shape=(17,3)):
 # v8SegmentationLoss
 # =========================
 def test_v8_segmentation_loss():
-    import traceback 
     set_seed()
     name = "v8SegmentationLoss"
 
@@ -170,27 +173,24 @@ def test_v8_segmentation_loss():
         (None, [feats_pt, pm_pt, proto_pt]),
     ]
 
-    print(f"\n====== 测试 {name} ======")
+    print(f"\n====== Testing {name} ======")
     for i in range(len(candidates_nk)):
         try:
             print(f"\n--- Seg Try {i} ---")
             print("[NK preds]\n" + _describe_preds(candidates_nk[i]))
-            
+
             nk_loss(candidates_nk[i], batch_nk)
             print("  >>> Jittor Loss Forward Success")
-            
+
             pt_loss(candidates_pt[i], batch_pt)
             print("  >>> PyTorch Loss Forward Success")
-            
+
             print("  ✓ forward OK")
             return True
         except Exception as e:
             print("  ✗ fail:", repr(e))
-            print("  --- Traceback (Debug Info) ---")
-            traceback.print_exc()
-            print("  ------------------------------")
-
-    return _fail(name, "所有 preds 结构均失败")
+            continue
+    return _fail(name, "All preds structures failed")
 # =========================
 # v8PoseLoss
 # =========================
@@ -250,13 +250,11 @@ def test_v8_pose_loss():
     try:
         nk_loss((feats_nk, pk_nk), batch_nk)
         pt_loss((feats_pt, pk_pt), batch_pt)
-        print("name = ", name)
-        print("  ✓ forward OK (NK kpt loss patched)")
-        return True
     except Exception as e:
         return _fail(name, repr(e))
-
-
+    print("name = ", name)
+    print("  ✓ forward OK (NK kpt loss patched)")
+    return True
 # =========================
 # Main
 # =========================

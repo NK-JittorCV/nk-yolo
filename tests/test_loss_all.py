@@ -15,92 +15,46 @@ from ultralytics.utils.loss import BboxLoss as PtBboxLoss
 from ultralytics.utils.loss import KeypointLoss as PtKeypointLoss
 from ultralytics.utils.loss import v8DetectionLoss as Ptv8DetLoss
 
-try:
-    from ultralytics.utils.loss import v8SegmentationLoss as Ptv8SegLoss
-except Exception:
-    Ptv8SegLoss = None
-
-try:
-    from ultralytics.utils.loss import v8PoseLoss as Ptv8PoseLoss
-except Exception:
-    Ptv8PoseLoss = None
-
-try:
-    from ultralytics.utils.loss import v8ClassificationLoss as Ptv8ClsLoss
-except Exception:
-    Ptv8ClsLoss = None
-
-try:
-    from ultralytics.utils.loss import v8OBBLoss as Ptv8OBBLoss
-except Exception:
-    Ptv8OBBLoss = None
-
-try:
-    from ultralytics.utils.loss import E2EDetectLoss as PtE2EDetectLoss
-except Exception:
-    PtE2EDetectLoss = None
-
-
+from ultralytics.utils.loss import v8SegmentationLoss as Ptv8SegLoss
+from ultralytics.utils.loss import v8PoseLoss as Ptv8PoseLoss
+from ultralytics.utils.loss import v8ClassificationLoss as Ptv8ClsLoss
+from ultralytics.utils.loss import v8OBBLoss as Ptv8OBBLoss
+from ultralytics.utils.loss import E2EDetectLoss as PtE2EDetectLoss
 # =========================
 # Imports: Jittor (nkyolo)
 # =========================
 from nkyolo.utils.loss import VarifocalLoss, DFLoss, FocalLoss
 from nkyolo.utils.loss import BboxLoss, KeypointLoss, v8DetectionLoss
 
-try:
-    from nkyolo.utils.loss import v8SegmentationLoss as Nkv8SegLoss
-except Exception:
-    Nkv8SegLoss = None
-
-try:
-    from nkyolo.utils.loss import v8PoseLoss as Nkv8PoseLoss
-except Exception:
-    Nkv8PoseLoss = None
-
-try:
-    from nkyolo.utils.loss import v8ClassificationLoss as Nkv8ClsLoss
-except Exception:
-    Nkv8ClsLoss = None
-
-try:
-    from nkyolo.utils.loss import v8OBBLoss as Nkv8OBBLoss
-except Exception:
-    Nkv8OBBLoss = None
-
-try:
-    from nkyolo.utils.loss import E2EDetectLoss as NkE2EDetectLoss
-except Exception:
-    NkE2EDetectLoss = None
-
-
+from nkyolo.utils.loss import v8SegmentationLoss as Nkv8SegLoss
+from nkyolo.utils.loss import v8PoseLoss as Nkv8PoseLoss
+from nkyolo.utils.loss import v8ClassificationLoss as Nkv8ClsLoss
+from nkyolo.utils.loss import v8OBBLoss as Nkv8OBBLoss
+from nkyolo.utils.loss import E2EDetectLoss as NkE2EDetectLoss
 # =========================
 # Optional ops/tal coverage
 # =========================
-try:
-    from ultralytics.utils.tal import TaskAlignedAssigner as PtTaskAlignedAssigner
-    from ultralytics.utils.tal import make_anchors as pt_make_anchors
-except Exception:
-    PtTaskAlignedAssigner = None
-    pt_make_anchors = None
+from ultralytics.utils.tal import TaskAlignedAssigner as PtTaskAlignedAssigner
+from ultralytics.utils.tal import make_anchors as pt_make_anchors
+
+try:  # dist2bbox moved from ultralytics.utils.ops to .tal in newer versions
+    from ultralytics.utils.tal import dist2bbox as pt_dist2bbox
+except ImportError:
+    try:
+        from ultralytics.utils.ops import dist2bbox as pt_dist2bbox
+    except ImportError:
+        pt_dist2bbox = None
+
+from nkyolo.utils.tal import TaskAlignedAssigner as NkTaskAlignedAssigner
+from nkyolo.utils.tal import make_anchors as nk_make_anchors
 
 try:
-    from ultralytics.utils.ops import dist2bbox as pt_dist2bbox
-except Exception:
-    pt_dist2bbox = None
-
-try:
-    from nkyolo.utils.tal import TaskAlignedAssigner as NkTaskAlignedAssigner
-    from nkyolo.utils.tal import make_anchors as nk_make_anchors
-except Exception:
-    NkTaskAlignedAssigner = None
-    nk_make_anchors = None
-
-try:
-    from nkyolo.utils.ops import dist2bbox as nk_dist2bbox
-except Exception:
-    nk_dist2bbox = None
-
-
+    from nkyolo.utils.tal import dist2bbox as nk_dist2bbox
+except ImportError:
+    try:
+        from nkyolo.utils.ops import dist2bbox as nk_dist2bbox
+    except ImportError:
+        nk_dist2bbox = None
 # =========================
 # Repro + compare helpers
 # =========================
@@ -112,20 +66,19 @@ def set_seed(seed: int = 42):
 
     # ---- Jittor compatibility patch (for NK code using torch-like APIs) ----
     # NK loss uses: var.type(dtype) / var.to(dtype=...)
-    if not hasattr(jt.Var, "type"):
-        def _jt_type(self, dtype):
-            # dtype is usually a jittor dtype object, e.g. jt.float32 / var.dtype
-            return self.cast(dtype)
-        jt.Var.type = _jt_type
+    def _jt_type(self, dtype):
+        # dtype is usually a jittor dtype object, e.g. jt.float32 / var.dtype
+        return self.cast(dtype)
 
-    if not hasattr(jt.Var, "to"):
-        def _jt_to(self, dtype=None, **kwargs):
-            if dtype is None:
-                dtype = kwargs.get("dtype", None)
-            if dtype is None:
-                return self
-            return self.cast(dtype)
-        jt.Var.to = _jt_to
+    def _jt_to(self, dtype=None, **kwargs):
+        if dtype is None:
+            dtype = kwargs.get("dtype", None)
+        if dtype is None:
+            return self
+        return self.cast(dtype)
+
+    jt.Var.type = _jt_type
+    jt.Var.to = _jt_to
 
 
 def compare_loss(name, loss_nk, loss_pt, threshold=1e-5, verbose=False):
@@ -153,9 +106,9 @@ def compare_loss(name, loss_nk, loss_pt, threshold=1e-5, verbose=False):
         print("tol      = ", float(tol), "(atol =", atol, ", rtol =", rtol, ")")
 
     if passed:
-        print("  ✓ 测试通过")
+        print("  ✓ Test passed")
     else:
-        print("  ✗ 测试失败: 差异过大 (%.8f > %.8f)" % (diff, tol))
+        print("  ✗ Test failed: diff too large (%.8f > %.8f)" % (diff, tol))
 
     return passed
 
@@ -176,17 +129,17 @@ def compare_tensor(name, a_nk, a_pt, atol=1e-5, rtol=5e-5, verbose=False):
         print("nk shape:", a_nk.shape, "pt shape:", a_pt.shape)
 
     if passed:
-        print("  ✓ 测试通过")
+        print("  ✓ Test passed")
     else:
-        print("  ✗ 测试失败: 差异过大 (%.8f > %.8f)" % (diff, tol))
+        print("  ✗ Test failed: diff too large (%.8f > %.8f)" % (diff, tol))
 
     return passed
 
 def _to_total_loss(x):
-    if hasattr(x, "numpy"): 
+    if isinstance(x, jt.Var):
         if x.ndim > 0: return x.sum()
         return x
-    if hasattr(x, "detach"):
+    if isinstance(x, torch.Tensor):
         if x.ndim > 0: return x.sum()
         return x
     return x
@@ -195,13 +148,13 @@ def _to_total_loss(x):
 
 def _skip(name, reason: str):
     print("name = ", name)
-    print("  ✓ 测试跳过:", reason)
+    print("  ✓ Test skipped:", reason)
     return True
 
 
 def _fail(name, reason: str):
     print("name = ", name)
-    print("  ✗ 测试失败:", reason)
+    print("  ✗ Test failed:", reason)
     return False
 
 
@@ -220,13 +173,6 @@ def _try_instantiate(loss_cls, *args, **kwargs):
         return None, (e,)
 
 
-def _try_call(loss_obj, preds, batch):
-    """
-    Attempt forward; returns (loss, items) or raises.
-    """
-    return loss_obj(preds, batch)
-
-
 def _probe_preds_and_run(loss_nk, loss_pt, preds_nk_candidates, preds_pt_candidates, batch_nk, batch_pt):
     """
     Try multiple pred formats until both NK/PT run successfully.
@@ -237,13 +183,13 @@ def _probe_preds_and_run(loss_nk, loss_pt, preds_nk_candidates, preds_pt_candida
         pn = preds_nk_candidates[i]
         pp = preds_pt_candidates[i]
         try:
-            ln, in_ = _try_call(loss_nk, pn, batch_nk)
-            lp, ip = _try_call(loss_pt, pp, batch_pt)
+            ln, in_ = loss_nk(pn, batch_nk)
+            lp, ip = loss_pt(pp, batch_pt)
             return ln, in_, lp, ip, i
         except Exception as e:
             last_err = e
             continue
-    raise last_err
+    raise last_err if last_err is not None else RuntimeError("no preds candidates to probe")
 
 
 # =========================
@@ -345,7 +291,7 @@ def test_keypoint_loss():
 def test_dist2bbox():
     set_seed()
     if pt_dist2bbox is None or nk_dist2bbox is None:
-        return _skip("dist2bbox", "dist2bbox 未找到")
+        return _skip("dist2bbox", "dist2bbox not found")
     b, a = 2, 300
     dist_np = (np.random.rand(b, a, 4).astype(np.float32) * 10.0)
     anchor_np = (np.random.rand(a, 2).astype(np.float32) * 80.0)
@@ -356,8 +302,6 @@ def test_dist2bbox():
 
 def test_make_anchors():
     set_seed()
-    if pt_make_anchors is None or nk_make_anchors is None:
-        return _skip("make_anchors", "make_anchors 未找到")
     b, ch = 2, 144
     feats_np = [
         np.random.randn(b, ch, 80, 80).astype(np.float32),
@@ -374,8 +318,6 @@ def test_make_anchors():
 
 def test_task_aligned_assigner():
     set_seed()
-    if PtTaskAlignedAssigner is None or NkTaskAlignedAssigner is None:
-        return _skip("TaskAlignedAssigner", "TaskAlignedAssigner 未找到")
     b, na, nc, max_gt = 2, 500, 80, 20
     pd_scores_np = np.random.rand(b, na, nc).astype(np.float32)
     pd_bboxes_np = (np.random.rand(b, na, 4).astype(np.float32) * 640.0)
@@ -408,9 +350,9 @@ def test_task_aligned_assigner():
     tl_ok = np.array_equal(tl_nk.numpy(), tl_pt.detach().cpu().numpy())
     fg_ok = np.array_equal(fg_nk.numpy(), fg_pt.detach().cpu().numpy())
     print("name = TAL.target_labels")
-    print("  ✓ 测试通过" if tl_ok else "  ✗ 测试失败: target_labels 不一致")
+    print("  ✓ Test passed" if tl_ok else "  ✗ Test failed: target_labels mismatch")
     print("name = TAL.fg_mask")
-    print("  ✓ 测试通过" if fg_ok else "  ✗ 测试失败: fg_mask 不一致")
+    print("  ✓ Test passed" if fg_ok else "  ✗ Test failed: fg_mask mismatch")
     return ok1 and ok2 and tl_ok and fg_ok
 
 
@@ -599,11 +541,8 @@ def test_v8_detection_loss():
 # =========================
 
 def test_v8_segmentation_loss():
-    import traceback
     set_seed()
 
-    if Ptv8SegLoss is None or Nkv8SegLoss is None:
-        return _skip("v8SegmentationLoss", "对应类未找到（PT或NK）")
 
     nc, reg_max = 80, 16
     nm, npr = 32, 32
@@ -615,8 +554,8 @@ def test_v8_segmentation_loss():
     nk_loss, err_nk = _try_instantiate(Nkv8SegLoss, model_jt)
     pt_loss, err_pt = _try_instantiate(Ptv8SegLoss, model_pt)
     
-    if nk_loss is None: return _fail("v8SegmentationLoss", f"初始化失败(NK): {err_nk}")
-    if pt_loss is None: return _fail("v8SegmentationLoss", f"初始化失败(PT): {err_pt}")
+    if nk_loss is None: return _fail("v8SegmentationLoss", f"Init failed (NK): {err_nk}")
+    if pt_loss is None: return _fail("v8SegmentationLoss", f"Init failed (PT): {err_pt}")
 
     b = 2
     ch_det = nc + reg_max * 4
@@ -649,55 +588,50 @@ def test_v8_segmentation_loss():
     preds_nk_candidates = [(feats_jt, pm_jt, proto_jt), [feats_jt, pm_jt, proto_jt], (None, [feats_jt, pm_jt, proto_jt])]
     preds_pt_candidates = [(feats_pt, pm_pt, proto_pt), [feats_pt, pm_pt, proto_pt], (None, [feats_pt, pm_pt, proto_pt])]
 
-    print("\n====== 测试 v8SegmentationLoss ======")
+    print("\n====== Testing v8SegmentationLoss ======")
     last_e = None
     for i in range(len(preds_nk_candidates)):
         try:
             print(f"--- Seg Try Format {i} ---")
             loss_nk, items_nk = nk_loss(preds_nk_candidates[i], batch_jt)
             loss_pt, items_pt = pt_loss(preds_pt_candidates[i], batch_pt)
-            
-            ok_total = compare_loss("Seg_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=10.0) 
-            
+
+            ok_total = compare_loss("Seg_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=10.0)
+
             items_nk_np = items_nk.detach().numpy()
             items_pt_np = items_pt.detach().cpu().numpy()
-            
+
             diff = np.abs(items_nk_np - items_pt_np)
             print(f"  Items NK: {items_nk_np}")
             print(f"  Items PT: {items_pt_np}")
             print(f"  Items Diff: {diff}")
-            
+
             rel_diff = diff / (np.abs(items_pt_np) + 1e-9)
             print(f"  Max Rel Diff: {np.max(rel_diff):.8f}")
 
-            if np.max(rel_diff) > 1e-4: # 允许 0.01% 的误差
-                print(f"  ✗ Items Loss 差异过大 (Rel Diff > 1e-4)")
+            if np.max(rel_diff) > 1e-4: # allow 0.01% error
+                print("  ✗ Items loss diff too large (Rel Diff > 1e-4)")
                 ok_items = False
             else:
-                print("  ✓ Items Loss 匹配")
+                print("  ✓ Items loss match")
                 ok_items = True
 
             if ok_total and ok_items:
                 return True
-                
         except Exception as e:
-            print(f"  ✗ Format {i} 崩溃:")
-            traceback.print_exc()
+            print(f"  ✗ Format {i} crashed: {e!r}")
             last_e = e
             continue
 
-    return _fail("v8SegmentationLoss", f"所有格式均失败，最后错误: {last_e}")
+    return _fail("v8SegmentationLoss", f"All formats failed, last error: {last_e}")
 
 # =========================
 # v8PoseLoss (fix reshape by probing pred formats)
 # =========================
 
 def test_v8_pose_loss():
-    import traceback
     set_seed()
 
-    if Ptv8PoseLoss is None or Nkv8PoseLoss is None:
-        return _skip("v8PoseLoss", "对应类未找到（PT或NK）")
 
     nc, reg_max = 80, 16
     nkpt, kpt_dim = 17, 3
@@ -706,8 +640,8 @@ def test_v8_pose_loss():
     model_pt = _mock_pose_model(is_pt=True,  nc=nc, reg_max=reg_max, kpt_shape=(nkpt, kpt_dim), stride=stride)
     nk_loss, err_nk = _try_instantiate(Nkv8PoseLoss, model_jt)
     pt_loss, err_pt = _try_instantiate(Ptv8PoseLoss, model_pt)
-    if nk_loss is None: return _fail("v8PoseLoss", f"初始化失败(NK): {err_nk}")
-    if pt_loss is None: return _fail("v8PoseLoss", f"初始化失败(PT): {err_pt}")
+    if nk_loss is None: return _fail("v8PoseLoss", f"Init failed (NK): {err_nk}")
+    if pt_loss is None: return _fail("v8PoseLoss", f"Init failed (PT): {err_pt}")
 
     b = 2
     ch_det = nc + reg_max * 4
@@ -735,7 +669,7 @@ def test_v8_pose_loss():
     preds_nk_candidates = [(feats_jt, pk_jt), [feats_jt, pk_jt], (None, [feats_jt, pk_jt])]
     preds_pt_candidates = [(feats_pt, pk_pt), [feats_pt, pk_pt], (None, [feats_pt, pk_pt])]
 
-    print("\n====== 测试 v8PoseLoss ======")
+    print("\n====== Testing v8PoseLoss ======")
     last_e = None
     for i in range(len(preds_nk_candidates)):
         try:
@@ -744,35 +678,33 @@ def test_v8_pose_loss():
             loss_pt, items_pt = pt_loss(preds_pt_candidates[i], batch_pt)
 
             ok_total = compare_loss("Pose_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=5.0)
-            
+
             items_nk_np = items_nk.detach().numpy()
             items_pt_np = items_pt.detach().cpu().numpy()
             diff = np.abs(items_nk_np - items_pt_np)
-            
+
             print(f"  Items NK: {items_nk_np}")
             print(f"  Items PT: {items_pt_np}")
             print(f"  Items Diff: {diff}")
-            
+
             rel_diff = diff / (np.abs(items_pt_np) + 1e-9)
             print(f"  Max Rel Diff: {np.max(rel_diff):.8f}")
-            
+
             if np.max(rel_diff) > 1e-4:
-                print("  ✗ Items Loss 差异过大 (Rel Diff > 1e-4)")
+                print("  ✗ Items loss diff too large (Rel Diff > 1e-4)")
                 ok_items = False
             else:
-                print("  ✓ Items Loss 匹配")
+                print("  ✓ Items loss match")
                 ok_items = True
 
             if ok_total and ok_items:
                 return True
-
         except Exception as e:
-            print(f"  ✗ Format {i} 崩溃:")
-            traceback.print_exc()
+            print(f"  ✗ Format {i} crashed: {e!r}")
             last_e = e
             continue
 
-    return _fail("v8PoseLoss", f"所有格式均失败，最后错误: {last_e}")
+    return _fail("v8PoseLoss", f"All formats failed, last error: {last_e}")
 
 # =========================
 # v8ClassificationLoss (fix ctor takes no args)
@@ -780,8 +712,6 @@ def test_v8_pose_loss():
 def test_v8_classification_loss():
     set_seed()
 
-    if Ptv8ClsLoss is None or Nkv8ClsLoss is None:
-        return _skip("v8ClassificationLoss", "对应类未找到（PT或NK）")
 
     # Try init with () first (your error shows NK takes no args)
     nk_loss, err_nk = _try_instantiate(Nkv8ClsLoss)
@@ -795,7 +725,7 @@ def test_v8_classification_loss():
                 return iter([jt.zeros(1)])
         nk_loss, err_nk = _try_instantiate(Nkv8ClsLoss, DummyNk())
         if nk_loss is None:
-            return _fail("v8ClassificationLoss", "初始化失败(NK): %r" % (err_nk,))
+            return _fail("v8ClassificationLoss", "Init failed (NK): %r" % (err_nk,))
 
     # PT is usually model-dependent; probe both
     class DummyPt:
@@ -809,7 +739,7 @@ def test_v8_classification_loss():
     if pt_loss is None:
         pt_loss, err_pt = _try_instantiate(Ptv8ClsLoss)
         if pt_loss is None:
-            return _fail("v8ClassificationLoss", "初始化失败(PT): %r" % (err_pt,))
+            return _fail("v8ClassificationLoss", "Init failed (PT): %r" % (err_pt,))
 
     b = 8
     nc = 1000
@@ -824,16 +754,8 @@ def test_v8_classification_loss():
     preds_nk_candidates = [jt.array(logits_np)]
     preds_pt_candidates = [torch.from_numpy(logits_np)]
 
-    try:
-        loss_nk, items_nk = nk_loss(preds_nk_candidates[0], batch_jt)
-        loss_pt, items_pt = pt_loss(preds_pt_candidates[0], batch_pt)
-    except Exception:
-        try:
-            loss_nk, items_nk = nk_loss(batch_jt, preds_nk_candidates[0])
-            loss_pt, items_pt = pt_loss(batch_pt, preds_pt_candidates[0])
-        except Exception as e:
-            return _fail("v8ClassificationLoss", "forward失败: %r" % e)
-
+    loss_nk, items_nk = nk_loss(preds_nk_candidates[0], batch_jt)
+    loss_pt, items_pt = pt_loss(preds_pt_candidates[0], batch_pt)
     ok_total = compare_loss("v8ClassificationLoss_total", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=1e-5, verbose=True)
     ok_items = compare_loss("v8ClassificationLoss_items_mean", items_nk.mean(), items_pt.mean(), threshold=1e-5)
     return ok_total and ok_items
@@ -846,8 +768,6 @@ def test_v8_classification_loss():
 def test_v8_obb_loss():
     set_seed()
 
-    if Ptv8OBBLoss is None or Nkv8OBBLoss is None:
-        return _skip("v8OBBLoss", "对应类未找到（PT或NK）")
 
     nc, reg_max = 80, 16
     stride = (8, 16, 32)
@@ -858,9 +778,9 @@ def test_v8_obb_loss():
     nk_loss, err_nk = _try_instantiate(Nkv8OBBLoss, model_jt)
     pt_loss, err_pt = _try_instantiate(Ptv8OBBLoss, model_pt)
     if nk_loss is None:
-        return _fail("v8OBBLoss", "初始化失败(NK): %r" % (err_nk,))
+        return _fail("v8OBBLoss", "Init failed (NK): %r" % (err_nk,))
     if pt_loss is None:
-        return _fail("v8OBBLoss", "初始化失败(PT): %r" % (err_pt,))
+        return _fail("v8OBBLoss", "Init failed (PT): %r" % (err_pt,))
 
     b = 2
     ch_det = nc + reg_max * 4
@@ -896,13 +816,9 @@ def test_v8_obb_loss():
     preds_nk = ([jt.array(x) for x in feats_np], jt.array(pred_angle_np))
     preds_pt = ([torch.from_numpy(x) for x in feats_np], torch.from_numpy(pred_angle_np))
 
-    try:
-        _ = nk_loss(preds_nk, batch_jt)
-        _ = pt_loss(preds_pt, batch_pt)
-    except Exception as e:
-        return _fail("v8OBBLoss", "forward失败: %r" % e)
-
-    return _skip("v8OBBLoss", "NK/PT OBB loss 归一化/实现差异导致数值尺度不一致，本测试仅校验 forward 可运行")
+    _ = nk_loss(preds_nk, batch_jt)
+    _ = pt_loss(preds_pt, batch_pt)
+    return _skip("v8OBBLoss", "NK/PT OBB loss normalization/implementation differences cause scale mismatch; this test only checks forward runs")
 
 # =========================
 # E2EDetectLoss (fix ctor: parameters() list, and probe init signatures)
@@ -911,8 +827,6 @@ def test_v8_obb_loss():
 def test_e2e_detect_loss():
     set_seed()
 
-    if PtE2EDetectLoss is None or NkE2EDetectLoss is None:
-        return _skip("E2EDetectLoss", "对应类未找到（PT或NK）")
 
     nc, reg_max = 80, 16
     stride = (8, 16, 32)
@@ -922,11 +836,11 @@ def test_e2e_detect_loss():
 
     nk_loss, err_nk = _try_instantiate(NkE2EDetectLoss, model_jt)
     if nk_loss is None:
-        return _fail("E2EDetectLoss", "初始化失败(NK): %r" % (err_nk,))
+        return _fail("E2EDetectLoss", "Init failed (NK): %r" % (err_nk,))
 
     pt_loss, err_pt = _try_instantiate(PtE2EDetectLoss, model_pt)
     if pt_loss is None:
-        return _fail("E2EDetectLoss", "初始化失败(PT): %r" % (err_pt,))
+        return _fail("E2EDetectLoss", "Init failed (PT): %r" % (err_pt,))
 
     b = 2
     ch_det = nc + reg_max * 4
@@ -975,12 +889,8 @@ def test_e2e_detect_loss():
         "bboxes": torch.from_numpy(bboxes_xywh).float(),
     }
 
-    try:
-        loss_nk, items_nk = nk_loss(preds_nk, batch_jt)
-        loss_pt, items_pt = pt_loss(preds_pt, batch_pt)
-    except Exception as e:
-        return _fail("E2EDetectLoss", "forward失败: %r" % e)
-
+    loss_nk, items_nk = nk_loss(preds_nk, batch_jt)
+    loss_pt, items_pt = pt_loss(preds_pt, batch_pt)
     ok_total = compare_loss("E2EDetectLoss_total", _to_total_loss(loss_nk), _to_total_loss(loss_pt),
                             threshold=1e-3, verbose=True)
     ok_items = compare_loss("E2EDetectLoss_items_mean", items_nk.mean(), items_pt.mean(), threshold=1e-3)
@@ -992,12 +902,9 @@ def test_e2e_detect_loss():
 # =========================
 
 def test_v8_obb_loss_aligned():
-    import traceback
     set_seed()
-    print("\n====== 测试 v8OBBLoss (强制对齐 Assigner) ======")
+    print("\n====== Testing v8OBBLoss (forced aligned Assigner) ======")
 
-    if Ptv8OBBLoss is None or Nkv8OBBLoss is None:
-        return _skip("v8OBBLoss", "对应类未找到")
 
     nc, reg_max = 80, 16
     stride = (8, 16, 32)
@@ -1061,32 +968,26 @@ def test_v8_obb_loss_aligned():
     preds_nk = ([jt.array(f) for f in feats_np], jt.array(pred_angle_np))
     preds_pt = ([torch.from_numpy(f) for f in feats_np], torch.from_numpy(pred_angle_np))
 
-    try:
-        loss_nk, items_nk = nk_loss(preds_nk, batch_jt)
-        loss_pt, items_pt = pt_loss(preds_pt, batch_pt)
+    loss_nk, items_nk = nk_loss(preds_nk, batch_jt)
+    loss_pt, items_pt = pt_loss(preds_pt, batch_pt)
 
-        ok_total = compare_loss("OBB_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=5.0)
-        
-        items_nk_np = items_nk.detach().numpy()
-        items_pt_np = items_pt.detach().cpu().numpy()
-        diff = np.abs(items_nk_np - items_pt_np)
-        
-        print(f"  Items NK: {items_nk_np}")
-        print(f"  Items PT: {items_pt_np}")
-        print(f"  Diff:     {diff}")
-        rel_diff = diff / (np.abs(items_pt_np) + 1e-9)
-        print(f"  Max Rel Diff: {np.max(rel_diff):.8f}")
-        if np.max(rel_diff) > 1e-4:
-             print("  ✗ Items Loss 差异较大 (Rel Diff > 0.01%)")
-             return False
-        
-        print("  ✓ Items Loss 匹配 (Mock Assigner 模式)")
-        return ok_total
-
-    except Exception as e:
-        print("  ✗ OBB 测试崩溃:")
-        traceback.print_exc()
-        return False
+    ok_total = compare_loss("OBB_Total_Loss", _to_total_loss(loss_nk), _to_total_loss(loss_pt), threshold=5.0)
+    
+    items_nk_np = items_nk.detach().numpy()
+    items_pt_np = items_pt.detach().cpu().numpy()
+    diff = np.abs(items_nk_np - items_pt_np)
+    
+    print(f"  Items NK: {items_nk_np}")
+    print(f"  Items PT: {items_pt_np}")
+    print(f"  Diff:     {diff}")
+    rel_diff = diff / (np.abs(items_pt_np) + 1e-9)
+    print(f"  Max Rel Diff: {np.max(rel_diff):.8f}")
+    if np.max(rel_diff) > 1e-4:
+         print("  ✗ Items loss diff large (Rel Diff > 0.01%)")
+         return False
+    
+    print("  ✓ Items loss match (Mock Assigner mode)")
+    return ok_total
 
 def main():
     tests = [
@@ -1113,7 +1014,7 @@ def main():
         except Exception as e:
             ok = False
             print("name = ", name)
-            print("  ✗ 测试失败: 运行时异常:", repr(e))
+            print("  ✗ Test failed: runtime exception:", repr(e))
         results.append((name, ok))
 
     all_passed = all(ok for _, ok in results)
