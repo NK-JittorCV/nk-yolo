@@ -13,7 +13,7 @@ except Exception:
 
 def logit(x, eps=1e-6):
     """Implementation of inverse sigmoid (logit) for Jittor."""
-    x = x.clamp(min=eps, max=1.0 - eps)
+    x = x.clamp(min_v=eps, max_v=1.0 - eps)  # jittor clamp uses min_v/max_v
     return jt.log(x / (1.0 - x))
 
 class HungarianMatcher(nn.Module):
