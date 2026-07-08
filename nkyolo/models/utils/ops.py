@@ -1,10 +1,20 @@
 import jittor as jt
 from jittor import nn
 from scipy.optimize import linear_sum_assignment
+import numpy as np
 
 from nkyolo.utils.metrics import bbox_iou
 from nkyolo.utils.ops import xywh2xyxy, xyxy2xywh
 
+try:
+    _ = linear_sum_assignment(np.zeros((1, 1)))
+except Exception:
+    pass
+
+def logit(x, eps=1e-6):
+    """Implementation of inverse sigmoid (logit) for Jittor."""
+    x = x.clamp(min=eps, max=1.0 - eps)
+    return jt.log(x / (1.0 - x))
 
 class HungarianMatcher(nn.Module):
     """
@@ -40,7 +50,7 @@ class HungarianMatcher(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
 
-    def forward(self, pred_bboxes, pred_scores, gt_bboxes, gt_cls, gt_groups, masks=None, gt_mask=None):
+    def execute(self, pred_bboxes, pred_scores, gt_bboxes, gt_cls, gt_groups, masks=None, gt_mask=None):
         """
         Forward pass for HungarianMatcher. This function computes costs based on prediction and ground truth
         (classification cost, L1 cost between boxes and GIoU cost between boxes) and finds the optimal matching between
@@ -68,7 +78,8 @@ class HungarianMatcher(nn.Module):
         bs, nq, nc = pred_scores.shape
 
         if sum(gt_groups) == 0:
-            return [(jt.tensor([], dtype=jt.int64), jt.tensor([], dtype=jt.int64)) for _ in range(bs)]
+            return [(jt.zeros([0], dtype=jt.int32), jt.zeros([0], dtype=jt.int32)) for _ in range(bs)]
+            # return [(jt.tensor([], dtype=jt.int64), jt.tensor([], dtype=jt.int64)) for _ in range(bs)]
 
 
         # We flatten to compute the cost matrices in a batch
@@ -104,15 +115,50 @@ class HungarianMatcher(nn.Module):
             C += self._cost_mask(bs, gt_groups, masks, gt_mask)
 
         # Set invalid values (NaNs and infinities) to 0 (fixes ValueError: matrix contains invalid numeric entries)
-        C[C.isnan() | C.isinf()] = 0.0
+        # C[C.isnan() | C.isinf()] = 0.0
+        C[jt.isnan(C)] = 0.0
+        C[jt.isinf(C)] = 0.0
+        # C = C.view(bs, nq, -1).cpu()
+        # # C_splits = C.split(gt_groups, dim=-1)
+        # indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(gt_groups, -1))]
+        # gt_groups = jt.array([0, *gt_groups[:-1]]).cumsum(0)  # (idx for queries, idx for gt)
+        # return [
+        #     (jt.tensor(i, dtype=jt.int64), jt.tensor(j, dtype=jt.int64) + gt_groups[k])
+        #     for k, (i, j) in enumerate(indices)
+        # ]
+        C = C.view(bs, nq, -1)
 
-        C = C.view(bs, nq, -1).cpu()
-        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(gt_groups, -1))]
-        gt_groups = jt.array([0, *gt_groups[:-1]]).cumsum(0)  # (idx for queries, idx for gt)
+        indices = []
+        curr = 0
+        gt_groups_cumsum = np.cumsum([0] + list(gt_groups)[:-1]).astype(np.int32)
+        C_numpy = C.numpy()
+        for i, num_gt in enumerate(gt_groups):
+            num_gt = int(num_gt)
+            
+            if num_gt == 0:
+                indices.append((np.array([], dtype=np.int32), np.array([], dtype=np.int32)))
+                continue
+            cost_matrix = C_numpy[i, :, curr : curr + num_gt]
+            # c_matrix = C[i, :, curr : curr + num_gt]
+            
+            # cost_matrix = c_matrix.numpy().copy()
+            
+            ind_i, ind_j = linear_sum_assignment(cost_matrix)
+            indices.append((ind_i.astype(np.int32), ind_j.astype(np.int32)))
+            # indices.append((ind_i, ind_j))
+            
+            curr += num_gt
+        # gt_groups_cumsum = np.cumsum([0] + list(gt_groups)[:-1])
+
         return [
-            (jt.tensor(i, dtype=jt.int64), jt.tensor(j, dtype=jt.int64) + gt_groups[k])
+            (jt.array(i, dtype=jt.int32), jt.array(j, dtype=jt.int32) + gt_groups_cumsum[k])
             for k, (i, j) in enumerate(indices)
         ]
+        
+        # return [
+        #     (jt.array(i, dtype=jt.int64), jt.array(j, dtype=jt.int64) + gt_groups_cumsum[k])
+        #     for k, (i, j) in enumerate(indices)
+        # ]
 
     # This function is for future RT-DETR Segment models
     # def _cost_mask(self, bs, num_gts, masks=None, gt_mask=None):
@@ -187,26 +233,32 @@ def get_cdn_group(
     b_idx = batch["batch_idx"]
 
     # Each group has positive and negative queries.
-    dn_cls = gt_cls.repeat(2 * num_group)  # (2*num_group*bs*num, )
-    dn_bbox = gt_bbox.repeat(2 * num_group, 1)  # 2*num_group*bs*num, 4
-    dn_b_idx = b_idx.repeat(2 * num_group).view(-1)  # (2*num_group*bs*num, )
+    dn_cls = gt_cls.repeat([2 * num_group])  # (2*num_group*bs*num, )
+    dn_bbox = gt_bbox.repeat([2 * num_group, 1])  # 2*num_group*bs*num, 4
+    dn_b_idx = b_idx.repeat([2 * num_group]).view(-1)  # (2*num_group*bs*num, )
 
     # Positive and negative mask
     # (bs*num*num_group, ), the second total_num*num_group part as negative samples
-    neg_idx = jt.arange(total_num * num_group, dtype=jt.int64, device=gt_bbox.device) + num_group * total_num
+    neg_idx = jt.arange(total_num * num_group, dtype=jt.int64) + num_group * total_num
 
     if cls_noise_ratio > 0:
         # Half of bbox prob
         mask = jt.rand(dn_cls.shape) < (cls_noise_ratio * 0.5)
-        idx = jt.nonzero(mask).squeeze(-1)
+        # idx = jt.nonzero(mask).squeeze(-1)
+        idx = jt.nonzero(mask)
+        if idx.shape[0] > 0:
+            if idx.ndim > 1:
+                idx = idx.squeeze(-1)
+            new_label = jt.randint(0, num_classes, idx.shape, dtype=dn_cls.dtype)
+            dn_cls[idx] = new_label
         # Randomly put a new one here
-        new_label = jt.randint(0, num_classes, idx.shape, dtype=dn_cls.dtype, device=dn_cls.device)
-        dn_cls[idx] = new_label
+        # new_label = jt.randint(0, num_classes, idx.shape, dtype=dn_cls.dtype)
+        # dn_cls[idx] = new_label
 
     if box_noise_scale > 0:
         known_bbox = xywh2xyxy(dn_bbox)
 
-        diff = (dn_bbox[..., 2:] * 0.5).repeat(1, 2) * box_noise_scale  # 2*num_group*bs*num, 4
+        diff = (dn_bbox[..., 2:] * 0.5).repeat([1, 2]) * box_noise_scale  # 2*num_group*bs*num, 4
 
         rand_sign = jt.randint(0, 2, dn_bbox.shape) * 2.0 - 1.0
         rand_part = jt.rand_like(dn_bbox)
@@ -215,15 +267,15 @@ def get_cdn_group(
         known_bbox += rand_part * diff
         known_bbox.clip_(min=0.0, max=1.0)
         dn_bbox = xyxy2xywh(known_bbox)
-        # TODO: jt.logit is not available
-        dn_bbox = jt.logit(dn_bbox, eps=1e-6)  # inverse sigmoid
+        # jt.logit does not exist in jittor; use the local logit() helper
+        dn_bbox = logit(dn_bbox, eps=1e-6)  # inverse sigmoid
 
 
     num_dn = int(max_nums * 2 * num_group)  # total denoising queries
     # class_embed = torch.cat([class_embed, torch.zeros([1, class_embed.shape[-1]], device=class_embed.device)])
     dn_cls_embed = class_embed[dn_cls]  # bs*num * 2 * num_group, 256
-    padding_cls = jt.zeros(bs, num_dn, dn_cls_embed.shape[-1], device=gt_cls.device)
-    padding_bbox = jt.zeros(bs, num_dn, 4, device=gt_bbox.device)
+    padding_cls = jt.zeros(bs, num_dn, dn_cls_embed.shape[-1])
+    padding_bbox = jt.zeros(bs, num_dn, 4)
 
     map_indices = jt.concat([jt.arange(num, dtype=jt.int64) for num in gt_groups])
     pos_idx = jt.stack([map_indices + max_nums * i for i in range(num_group)], dim=0)
@@ -246,15 +298,31 @@ def get_cdn_group(
         else:
             attn_mask[max_nums * 2 * i : max_nums * 2 * (i + 1), max_nums * 2 * (i + 1) : num_dn] = True
             attn_mask[max_nums * 2 * i : max_nums * 2 * (i + 1), : max_nums * 2 * i] = True
+    # dn_meta = {
+    #     "dn_pos_idx": [p.reshape(-1) for p in pos_idx.cpu().split(list(gt_groups), dim=1)],
+    #     "dn_num_group": num_group,
+    #     "dn_num_split": [num_dn, num_queries],
+    # }
+    
+    dn_pos_idx_list = []
+    pos_idx_np = pos_idx.numpy() 
+    curr = 0
+    for num_gt in gt_groups:
+        if num_gt > 0:
+            col = pos_idx_np[:, curr : curr + num_gt]
+            dn_pos_idx_list.append(jt.array(col.flatten()))
+            curr += num_gt
+        else:
+            dn_pos_idx_list.append(jt.zeros([0], dtype=jt.int64))
     dn_meta = {
-        "dn_pos_idx": [p.reshape(-1) for p in pos_idx.cpu().split(list(gt_groups), dim=1)],
+        "dn_pos_idx": dn_pos_idx_list,
         "dn_num_group": num_group,
         "dn_num_split": [num_dn, num_queries],
     }
-
+    
     return (
-        padding_cls.to(class_embed.device),
-        padding_bbox.to(class_embed.device),
-        attn_mask.to(class_embed.device),
+        padding_cls,
+        padding_bbox,
+        attn_mask,
         dn_meta,
     )
