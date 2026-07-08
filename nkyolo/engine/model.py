@@ -659,7 +659,21 @@ class Model(nn.Module):
             ckpt = self.trainer.best if self.trainer.best.exists() else self.trainer.last
             self.model, _ = attempt_load_one_weight(ckpt)
             self.overrides = self.model.args
-            self.metrics = getattr(self.trainer.validator, "metrics", None)  # TODO: no metrics returned by DDP
+            # Single-process: validator.metrics reflects the in-process final
+            # eval. DDP: the final eval ran in an isolated subprocess, so fall
+            # back to trainer.metrics (rank 0) or the metrics file it wrote
+            # (parent process that spawned mpirun).
+            self.metrics = getattr(self.trainer.validator, "metrics", None) or self.trainer.metrics
+            if self.metrics is None:
+                metrics_file = Path(self.trainer.save_dir) / "final_eval_metrics.json"
+                if metrics_file.exists():
+                    import json
+
+                    with open(metrics_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        data.pop("fitness", None)
+                        self.metrics = data
         return self.metrics
 
     def _apply(self, fn) -> "Model":

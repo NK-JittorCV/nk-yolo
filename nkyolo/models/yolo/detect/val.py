@@ -118,7 +118,7 @@ class DetectionValidator(BaseValidator):
             self.args.conf,
             self.args.iou,
             labels=self.lb,
-            multi_label=self.args.multi_label,
+            multi_label=True,  # mAP evaluation convention (ultralytics validator hardcodes True)
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
             max_nms=max_nms,
@@ -135,14 +135,17 @@ class DetectionValidator(BaseValidator):
         ratio_pad = batch["ratio_pad"][si]
         if len(cls):
             bbox = ops.xywh2xyxy(bbox) * jt.array(list(imgsz))[[1, 0, 1, 0]]  # target boxes
-
-            ops.scale_boxes(imgsz, bbox, ori_shape, ratio_pad=ratio_pad)  # native-space labels
+            # NOTE: unlike torch, jittor slicing copies — always use the return
+            # value of scale_boxes instead of relying on in-place mutation.
+            bbox = ops.scale_boxes(imgsz, bbox, ori_shape, ratio_pad=ratio_pad)  # native-space labels
         return {"cls": cls, "bbox": bbox, "ori_shape": ori_shape, "imgsz": imgsz, "ratio_pad": ratio_pad}
 
     def _prepare_pred(self, pred, pbatch):
         """Prepares a batch of images and annotations for validation."""
         predn = pred.clone()
-        ops.scale_boxes(
+        # jittor: predn[:, :4] is a copy, not a view — in-place mutation inside
+        # scale_boxes is lost unless assigned back (torch semantics differ).
+        predn[:, :4] = ops.scale_boxes(
             pbatch["imgsz"], predn[:, :4], pbatch["ori_shape"], ratio_pad=pbatch["ratio_pad"]
         )  # native-space pred
         return predn

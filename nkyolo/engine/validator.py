@@ -23,6 +23,7 @@ Usage - formats:
 
 import gc
 import json
+import os
 import time
 from pathlib import Path
 
@@ -32,11 +33,11 @@ import jittor as jt
 from nkyolo.cfg import get_cfg, get_save_dir
 from nkyolo.data.utils import check_cls_dataset, check_det_dataset
 from nkyolo.nn.autobackend import AutoBackend
-from nkyolo.utils import LOGGER, TQDM, callbacks, colorstr, emojis
+from nkyolo.utils import LOGGER, TQDM, as_bool, callbacks, colorstr, emojis
 from nkyolo.utils.checks import check_imgsz
 from nkyolo.utils.ops import Profile
 
-from nkyolo.utils.jittor_utils import autocast, de_parallel
+from nkyolo.utils.jittor_utils import autocast, de_parallel, select_device
 
 
 class BaseValidator:
@@ -109,15 +110,6 @@ class BaseValidator:
 
     def __call__(self, trainer=None, model=None):
         """Executes validation process, running inference on dataloader and computing performance metrics."""
-        def _as_bool(val):
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, (int, float)):
-                return val != 0
-            if isinstance(val, str):
-                return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
-            return bool(val)
-
         self.training = trainer is not None
         augment = self.args.augment and (not self.training)
         if self.training:
@@ -127,7 +119,7 @@ class BaseValidator:
             use_cuda = jt.has_cuda and "cuda" in str(self.device).lower()
             self.amp = bool(val_amp and use_cuda)
             self.args.half = False
-            self.compute_loss = _as_bool(getattr(self.args, "val_loss", False))
+            self.compute_loss = as_bool(getattr(self.args, "val_loss", False))
             ema_model = getattr(trainer.ema, "ema", None) if trainer.ema else None
             model = ema_model or trainer.model_base or trainer.model
             self.model = model
@@ -144,22 +136,37 @@ class BaseValidator:
             if str(self.args.model).endswith(".yaml") and (model is None or str(model).endswith(".yaml")):
                 LOGGER.warning("WARNING ⚠️ validating an untrained model YAML will result in 0 mAP.")
             callbacks.add_integration_callbacks(self)
+            # Normalize standalone validation device to a concrete runtime target.
+            # Saved train args may contain values like "0" or "0,1", which are not
+            # valid Jittor tensor destinations for batch.to(...).
+            # batch=0 skips select_device's multi-GPU divisibility check — it only
+            # applies to DDP training, not this single-process validation (saved
+            # train args may carry device="0,1" while validating with batch=1).
+            # select_device mutates CUDA_VISIBLE_DEVICES as a side effect; restore
+            # it so validating never remaps GPUs for the rest of the process.
+            _cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+            self.device = select_device(getattr(self.args, "device", ""), 0, verbose=False)
+            if _cvd is None:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = _cvd
             val_amp = bool(getattr(self.args, "val_amp", False))
-            device_arg = str(getattr(self.args, "device", "")).lower().strip()
-            use_cuda = jt.has_cuda and device_arg not in {"cpu", "mps"}
+            use_cuda = self.device == "cuda"  # select_device returns only "cpu" or "cuda"
             self.amp = bool(val_amp and use_cuda)
-            # Keep FP16 option for standalone/subprocess validation speedup.
-            self.args.half = bool(getattr(self.args, "half", False)) and device_arg not in {"cpu", "mps"}
+            # FP16 validation when either flag asks for it: `half` (the standard
+            # arg, e.g. model.val(half=True)) or `val_half` (train-time override).
+            self.args.half = bool(
+                getattr(self.args, "half", False) or getattr(self.args, "val_half", False)
+            ) and use_cuda
             model = AutoBackend(
                 weights=model or self.args.model,
-                # device=select_device(self.args.device, self.args.batch),
+                device=self.device,
                 dnn=self.args.dnn,
                 data=self.args.data,
-                fp16=bool(getattr(self.args, "half", False)),
-                verbose=_as_bool(getattr(self.args, "verbose", True)),
+                fp16=self.args.half,  # assigned as a bool just above
+                verbose=as_bool(getattr(self.args, "verbose", True)),
             )
             self.model = model
-            self.device = self.args.device# model.device  # update device
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
             if engine:
@@ -202,7 +209,7 @@ class BaseValidator:
             Profile(device=self.device),
         )
         bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
-        show_val_summary = _as_bool(getattr(self.args, "verbose", True))
+        show_val_summary = as_bool(getattr(self.args, "verbose", True))
         self.init_metrics(de_parallel(model))
         self.jdict = []  # empty before each val
         

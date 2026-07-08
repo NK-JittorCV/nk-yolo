@@ -263,11 +263,16 @@ def check_latest_pypi_version(package_name="nkyolo"):
         (str): The latest version of the package.
     """
     requests.packages.urllib3.disable_warnings()  # Disable the InsecureRequestWarning
-    response = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=3)
-    if response.status_code == 200:
-        info = response.json().get("info", {})
-        version = info.get("version", "")
-        return version if isinstance(version, str) else ""
+    try:
+        response = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=3)
+        if response.status_code == 200:
+            info = response.json().get("info", {})
+            version = info.get("version", "")
+            return version if isinstance(version, str) else ""
+    except Exception:
+        # A version check must never break training/validation (flaky or
+        # offline networks time out here).
+        pass
     return ""
 def check_pip_update_available():
     """

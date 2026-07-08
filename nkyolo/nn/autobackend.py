@@ -207,6 +207,13 @@ class AutoBackend(nn.Module):
                 f"See https://docs.jittoryolo.com/modes/predict for help."
             )
 
+        # Convert model weights to match the inference dtype: execute() feeds
+        # FP16 inputs when fp16 is set, and mixed fp16-input/fp32-weight convs
+        # have no cudnn algorithm (hard failure in algorithm selection).
+        # NOTE: jittor Modules expose float32(), not torch's float().
+        if model is not None and hasattr(model, "half"):
+            model.half() if fp16 else model.float32()
+
         # Load external metadata YAML
         if isinstance(metadata, (str, Path)) and Path(metadata).exists():
             metadata = yaml_load(metadata)
