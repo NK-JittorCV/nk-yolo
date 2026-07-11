@@ -207,6 +207,12 @@ class AutoBackend(nn.Module):
                 f"See https://docs.jittoryolo.com/modes/predict for help."
             )
 
+        # Put the model in inference mode. jittor Modules default to is_train=True,
+        # so without this the Detect head returns the raw training-format feature
+        # maps instead of decoded predictions and NMS fails on a 4D tensor.
+        if model is not None and hasattr(model, "eval"):
+            model.eval()
+
         # Convert model weights to match the inference dtype: execute() feeds
         # FP16 inputs when fp16 is set, and mixed fp16-input/fp32-weight convs
         # have no cudnn algorithm (hard failure in algorithm selection).

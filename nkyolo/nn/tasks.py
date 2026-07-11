@@ -1244,6 +1244,12 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
+        # jittor's nn.Upsample is Upsample(scale_factor, mode, ...), but torch /
+        # ultralytics yamls (e.g. the config embedded in a .pt checkpoint) pass the
+        # torch signature [size, scale_factor, mode]. Drop the leading size arg so
+        # scale_factor lands correctly (YOLO always upsamples by scale_factor).
+        if getattr(m, "__name__", "") == "Upsample" and len(args) == 3:
+            args = args[1:]
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in {
             Classify,
